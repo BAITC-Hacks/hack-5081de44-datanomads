@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ "${PULSE_CONFIRM_RESET:-}" != "1" ]]; then
+  cat >&2 <<'EOF'
+This removes the local Pulse PostgreSQL and Qdrant volumes.
+Re-run with PULSE_CONFIRM_RESET=1 to continue.
+EOF
+  exit 2
+fi
+
+compose=(docker compose --env-file "${PULSE_ENV_FILE:-.env}" -f docker-compose.yml)
+"${compose[@]}" --profile demo down --volumes --remove-orphans
+"${compose[@]}" --profile demo up --detach --build
+
+echo "Pulse 109 demo stack recreated. Run scripts/smoke when /readyz is ready."

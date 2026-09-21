@@ -1,0 +1,487 @@
+openapi: 3.0.3
+info:
+  title: Pulse 109 Core API
+  version: 1.0.0
+  description: >-
+    Public application contract. Core API validates access and orchestrates
+    PostgreSQL, Qdrant and the internal ML service. It never represents a
+    write to the official 109 system.
+servers:
+  - url: http://localhost:8080
+    description: Local Nginx gateway
+tags:
+  - name: system
+  - name: assist
+  - name: tickets
+  - name: analytics
+  - name: alerts
+  - name: forecast
+  - name: learning
+  - name: models
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Process liveness
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+  /readyz:
+    get:
+      tags: [system]
+      summary: Dependency readiness
+      responses:
+        '200':
+          description: Required dependencies are ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
+        '503':
+          description: Dependency is unavailable
+  /api/v1/assist/preview:
+    post:
+      tags: [assist]
+      summary: Build an operator assist preview
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssistPreviewRequest' }
+      responses:
+        '200':
+          description: Prediction and retrieval candidates
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssistPreviewResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/DependencyUnavailable' }
+  /api/v1/tickets/{external_ticket_id}/pulse-state:
+    put:
+      tags: [tickets]
+      summary: Store a human-confirmed Pulse decision
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TicketId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PulseStateRequest' }
+      responses:
+        '200':
+          description: Pulse state stored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StoredResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tickets/{external_ticket_id}/relation-feedback:
+    post:
+      tags: [tickets]
+      summary: Confirm or reject duplicate/repeat relation candidates
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/TicketId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RelationFeedbackRequest' }
+      responses:
+        '200':
+          description: Feedback stored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StoredResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/analytics/overview:
+    get:
+      tags: [analytics]
+      summary: Situation Center overview
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/RegionIdQuery'
+        - $ref: '#/components/parameters/FromQuery'
+        - $ref: '#/components/parameters/ToQuery'
+      responses:
+        '200':
+          description: Aggregated analytics slice
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsOverview' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/analytics/query:
+    post:
+      tags: [analytics]
+      summary: Execute a validated QueryIntent
+      description: LLM, if used, produces intent only; Core API validates allow-listed parameters and executes parameterized queries.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryIntent' }
+      responses:
+        '200':
+          description: Number, table and chart-ready series
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsQueryResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/alerts:
+    get:
+      tags: [alerts]
+      summary: List active alerts
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Alert list
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Alert' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/events:
+    get:
+      tags: [analytics]
+      summary: Server-sent updates
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/forecast:
+    get:
+      tags: [forecast]
+      summary: Forecast 30, 60 and 90 days
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: horizon
+          in: query
+          schema: { type: integer, enum: [30, 60, 90] }
+        - $ref: '#/components/parameters/RegionIdQuery'
+        - name: topic_id
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Forecast and expected peaks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ForecastResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/analytics/export.pdf:
+    get:
+      tags: [analytics]
+      summary: Export current analytics slice as PDF
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: PDF report
+          content: { application/pdf: { schema: { type: string, format: binary } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/analytics/export.xlsx:
+    get:
+      tags: [analytics]
+      summary: Export current analytics slice as XLSX
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: XLSX report
+          content: { application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: { schema: { type: string, format: binary } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/learning/cycle:
+    get:
+      tags: [learning]
+      summary: Get current controlled learning cycle
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Learning cycle state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LearningCycle' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/learning/cycle/close:
+    post:
+      tags: [learning]
+      summary: Close COLLECT and queue candidate training
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cycle_id: { type: string }
+      responses:
+        '202':
+          description: Training job queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StoredResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/learning/candidate/evaluation:
+    get:
+      tags: [learning]
+      summary: Read candidate evaluation
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Offline and shadow metrics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CandidateEvaluation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/learning/candidate/promote:
+    post:
+      tags: [learning]
+      summary: Human approval of a candidate
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelDecisionRequest' }
+      responses:
+        '200':
+          description: Candidate promoted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StoredResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/learning/candidate/reject:
+    post:
+      tags: [learning]
+      summary: Human rejection of a candidate
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelDecisionRequest' }
+      responses:
+        '200':
+          description: Candidate rejected; production is unchanged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StoredResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/models:
+    get:
+      tags: [models]
+      summary: List model versions and statuses
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Model registry entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ModelVersion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    TicketId:
+      name: external_ticket_id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    RegionIdQuery:
+      name: region_id
+      in: query
+      schema: { type: string }
+    FromQuery:
+      name: from
+      in: query
+      schema: { type: string, format: date-time }
+    ToQuery:
+      name: to
+      in: query
+      schema: { type: string, format: date-time }
+  responses:
+    BadRequest:
+      description: Invalid request
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Unauthorized:
+      description: Authentication required
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Forbidden:
+      description: Role is not allowed
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Conflict:
+      description: State transition is not allowed
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    DependencyUnavailable:
+      description: ML/Qdrant dependency unavailable
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error_code, message, request_id]
+      properties:
+        error_code: { type: string }
+        message: { type: string }
+        request_id: { type: string }
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, ready, degraded] }
+        dependencies: { type: object, additionalProperties: { type: string } }
+    AssistPreviewRequest:
+      type: object
+      required: [external_ticket_id, text, region_id]
+      properties:
+        external_ticket_id: { type: string }
+        text: { type: string, minLength: 1, maxLength: 10000 }
+        region_id: { type: string }
+        available_metadata: { type: object, additionalProperties: true }
+    AssistPreviewResponse:
+      type: object
+      required: [language, classification, routing, priority, needs_review, model_versions]
+      properties:
+        language: { type: string, enum: [ru, kz, unknown] }
+        classification: { $ref: '#/components/schemas/Prediction' }
+        routing: { type: object, additionalProperties: true }
+        priority: { type: object, additionalProperties: true }
+        similar_tickets: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
+        duplicate_candidate: { $ref: '#/components/schemas/SimilarTicket' }
+        repeat_candidate: { $ref: '#/components/schemas/SimilarTicket' }
+        needs_review: { type: boolean }
+        model_versions: { type: object, additionalProperties: { type: string } }
+        latency_ms: { type: number }
+    Prediction:
+      type: object
+      required: [label, confidence]
+      properties:
+        label: { type: string }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        alternatives: { type: array, items: { type: object, additionalProperties: true } }
+    SimilarTicket:
+      type: object
+      required: [ticket_id, score]
+      properties:
+        ticket_id: { type: string }
+        score: { type: number }
+        topic_id: { type: string }
+        region_id: { type: string }
+        permitted_fields: { type: object, additionalProperties: true }
+    PulseStateRequest:
+      type: object
+      required: [operator_confirmed_decision]
+      properties:
+        operator_confirmed_decision: { type: object, additionalProperties: true }
+        feedback: { type: object, additionalProperties: true }
+    RelationFeedbackRequest:
+      type: object
+      required: [relation, decision]
+      properties:
+        relation: { type: string, enum: [duplicate, repeat] }
+        decision: { type: string, enum: [confirmed, rejected] }
+        related_ticket_id: { type: string }
+    StoredResponse:
+      type: object
+      required: [status, request_id]
+      properties:
+        status: { type: string }
+        request_id: { type: string }
+        id: { type: string }
+    AnalyticsOverview:
+      type: object
+      properties:
+        total_tickets: { type: integer }
+        by_region: { type: array, items: { type: object, additionalProperties: true } }
+        by_topic: { type: array, items: { type: object, additionalProperties: true } }
+        series: { type: array, items: { type: object, additionalProperties: true } }
+    QueryIntent:
+      type: object
+      required: [intent, filters]
+      properties:
+        intent: { type: string, enum: [count, trend, compare, top_topics, forecast] }
+        filters: { type: object, additionalProperties: true }
+        group_by: { type: string, enum: [region, topic, day, week, month] }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+    AnalyticsQueryResponse:
+      type: object
+      required: [number, table, series]
+      properties:
+        number: { type: number }
+        table: { type: array, items: { type: object, additionalProperties: true } }
+        series: { type: array, items: { type: object, additionalProperties: true } }
+        interpreted_filters: { type: object, additionalProperties: true }
+    Alert:
+      type: object
+      required: [alert_id, status, severity]
+      properties:
+        alert_id: { type: string }
+        status: { type: string, enum: [open, acknowledged, resolved] }
+        severity: { type: string, enum: [info, warning, critical] }
+        region_id: { type: string }
+        topic_id: { type: string }
+        metric: { type: string }
+        observed_value: { type: number }
+        baseline_value: { type: number }
+    ForecastResponse:
+      type: object
+      properties:
+        horizon_days: { type: integer }
+        model_version: { type: string }
+        points: { type: array, items: { type: object, additionalProperties: true } }
+        expected_peaks: { type: array, items: { type: object, additionalProperties: true } }
+    LearningCycle:
+      type: object
+      required: [cycle_id, state, production_model_version]
+      properties:
+        cycle_id: { type: string }
+        state: { type: string, enum: [COLLECT, TRAINING, EVALUATE, DECISION, PROMOTED, REJECTED] }
+        production_model_version: { type: string }
+        candidate_dataset_version: { type: string }
+        candidate_model_version: { type: string }
+        min_feedback_count: { type: integer }
+    CandidateEvaluation:
+      type: object
+      properties:
+        cycle_id: { type: string }
+        offline_metrics: { type: object, additionalProperties: true }
+        shadow_metrics: { type: object, additionalProperties: true }
+        critical_regressions: { type: array, items: { type: string } }
+        sample_size: { type: integer }
+        decision: { type: string }
+    ModelDecisionRequest:
+      type: object
+      required: [cycle_id, candidate_model_version, reason]
+      properties:
+        cycle_id: { type: string }
+        candidate_model_version: { type: string }
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+    ModelVersion:
+      type: object
+      required: [model_version, model_family, status]
+      properties:
+        model_version: { type: string }
+        model_family: { type: string, enum: [classifier, embedder, forecast] }
+        dataset_version: { type: string }
+        artifact_checksum: { type: string }
+        status: { type: string, enum: [candidate, production, rejected, archived] }

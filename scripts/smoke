@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+BASE_URL="${PULSE_BASE_URL:-http://127.0.0.1:${PULSE_HTTP_PORT:-8080}}"
+CURL=(curl --fail --silent --show-error --retry 12 --retry-delay 1 --retry-connrefused)
+
+check_get() {
+  local path="$1"
+  echo "GET ${BASE_URL}${path}"
+  "${CURL[@]}" --max-time 10 "${BASE_URL}${path}" >/dev/null
+}
+
+check_get /healthz
+check_get /readyz
+check_get /api/v1/analytics/overview
+
+echo "POST ${BASE_URL}/api/v1/assist/preview"
+"${CURL[@]}" --max-time 20 \
+  -H 'Content-Type: application/json' \
+  -d '{"external_ticket_id":"demo-smoke-001","text":"Не работает освещение во дворе","region_id":"R01","available_metadata":{}}' \
+  "${BASE_URL}/api/v1/assist/preview" >/dev/null
+
+echo "Pulse 109 smoke checks passed."
