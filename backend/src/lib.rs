@@ -1,19 +1,19 @@
 //! Pulse 109 Core API.
 //!
-//! The default storage is an in-memory deterministic demo store.  The store is
-//! deliberately kept behind a small interface (`AppState`) so the HTTP
-//! contract can be exercised locally before wiring the same handlers to the
-//! PostgreSQL repository used in production.
+//! The explicit `PULSE_STORAGE=memory` mode is an in-memory deterministic
+//! fixture for tests and local UI work.  Compose and production use the
+//! PostgreSQL repository in `pg.rs`, which calls the ML and Qdrant services.
 
 use axum::{
+    body::Body,
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -25,6 +25,9 @@ use std::{
 use thiserror::Error;
 use tower_http::cors::CorsLayer;
 use tracing::info;
+
+mod pg;
+use pg::PgRepository;
 
 const SERVICE_NAME: &str = "pulse109-core";
 const API_VERSION: &str = "0.1.0";
@@ -38,6 +41,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub dev_auth: bool,
+    pub storage: String,
 }
 
 impl Default for Config {
@@ -46,6 +50,7 @@ impl Default for Config {
             host: "0.0.0.0".to_owned(),
             port: 8080,
             dev_auth: true,
+            storage: "memory".to_owned(),
         }
     }
 }
@@ -53,6 +58,16 @@ impl Default for Config {
 impl Config {
     pub fn from_env() -> Self {
         let defaults = Self::default();
+        let storage = env::var("PULSE_STORAGE").unwrap_or_else(|_| {
+            if env::var("PULSE_ENV")
+                .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "test" | "unit"))
+                .unwrap_or(false)
+            {
+                "postgres".to_owned()
+            } else {
+                defaults.storage.clone()
+            }
+        });
         Self {
             host: env::var("PULSE_HOST").unwrap_or(defaults.host),
             port: env::var("PULSE_PORT")
@@ -62,6 +77,7 @@ impl Config {
             dev_auth: env::var("PULSE_DEV_AUTH")
                 .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
                 .unwrap_or(defaults.dev_auth),
+            storage,
         }
     }
 }
@@ -71,6 +87,7 @@ impl Config {
 pub struct AppState {
     store: Arc<RwLock<Store>>,
     pub config: Config,
+    repository: Option<Arc<PgRepository>>,
 }
 
 impl AppState {
@@ -78,14 +95,43 @@ impl AppState {
         Self {
             store: Arc::new(RwLock::new(Store::demo())),
             config: Config::default(),
+            repository: None,
         }
     }
 
     pub fn from_env() -> Self {
+        let config = Config::from_env();
+        let repository = if config.storage.eq_ignore_ascii_case("postgres") {
+            let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+                "postgres://pulse:pulse_demo_only@127.0.0.1:5432/pulse".to_owned()
+            });
+            let qdrant_url =
+                env::var("QDRANT_URL").unwrap_or_else(|_| "http://127.0.0.1:6333".to_owned());
+            let ml_service_url =
+                env::var("ML_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned());
+            Some(Arc::new(
+                PgRepository::connect_lazy(&database_url, qdrant_url, ml_service_url)
+                    .unwrap_or_else(|error| panic!("invalid PostgreSQL configuration: {error}")),
+            ))
+        } else {
+            None
+        };
         Self {
             store: Arc::new(RwLock::new(Store::demo())),
-            config: Config::from_env(),
+            config,
+            repository,
         }
+    }
+
+    pub async fn initialize(&self) -> Result<(), String> {
+        if let Some(repository) = &self.repository {
+            repository.initialize().await?;
+        }
+        Ok(())
+    }
+
+    fn repository(&self) -> Option<Arc<PgRepository>> {
+        self.repository.clone()
     }
 
     fn read_store(&self) -> Result<std::sync::RwLockReadGuard<'_, Store>, ApiError> {
@@ -338,6 +384,15 @@ fn require_role(headers: &HeaderMap, config: &Config, allowed: &[Role]) -> Resul
     }
 }
 
+fn request_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("core-request")
+        .to_owned()
+}
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     #[error("bad request: {0}")]
@@ -445,10 +500,24 @@ fn demo_topics() -> Vec<Topic> {
     .collect()
 }
 
-fn topic_for_text(text: &str) -> (&'static str, f32, &'static str, &'static str) {
+// Explicit offline fixture behavior for `PULSE_STORAGE=memory` tests only.
+// The production PostgreSQL path delegates classification to ML Service.
+fn demo_topic_for_text(text: &str) -> (&'static str, f32, &'static str, &'static str) {
     let value = text.to_ascii_lowercase();
     if value.contains("вод") || value.contains("су ") || value.contains("суару") {
         ("TOPIC-WATER", 0.96, "Водоканал", "high")
+    } else if value.contains("фонар")
+        || value.contains("освещ")
+        || value.contains("жарық")
+        || value.contains("шамы")
+    {
+        ("TOPIC-SAFETY", 0.92, "Служба городского освещения", "high")
+    } else if value.contains("электр")
+        || value.contains("свет")
+        || value.contains("тоқ")
+        || value.contains("электр қуаты")
+    {
+        ("TOPIC-UTILITIES", 0.91, "Электросети", "high")
     } else if value.contains("дорог") || value.contains("шұңқыр") || value.contains("жол")
     {
         ("TOPIC-ROADS", 0.91, "Городская инфраструктура", "high")
@@ -460,12 +529,48 @@ fn topic_for_text(text: &str) -> (&'static str, f32, &'static str, &'static str)
     } else if value.contains("автобус") || value.contains("көлік") || value.contains("маршрут")
     {
         ("TOPIC-TRANSPORT", 0.87, "Управление транспорта", "medium")
-    } else if value.contains("қоқыс") || value.contains("мусор") || value.contains("эколог")
+    } else if value.contains("қоқыс") || value.contains("мусор") || value.contains("контейнер")
     {
         ("TOPIC-ENVIRONMENT", 0.84, "Управление экологии", "low")
+    } else if value.contains("эколог") || value.contains("выброс") || value.contains("загряз")
+    {
+        ("TOPIC-ENVIRONMENT", 0.84, "Управление экологии", "medium")
+    } else if value.contains("пособ")
+        || value.contains("выплат")
+        || value.contains("әлеуметтік көмек")
+    {
+        ("TOPIC-SOCIAL", 0.86, "Центр социальной защиты", "medium")
+    } else if value.contains("портал")
+        || value.contains("приложен")
+        || value.contains("онлайн")
+        || value.contains("интернет")
+    {
+        ("TOPIC-DIGITAL", 0.82, "Цифровой акимат", "medium")
+    } else if value.contains("отоплен") || value.contains("батаре") || value.contains("жылу")
+    {
+        (
+            "TOPIC-UTILITIES",
+            0.88,
+            "Городские коммунальные службы",
+            "high",
+        )
+    } else if value.contains("газ") {
+        ("TOPIC-UTILITIES", 0.88, "Газовая служба", "high")
     } else {
         ("TOPIC-OTHER", 0.61, "Единый контакт-центр", "low")
     }
+}
+
+fn normalize_region_id(value: String) -> String {
+    let trimmed = value.trim().to_owned();
+    if let Some(suffix) = trimmed.strip_prefix("KZ-") {
+        if let Ok(number) = suffix.parse::<u8>() {
+            if (1..=20).contains(&number) {
+                return format!("R{number:02}");
+            }
+        }
+    }
+    trimmed
 }
 
 fn detect_language(text: &str) -> &'static str {
@@ -523,7 +628,7 @@ fn topic_label(topics: &[Topic], id: &str) -> String {
 }
 
 fn prediction_for_ticket(ticket: &Ticket, topics: &[Topic]) -> Prediction {
-    let (topic_id, confidence, service, priority_state) = topic_for_text(&ticket.text);
+    let (topic_id, confidence, service, priority_state) = demo_topic_for_text(&ticket.text);
     let topic_id = if ticket.topic_id.is_empty() {
         topic_id.to_owned()
     } else {
@@ -821,6 +926,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/tickets", get(list_tickets).post(create_ticket))
         .route("/api/v1/tickets/{ticket_id}", get(get_ticket))
         .route(
+            "/api/v1/tickets/{ticket_id}/pulse-state",
+            put(store_pulse_state),
+        )
+        .route(
             "/api/v1/tickets/{ticket_id}/prediction",
             get(get_prediction),
         )
@@ -832,6 +941,12 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/assist/confirm/{ticket_id}", post(confirm_ticket))
         .route("/api/v1/assist/correct/{ticket_id}", post(correct_ticket))
         .route("/api/v1/analytics", get(analytics))
+        .route("/api/v1/analytics/overview", get(analytics))
+        .route("/api/v1/analytics/query", post(analytics_query))
+        .route("/api/v1/analytics/export.pdf", get(export_pdf))
+        .route("/api/v1/analytics/export.xlsx", get(export_xlsx))
+        .route("/api/v1/reports", get(reports))
+        .route("/api/v1/events", get(events))
         .route("/api/v1/forecast", get(forecast))
         .route("/api/v1/alerts", get(list_alerts))
         .route("/api/v1/alerts/{alert_id}", get(get_alert))
@@ -853,6 +968,24 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/learning/{cycle_id}/reject",
             post(reject_learning_cycle),
+        )
+        .route("/api/v1/learning/cycle", get(learning_overview))
+        .route("/api/v1/learning/cycle/close", post(close_learning_cycle))
+        .route(
+            "/api/v1/learning/candidate/evaluation",
+            get(candidate_evaluation),
+        )
+        .route(
+            "/api/v1/learning/candidate/promote",
+            post(promote_active_learning_cycle),
+        )
+        .route(
+            "/api/v1/learning/candidate/reject",
+            post(reject_active_learning_cycle),
+        )
+        .route(
+            "/api/v1/tickets/{ticket_id}/relation-feedback",
+            post(relation_feedback),
         )
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/{model_id}", get(get_model))
@@ -905,6 +1038,8 @@ async fn request_context(mut request: Request, next: Next) -> Response {
         method = %method,
         latency_ms,
         status = response.status().as_u16(),
+        model_version = "n/a",
+        error_code = "none",
         "request_completed"
     );
     response
@@ -919,6 +1054,16 @@ async fn healthz() -> Json<Value> {
 }
 
 async fn readyz(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    if let Some(repository) = state.repository() {
+        let checks = repository.readiness().await.map_err(ApiError::Internal)?;
+        return Ok(Json(json!({
+            "status": "ready",
+            "service": SERVICE_NAME,
+            "storage": "postgres",
+            "demo": false,
+            "checks": checks,
+        })));
+    }
     let store = state.read_store()?;
     Ok(Json(json!({
         "status": "ready",
@@ -954,8 +1099,21 @@ pub struct TicketListResponse {
 
 async fn list_tickets(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<TicketQuery>,
 ) -> Result<Json<TicketListResponse>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .list_tickets(&query)
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(Json(response));
+    }
     let store = state.read_store()?;
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
@@ -1031,8 +1189,37 @@ async fn create_ticket(
             "text must be at most 10000 characters".to_owned(),
         ));
     }
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .create_ticket(
+                text,
+                request.language.as_deref(),
+                request.region_id.as_deref(),
+                request.priority.as_deref(),
+                request.source.as_deref(),
+                &request_id_from_headers(&headers),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        info!(
+            service = SERVICE_NAME,
+            user_id = %actor.user_id,
+            ticket_id = %response.ticket.id,
+            model_version = %response.prediction.model_version,
+            request_id = %request_id_from_headers(&headers),
+            trace_id = %request_id_from_headers(&headers),
+            endpoint = "/api/v1/tickets",
+            latency_ms = 0.0_f64,
+            status = 201_u16,
+            error_code = "none",
+            storage = "postgres",
+            result_state = "created",
+            "ticket_created"
+        );
+        return Ok((StatusCode::CREATED, Json(response)));
+    }
     let mut store = state.write_store()?;
-    let region_id = request.region_id.unwrap_or_else(|| "R01".to_owned());
+    let region_id = normalize_region_id(request.region_id.unwrap_or_else(|| "R01".to_owned()));
     let region = store
         .regions
         .iter()
@@ -1045,7 +1232,7 @@ async fn create_ticket(
     if language != "ru" && language != "kk" {
         return Err(ApiError::BadRequest("language must be ru or kk".to_owned()));
     }
-    let (topic_id, _, _, _) = topic_for_text(text);
+    let (topic_id, _, _, _) = demo_topic_for_text(text);
     let priority = request
         .priority
         .unwrap_or_else(|| priority_for_topic(topic_id).to_owned());
@@ -1074,6 +1261,12 @@ async fn create_ticket(
         user_id = %actor.user_id,
         ticket_id = %ticket.id,
         model_version = %prediction.model_version,
+        request_id = "n/a",
+        trace_id = "n/a",
+        endpoint = "/api/v1/tickets",
+        latency_ms = 0.0_f64,
+        status = 201_u16,
+        error_code = "none",
         result_state = "created",
         "ticket_created"
     );
@@ -1089,8 +1282,24 @@ async fn create_ticket(
 
 async fn get_ticket(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(ticket_id): Path<String>,
 ) -> Result<Json<TicketDetailResponse>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        let response = repository.get_ticket(&ticket_id).await.map_err(|error| {
+            if error.contains("not found") {
+                ApiError::NotFound(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })?;
+        return Ok(Json(response));
+    }
     let store = state.read_store()?;
     let ticket = store
         .tickets
@@ -1117,8 +1326,27 @@ async fn get_ticket(
 
 async fn get_prediction(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(ticket_id): Path<String>,
 ) -> Result<Json<Prediction>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .get_prediction(&ticket_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        return Ok(Json(response));
+    }
     let store = state.read_store()?;
     store
         .predictions
@@ -1149,7 +1377,12 @@ pub struct AssistPreviewResponse {
     pub source: String,
 }
 
-fn related_tickets(store: &Store, ticket: &Ticket, prediction: &Prediction) -> Vec<SimilarTicket> {
+// Offline fixture-only related-ticket behavior. Real mode uses Qdrant vector search.
+fn demo_related_tickets(
+    store: &Store,
+    ticket: &Ticket,
+    prediction: &Prediction,
+) -> Vec<SimilarTicket> {
     store
         .tickets
         .values()
@@ -1174,12 +1407,39 @@ fn related_tickets(store: &Store, ticket: &Ticket, prediction: &Prediction) -> V
 
 async fn assist_preview(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<PreviewRequest>,
 ) -> Result<Json<AssistPreviewResponse>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
     if request.ticket_id.is_none() && request.text.as_deref().is_none_or(str::is_empty) {
         return Err(ApiError::BadRequest(
             "ticket_id or non-empty text is required".to_owned(),
         ));
+    }
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .assist_preview(
+                request.ticket_id.as_deref(),
+                request.text.as_deref(),
+                request.language.as_deref(),
+                request.region_id.as_deref(),
+                &request_id_from_headers(&headers),
+            )
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("required") || error.contains("empty") {
+                    ApiError::BadRequest(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        return Ok(Json(response));
     }
     let store = state.read_store()?;
     let (ticket, source) = if let Some(ticket_id) = request.ticket_id {
@@ -1198,8 +1458,8 @@ async fn assist_preview(
                 "text must be at most 10000 characters".to_owned(),
             ));
         }
-        let (topic_id, _, _, _) = topic_for_text(&text);
-        let region_id = request.region_id.unwrap_or_else(|| "R01".to_owned());
+        let (topic_id, _, _, _) = demo_topic_for_text(&text);
+        let region_id = normalize_region_id(request.region_id.unwrap_or_else(|| "R01".to_owned()));
         let region = store
             .regions
             .iter()
@@ -1236,7 +1496,7 @@ async fn assist_preview(
         .get(&ticket.id)
         .cloned()
         .unwrap_or_else(|| prediction_for_ticket(&ticket, &store.topics));
-    let related = related_tickets(&store, &ticket, &prediction);
+    let related = demo_related_tickets(&store, &ticket, &prediction);
     let duplicate_candidates = related
         .iter()
         .filter(|item| item.score >= 0.8)
@@ -1274,6 +1534,64 @@ pub struct DecisionResponse {
     pub ticket: Ticket,
     pub prediction: Prediction,
     pub decision: OperatorDecision,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PulseStateRequest {
+    pub operator_confirmed_decision: Value,
+    pub feedback: Option<Value>,
+}
+
+fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::to_owned)
+}
+
+async fn store_pulse_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+    Json(request): Json<PulseStateRequest>,
+) -> Result<Json<DecisionResponse>, ApiError> {
+    if !request.operator_confirmed_decision.is_object() {
+        return Err(ApiError::BadRequest(
+            "operator_confirmed_decision must be an object".to_owned(),
+        ));
+    }
+    let action_value = value_string(
+        &request.operator_confirmed_decision,
+        &["action", "status", "decision"],
+    )
+    .map(|value| value.to_ascii_lowercase())
+    .unwrap_or_default();
+    let action = if matches!(action_value.as_str(), "correct" | "corrected") {
+        "correct"
+    } else {
+        "confirm"
+    };
+    let note = value_string(&request.operator_confirmed_decision, &["note", "comment"])
+        .or_else(|| {
+            request
+                .feedback
+                .as_ref()
+                .and_then(|value| value_string(value, &["note", "comment"]))
+        })
+        .or_else(|| request.feedback.as_ref().map(Value::to_string));
+    let decision_request = DecisionRequest {
+        ticket_id: None,
+        topic_id: value_string(
+            &request.operator_confirmed_decision,
+            &["topic_id", "topicId", "topic"],
+        ),
+        service: value_string(
+            &request.operator_confirmed_decision,
+            &["service", "routing"],
+        ),
+        priority: value_string(&request.operator_confirmed_decision, &["priority"]),
+        note,
+    };
+    apply_decision(state, headers, ticket_id, action, decision_request).await
 }
 
 async fn confirm_ticket(
@@ -1330,6 +1648,37 @@ async fn apply_decision(
         &state.config,
         &[Role::Operator, Role::Manager, Role::Admin],
     )?;
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .apply_decision(&ticket_id, action, &request, &actor.user_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("required") || error.contains("unknown topic") {
+                    ApiError::BadRequest(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        info!(
+            service = SERVICE_NAME,
+            ticket_id = %ticket_id,
+            decision = %action,
+            user_id = %actor.user_id,
+            model_version = %response.prediction.model_version,
+            request_id = %request_id_from_headers(&headers),
+            trace_id = %request_id_from_headers(&headers),
+            endpoint = "/api/v1/assist/decision",
+            latency_ms = 0.0_f64,
+            status = 200_u16,
+            error_code = "none",
+            storage = "postgres",
+            result_state = "recorded",
+            "operator_decision_recorded"
+        );
+        return Ok(Json(response));
+    }
     let mut store = state.write_store()?;
     let prediction = store
         .predictions
@@ -1365,6 +1714,7 @@ async fn apply_decision(
     let priority = request
         .priority
         .unwrap_or_else(|| prediction.predicted_priority.clone());
+    let note = request.note;
     let decision_id = format!("decision-{:03}", store.next_decision_number);
     store.next_decision_number += 1;
     let decision = OperatorDecision {
@@ -1375,11 +1725,37 @@ async fn apply_decision(
         confirmed_topic_id: topic_id,
         service,
         priority,
-        note: request.note,
-        user_id: actor.user_id,
+        note,
+        user_id: actor.user_id.clone(),
         created_at: DEMO_TIMESTAMP.to_owned(),
     };
     store.decisions.push(decision.clone());
+    if let Some(cycle_id) = store
+        .learning_cycles
+        .values()
+        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .map(|cycle| cycle.id.clone())
+    {
+        let feedback = LearningFeedback {
+            id: format!("feedback-{:03}", store.next_feedback_number),
+            ticket_id: ticket_id.clone(),
+            cycle_id: Some(cycle_id.clone()),
+            feedback_type: if action == "confirm" {
+                "accepted".to_owned()
+            } else {
+                "corrected".to_owned()
+            },
+            comment: decision.note.clone(),
+            user_id: decision.user_id.clone(),
+            created_at: DEMO_TIMESTAMP.to_owned(),
+        };
+        store.next_feedback_number += 1;
+        store.learning_feedback.push(feedback);
+        if let Some(cycle) = store.learning_cycles.get_mut(&cycle_id) {
+            cycle.feedback_count += 1;
+            cycle.updated_at = DEMO_TIMESTAMP.to_owned();
+        }
+    }
     let ticket = store
         .tickets
         .get(&ticket_id)
@@ -1391,6 +1767,12 @@ async fn apply_decision(
         decision = %action,
         user_id = %decision.user_id,
         model_version = %prediction.model_version,
+        request_id = "n/a",
+        trace_id = "n/a",
+        endpoint = "/api/v1/assist/decision",
+        latency_ms = 0.0_f64,
+        status = 200_u16,
+        error_code = "none",
         result_state = "recorded",
         "operator_decision_recorded"
     );
@@ -1441,6 +1823,13 @@ async fn analytics(
     Query(query): Query<AnalyticsQuery>,
 ) -> Result<Json<AnalyticsResponse>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .analytics(&query)
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
     let store = state.read_store()?;
     let filtered: Vec<&Ticket> = store
         .tickets
@@ -1569,6 +1958,347 @@ async fn analytics(
     }))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct QueryIntentFilters {
+    pub region_id: Option<String>,
+    pub topic_id: Option<String>,
+    pub range: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct QueryIntentRequest {
+    pub intent: String,
+    pub region_id: Option<String>,
+    pub topic_id: Option<String>,
+    pub range: Option<String>,
+    pub filters: Option<QueryIntentFilters>,
+    pub group_by: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// Execute a deliberately small allow-listed analytics language.  The public
+/// endpoint accepts an intent object, never SQL, so an optional LLM adapter can
+/// only propose parameters that Core validates before reading the store.
+async fn analytics_query(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(query): Json<QueryIntentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let intent = query.intent.trim().to_ascii_lowercase();
+    let allowed = [
+        "count",
+        "trend",
+        "compare",
+        "compare_regions",
+        "top_topics",
+        "spikes",
+        "forecast",
+    ];
+    if !allowed.contains(&intent.as_str()) {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported QueryIntent: {intent}"
+        )));
+    }
+    let store = state.read_store()?;
+    let region_id = query.region_id.clone().or_else(|| {
+        query
+            .filters
+            .as_ref()
+            .and_then(|filters| filters.region_id.clone())
+    });
+    let topic_id = query.topic_id.clone().or_else(|| {
+        query
+            .filters
+            .as_ref()
+            .and_then(|filters| filters.topic_id.clone())
+    });
+    let range = query.range.clone().or_else(|| {
+        query
+            .filters
+            .as_ref()
+            .and_then(|filters| filters.range.clone())
+    });
+    let intent = if intent == "compare" {
+        "compare_regions".to_owned()
+    } else {
+        intent
+    };
+    let filtered = store.tickets.values().filter(|ticket| {
+        region_id
+            .as_deref()
+            .is_none_or(|value| ticket.region_id == value)
+            && topic_id
+                .as_deref()
+                .is_none_or(|value| ticket.topic_id == value)
+    });
+    let total = filtered.count();
+    let rows = if matches!(intent.as_str(), "compare_regions" | "top_topics") {
+        let buckets = if intent == "compare_regions" {
+            store
+                .regions
+                .iter()
+                .map(|region| {
+                    let count = store
+                        .tickets
+                        .values()
+                        .filter(|ticket| ticket.region_id == region.id)
+                        .count();
+                    json!({"key": region.id, "label": region.name, "count": count})
+                })
+                .collect::<Vec<_>>()
+        } else {
+            store
+                .topics
+                .iter()
+                .map(|topic| {
+                    let count = store
+                        .tickets
+                        .values()
+                        .filter(|ticket| ticket.topic_id == topic.id)
+                        .count();
+                    json!({"key": topic.id, "label": topic.label, "count": count})
+                })
+                .collect::<Vec<_>>()
+        };
+        buckets
+    } else {
+        vec![json!({
+            "period": range.clone().unwrap_or_else(|| "7d".to_owned()),
+            "count": total,
+        })]
+    };
+    let rows = if let Some(limit) = query.limit {
+        rows.into_iter()
+            .take(limit.clamp(1, 100))
+            .collect::<Vec<_>>()
+    } else {
+        rows
+    };
+    Ok(Json(json!({
+        "intent": intent,
+        "filters": {
+            "region_id": region_id,
+            "topic_id": topic_id,
+            "range": range.unwrap_or_else(|| "7d".to_owned()),
+        },
+        "number": total,
+        "rows": rows.clone(),
+        "table": rows.clone(),
+        "series": rows,
+        "chart": {
+            "type": if intent == "trend" { "line" } else { "bar" },
+            "x": "label",
+            "y": "count",
+        },
+        "interpreted_filters": {
+            "group_by": query.group_by,
+            "limit": query.limit,
+        },
+        "source": "deterministic-demo",
+    })))
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb88320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Build a small uncompressed ZIP archive for a dependency-free XLSX export.
+fn zip_store(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    let mut offsets = Vec::with_capacity(entries.len());
+    for (name, data) in entries {
+        let name_bytes = name.as_bytes();
+        let checksum = crc32(data);
+        offsets.push(archive.len() as u32);
+        push_u32(&mut archive, 0x04034b50);
+        push_u16(&mut archive, 20);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u32(&mut archive, checksum);
+        push_u32(&mut archive, data.len() as u32);
+        push_u32(&mut archive, data.len() as u32);
+        push_u16(&mut archive, name_bytes.len() as u16);
+        push_u16(&mut archive, 0);
+        archive.extend_from_slice(name_bytes);
+        archive.extend_from_slice(data);
+    }
+
+    let central_offset = archive.len() as u32;
+    for ((name, data), local_offset) in entries.iter().zip(offsets.iter().copied()) {
+        let name_bytes = name.as_bytes();
+        let checksum = crc32(data);
+        push_u32(&mut archive, 0x02014b50);
+        push_u16(&mut archive, 20);
+        push_u16(&mut archive, 20);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u32(&mut archive, checksum);
+        push_u32(&mut archive, data.len() as u32);
+        push_u32(&mut archive, data.len() as u32);
+        push_u16(&mut archive, name_bytes.len() as u16);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u16(&mut archive, 0);
+        push_u32(&mut archive, 0);
+        push_u32(&mut archive, local_offset);
+        archive.extend_from_slice(name_bytes);
+    }
+
+    let central_size = archive.len() as u32 - central_offset;
+    push_u32(&mut archive, 0x06054b50);
+    push_u16(&mut archive, 0);
+    push_u16(&mut archive, 0);
+    push_u16(&mut archive, entries.len() as u16);
+    push_u16(&mut archive, entries.len() as u16);
+    push_u32(&mut archive, central_size);
+    push_u32(&mut archive, central_offset);
+    push_u16(&mut archive, 0);
+    archive
+}
+
+fn pdf_report() -> Vec<u8> {
+    let content = "BT /F1 12 Tf 72 760 Td (Pulse 109 ReportSlice) Tj 0 -18 Td (period=7d region=all topic=all count=12) Tj ET\n";
+    let bodies = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        format!("<< /Length {} >>\nstream\n{}endstream", content.len(), content).into_bytes(),
+    ];
+    let mut pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut offsets = Vec::with_capacity(bodies.len());
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        pdf.extend_from_slice(body);
+        pdf.extend_from_slice(b"\nendobj\n");
+    }
+    let xref_offset = pdf.len();
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            bodies.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+fn xlsx_report() -> Vec<u8> {
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+    let workbook = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let sheet = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>period</t></is></c><c r="B1" t="inlineStr"><is><t>region</t></is></c><c r="C1" t="inlineStr"><is><t>topic</t></is></c><c r="D1" t="inlineStr"><is><t>count</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>7d</t></is></c><c r="B2" t="inlineStr"><is><t>all</t></is></c><c r="C2" t="inlineStr"><is><t>all</t></is></c><c r="D2"><v>12</v></c></row></sheetData></worksheet>"#;
+    let entries = [
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", workbook_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+    ];
+    zip_store(&entries)
+}
+
+fn report_response(format: &str) -> Response {
+    let (body, content_type, filename) = if format == "pdf" {
+        (pdf_report(), "application/pdf", "pulse109-report.pdf")
+    } else {
+        (
+            xlsx_report(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "pulse109-report.xlsx",
+        )
+    };
+    let mut response = Response::new(Body::from(body));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    if let Ok(value) = HeaderValue::from_str(&disposition) {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
+    }
+    response
+}
+
+async fn export_pdf(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    Ok(report_response("pdf"))
+}
+
+async fn export_xlsx(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    Ok(report_response("xlsx"))
+}
+
+async fn reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    Ok(Json(json!({
+        "items": [
+            {"id": "report-demo-7d", "format": "pdf", "status": "ready", "download": "/api/v1/analytics/export.pdf"},
+            {"id": "report-demo-7d", "format": "xlsx", "status": "ready", "download": "/api/v1/analytics/export.xlsx"}
+        ],
+        "source": "deterministic-demo"
+    })))
+}
+
+async fn events(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let mut response = Response::new(Body::from(
+        "event: pulse\ndata: {\"type\":\"heartbeat\",\"source\":\"deterministic-demo\"}\n\n",
+    ));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    Ok(response)
+}
+
 fn metric_bucket(id: String, label: String, tickets: Vec<&Ticket>, store: &Store) -> MetricBucket {
     let avg_confidence = if tickets.is_empty() {
         0.0
@@ -1598,55 +2328,50 @@ pub struct ForecastResponse {
     pub model: String,
     pub horizon_days: u32,
     pub points: Vec<TimeSeriesPoint>,
+    pub expected_peaks: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ForecastQuery {
+    pub horizon: Option<u32>,
+    pub horizon_days: Option<u32>,
 }
 
 async fn forecast(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ForecastQuery>,
 ) -> Result<Json<ForecastResponse>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
     let _store = state.read_store()?;
+    let horizon_days = query.horizon.or(query.horizon_days).unwrap_or(30);
+    if !matches!(horizon_days, 30 | 60 | 90) {
+        return Err(ApiError::BadRequest(
+            "horizon must be 30, 60 or 90 days".to_owned(),
+        ));
+    }
+    let pattern = [11_u32, 12, 10, 13, 14, 12, 15];
+    let resolved_pattern = [7_u32, 7, 6, 8, 8, 7, 9];
+    let start = NaiveDate::from_ymd_opt(2026, 9, 22).expect("fixed demo date is valid");
+    let points = (0..horizon_days)
+        .map(|index| TimeSeriesPoint {
+            date: (start + Duration::days(i64::from(index))).to_string(),
+            tickets: pattern[index as usize % pattern.len()],
+            resolved: resolved_pattern[index as usize % resolved_pattern.len()],
+        })
+        .collect::<Vec<_>>();
+    let peak_value = pattern.iter().copied().max().unwrap_or_default();
+    let expected_peaks = points
+        .iter()
+        .filter(|point| point.tickets == peak_value)
+        .map(|point| point.date.clone())
+        .collect();
     Ok(Json(ForecastResponse {
         source: "deterministic-demo".to_owned(),
         model: "seasonal-naive-demo".to_owned(),
-        horizon_days: 7,
-        points: vec![
-            TimeSeriesPoint {
-                date: "2026-09-22".to_owned(),
-                tickets: 11,
-                resolved: 7,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-23".to_owned(),
-                tickets: 12,
-                resolved: 7,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-24".to_owned(),
-                tickets: 10,
-                resolved: 6,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-25".to_owned(),
-                tickets: 13,
-                resolved: 8,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-26".to_owned(),
-                tickets: 14,
-                resolved: 8,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-27".to_owned(),
-                tickets: 12,
-                resolved: 7,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-28".to_owned(),
-                tickets: 15,
-                resolved: 9,
-            },
-        ],
+        horizon_days,
+        points,
+        expected_peaks,
     }))
 }
 
@@ -1826,7 +2551,9 @@ async fn get_learning_cycle(
 pub struct LearningFeedbackRequest {
     #[serde(alias = "ticketId")]
     pub ticket_id: String,
-    pub feedback_type: String,
+    pub feedback_type: Option<String>,
+    pub decision: Option<String>,
+    pub source: Option<String>,
     pub comment: Option<String>,
 }
 
@@ -1839,7 +2566,7 @@ async fn add_learning_feedback(
     let actor = require_role(
         &headers,
         &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
+        &[Role::Operator, Role::Manager, Role::MlReviewer, Role::Admin],
     )?;
     let mut store = state.write_store()?;
     if !store.learning_cycles.contains_key(&cycle_id) {
@@ -1853,11 +2580,16 @@ async fn add_learning_feedback(
             request.ticket_id
         )));
     }
+    let feedback_type = request
+        .feedback_type
+        .or(request.decision)
+        .or(request.source)
+        .unwrap_or_else(|| "accepted".to_owned());
     let feedback = LearningFeedback {
         id: format!("feedback-{:03}", store.next_feedback_number),
         ticket_id: request.ticket_id,
         cycle_id: Some(cycle_id.clone()),
-        feedback_type: request.feedback_type,
+        feedback_type,
         comment: request.comment,
         user_id: actor.user_id,
         created_at: DEMO_TIMESTAMP.to_owned(),
@@ -1871,9 +2603,208 @@ async fn add_learning_feedback(
     Ok((StatusCode::CREATED, Json(feedback)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RelationFeedbackRequest {
+    pub related_ticket_id: Option<String>,
+    pub relation: String,
+    pub decision: Option<String>,
+    pub comment: Option<String>,
+}
+
+async fn relation_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+    Json(request): Json<RelationFeedbackRequest>,
+) -> Result<(StatusCode, Json<LearningFeedback>), ApiError> {
+    let actor = require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    let relation = request.relation.trim().to_ascii_uppercase();
+    if !matches!(
+        relation.as_str(),
+        "DUPLICATE" | "REPEAT" | "SIMILAR" | "UNRELATED"
+    ) {
+        return Err(ApiError::BadRequest(
+            "relation must be DUPLICATE, REPEAT, SIMILAR or UNRELATED".to_owned(),
+        ));
+    }
+    let decision = request
+        .decision
+        .as_deref()
+        .unwrap_or("confirmed")
+        .trim()
+        .to_ascii_uppercase();
+    if !matches!(decision.as_str(), "CONFIRMED" | "REJECTED") {
+        return Err(ApiError::BadRequest(
+            "decision must be CONFIRMED or REJECTED".to_owned(),
+        ));
+    }
+    if let Some(repository) = state.repository() {
+        repository
+            .relation_feedback(
+                &ticket_id,
+                request.related_ticket_id.as_deref(),
+                &relation,
+                &decision,
+                &actor.user_id,
+            )
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(LearningFeedback {
+                id: "db-relation-feedback".to_owned(),
+                ticket_id,
+                cycle_id: None,
+                feedback_type: format!("relation:{relation}:{decision}"),
+                comment: request.comment,
+                user_id: actor.user_id,
+                created_at: Utc::now().to_rfc3339(),
+            }),
+        ));
+    }
+    let mut store = state.write_store()?;
+    if !store.tickets.contains_key(&ticket_id) {
+        return Err(ApiError::NotFound(format!("ticket {ticket_id} not found")));
+    }
+    if let Some(related_ticket_id) = request.related_ticket_id.as_deref() {
+        if !store.tickets.contains_key(related_ticket_id) {
+            return Err(ApiError::NotFound(format!(
+                "related ticket {related_ticket_id} not found"
+            )));
+        }
+    }
+    let feedback = LearningFeedback {
+        id: format!("feedback-{:03}", store.next_feedback_number),
+        ticket_id,
+        cycle_id: None,
+        feedback_type: format!("relation:{relation}:{decision}"),
+        comment: request.comment.or_else(|| {
+            request
+                .related_ticket_id
+                .map(|id| format!("related_ticket_id={id}"))
+        }),
+        user_id: actor.user_id,
+        created_at: DEMO_TIMESTAMP.to_owned(),
+    };
+    store.next_feedback_number += 1;
+    store.learning_feedback.push(feedback.clone());
+    Ok((StatusCode::CREATED, Json(feedback)))
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct CycleDecisionRequest {
     pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CloseLearningCycleRequest {
+    pub cycle_id: Option<String>,
+}
+
+async fn close_learning_cycle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CloseLearningCycleRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let mut store = state.write_store()?;
+    let cycle_id = request.cycle_id.or_else(|| {
+        store
+            .learning_cycles
+            .values()
+            .find(|cycle| cycle.state == "COLLECT")
+            .map(|cycle| cycle.id.clone())
+    });
+    let cycle_id =
+        cycle_id.ok_or_else(|| ApiError::Conflict("no COLLECT cycle is available".to_owned()))?;
+    let cycle = store
+        .learning_cycles
+        .get_mut(&cycle_id)
+        .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
+    if cycle.state != "COLLECT" {
+        return Err(ApiError::Conflict(format!(
+            "cycle {} cannot close from state {}",
+            cycle.id, cycle.state
+        )));
+    }
+    cycle.state = "EVALUATE".to_owned();
+    cycle.updated_at = DEMO_TIMESTAMP.to_owned();
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "job_id": format!("train-{}", cycle.id),
+            "state": cycle.state,
+            "cycle": cycle,
+            "production_model_unchanged": true,
+        })),
+    ))
+}
+
+async fn candidate_evaluation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let store = state.read_store()?;
+    let cycle = store
+        .learning_cycles
+        .values()
+        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?;
+    Ok(Json(json!({
+        "cycle_id": cycle.id,
+        "state": cycle.state,
+        "offline_metrics": cycle.metrics,
+        "shadow_metrics": {"agreement": 0.88, "correction_rate_delta": -0.04, "sample_size": cycle.feedback_count},
+        "critical_regressions": [],
+        "promotion_policy_version": "policy-demo-v1",
+        "decision": "READY_TO_PROMOTE"
+    })))
+}
+
+fn active_cycle_id(store: &Store) -> Option<String> {
+    store
+        .learning_cycles
+        .values()
+        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .map(|cycle| cycle.id.clone())
+}
+
+async fn promote_active_learning_cycle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CycleDecisionRequest>,
+) -> Result<Json<LearningCycle>, ApiError> {
+    let cycle_id = {
+        let store = state.read_store()?;
+        active_cycle_id(&store)
+            .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?
+    };
+    promote_learning_cycle(State(state), headers, Path(cycle_id), Json(request)).await
+}
+
+async fn reject_active_learning_cycle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CycleDecisionRequest>,
+) -> Result<Json<LearningCycle>, ApiError> {
+    let cycle_id = {
+        let store = state.read_store()?;
+        active_cycle_id(&store)
+            .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?
+    };
+    reject_learning_cycle(State(state), headers, Path(cycle_id), Json(request)).await
 }
 
 async fn promote_learning_cycle(
@@ -2041,6 +2972,12 @@ async fn promote_model(
         service = SERVICE_NAME,
         model_version = %model_id,
         user_id = %actor.user_id,
+        request_id = "n/a",
+        trace_id = "n/a",
+        endpoint = "/api/v1/models/{model_id}/promote",
+        latency_ms = 0.0_f64,
+        status = 200_u16,
+        error_code = "none",
         result_state = "promoted",
         "model_promoted"
     );
@@ -2072,14 +3009,33 @@ async fn openapi() -> Json<Value> {
             "/readyz": { "get": { "summary": "Readiness" } },
             "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
             "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
+            "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
             "/api/v1/assist/preview": { "post": { "summary": "Preview prediction and related tickets" } },
             "/api/v1/assist/{ticket_id}/confirm": { "post": { "summary": "Confirm prediction" } },
             "/api/v1/assist/{ticket_id}/correct": { "post": { "summary": "Correct prediction" } },
             "/api/v1/analytics": { "get": { "summary": "Situation center analytics" } },
+            "/api/v1/analytics/overview": { "get": { "summary": "Situation center overview" } },
+            "/api/v1/analytics/query": { "post": { "summary": "Validated QueryIntent analytics" } },
+            "/api/v1/analytics/export.pdf": { "get": { "summary": "Export ReportSlice as PDF" } },
+            "/api/v1/analytics/export.xlsx": { "get": { "summary": "Export ReportSlice as XLSX" } },
+            "/api/v1/reports": { "get": { "summary": "List generated reports" } },
+            "/api/v1/events": { "get": { "summary": "SSE notifications" } },
             "/api/v1/forecast": { "get": { "summary": "Forecast baseline" } },
             "/api/v1/alerts": { "get": { "summary": "List alerts" } },
             "/api/v1/learning": { "get": { "summary": "Learning loop status" }, "post": { "summary": "Start candidate cycle" } },
-            "/api/v1/models": { "get": { "summary": "List model versions" } }
+            "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
+            "/api/v1/learning/cycle/close": { "post": { "summary": "Close collect and train candidate" } },
+            "/api/v1/learning/candidate/evaluation": { "get": { "summary": "Evaluate candidate" } },
+            "/api/v1/learning/candidate/promote": { "post": { "summary": "Promote candidate" } },
+            "/api/v1/learning/candidate/reject": { "post": { "summary": "Reject candidate" } },
+            "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Collect relation feedback" } },
+            "/api/v1/models": { "get": { "summary": "List model versions" } },
+            "/internal/v1/classify": { "post": { "summary": "Internal classifier contract; not public" } },
+            "/internal/v1/embed": { "post": { "summary": "Internal embedding contract; not public" } },
+            "/internal/v1/forecast": { "post": { "summary": "Internal forecast contract; not public" } },
+            "/internal/v1/anomaly": { "post": { "summary": "Internal anomaly contract; not public" } },
+            "/internal/v1/training/classifier": { "post": { "summary": "Internal offline training contract" } },
+            "/internal/v1/evaluation/classifier": { "post": { "summary": "Internal evaluation contract" } }
         }
     }))
 }
@@ -2191,5 +3147,153 @@ mod tests {
         let value = body_json(response).await;
         assert_eq!(value["openapi"], "3.1.0");
         assert!(value["paths"]["/api/v1/assist/preview"].is_object());
+    }
+
+    #[tokio::test]
+    async fn pulse_state_and_relation_feedback_are_persisted() {
+        let app = app(AppState::demo());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/api/v1/tickets/ticket-001/pulse-state")
+                    .header("content-type", "application/json")
+                    .header("x-pulse-role", "OPERATOR")
+                    .body(Body::from(
+                        r#"{"operator_confirmed_decision":{"action":"confirm","topic_id":"TOPIC-WATER"},"feedback":{"comment":"operator accepted"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let decision = body_json(response).await;
+        assert_eq!(decision["decision"]["action"], "confirm");
+
+        let cycle = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/learning/cycle")
+                    .header("x-pulse-role", "ML_REVIEWER")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cycle.status(), StatusCode::OK);
+        assert_eq!(body_json(cycle).await["active_cycle"]["feedback_count"], 4);
+
+        let relation = app
+            .oneshot(
+                Request::post("/api/v1/tickets/ticket-001/relation-feedback")
+                    .header("content-type", "application/json")
+                    .header("x-pulse-role", "OPERATOR")
+                    .body(Body::from(
+                        r#"{"related_ticket_id":"ticket-002","relation":"duplicate","decision":"rejected"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(relation.status(), StatusCode::CREATED);
+        assert_eq!(
+            body_json(relation).await["feedback_type"],
+            "relation:DUPLICATE:REJECTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_exports_have_expected_formats() {
+        let app = app(AppState::demo());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/analytics/export.pdf")
+                    .header("x-pulse-role", "MANAGER")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/pdf");
+        assert!(to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .starts_with(b"%PDF-1.4"));
+
+        let response = app
+            .oneshot(
+                Request::get("/api/v1/analytics/export.xlsx")
+                    .header("x-pulse-role", "MANAGER")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert!(to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .starts_with(b"PK\x03\x04"));
+    }
+
+    #[tokio::test]
+    async fn query_intent_accepts_strict_filters_and_rejects_unknown_intents() {
+        let app = app(AppState::demo());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/analytics/query")
+                    .header("content-type", "application/json")
+                    .header("x-pulse-role", "MANAGER")
+                    .body(Body::from(
+                        r#"{"intent":"compare","filters":{"region_id":"R01","range":"7d"},"limit":5}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = body_json(response).await;
+        assert_eq!(value["intent"], "compare_regions");
+        assert_eq!(value["filters"]["region_id"], "R01");
+        assert!(value["table"].as_array().is_some());
+
+        let response = app
+            .oneshot(
+                Request::post("/api/v1/analytics/query")
+                    .header("content-type", "application/json")
+                    .header("x-pulse-role", "MANAGER")
+                    .body(Body::from(r#"{"intent":"drop_table"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn forecast_supports_required_horizons() {
+        let app = app(AppState::demo());
+        for horizon in [30, 60, 90] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/api/v1/forecast?horizon={horizon}"))
+                        .header("x-pulse-role", "MANAGER")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let value = body_json(response).await;
+            assert_eq!(value["horizon_days"], horizon);
+            assert_eq!(value["points"].as_array().unwrap().len(), horizon as usize);
+        }
     }
 }

@@ -1,0 +1,98 @@
+{
+  "manifest_version": "1",
+  "service": "pulse109-ml",
+  "models": {
+    "classifier": {
+      "model_version": "classifier-demo-2026-09-21-001",
+      "model_family": "deterministic-keyword-demo",
+      "base_model": "local-no-download",
+      "dataset_version": "demo-ru-kz-v1",
+      "created_at": "2026-09-21T00:00:00Z",
+      "metrics": {
+        "status": "demo_baseline",
+        "macro_f1": null,
+        "note": "Do not present synthetic demo output as production quality metrics."
+      },
+      "languages": ["RU", "KZ"],
+      "labels": [
+        "water_supply",
+        "wastewater",
+        "electricity",
+        "street_lighting",
+        "heating",
+        "gas_supply",
+        "roads",
+        "public_transport",
+        "waste",
+        "landscaping",
+        "buildings",
+        "healthcare",
+        "veterinary",
+        "ecology",
+        "education",
+        "telecom",
+        "other"
+      ],
+      "training_config": {
+        "deterministic": true,
+        "source": "demo_taxonomy",
+        "online_retraining": false
+      },
+      "artifact_checksum": "sha256:demo-classifier-2026-09-21-001"
+    },
+    "embedder": {
+      "model_version": "embedder-demo-2026-09-21-001",
+      "model_family": "deterministic-hashing-embedding",
+      "base_model": "local-no-download",
+      "dataset_version": "demo-ru-kz-v1",
+      "created_at": "2026-09-21T00:00:00Z",
+      "metrics": {
+        "status": "demo_baseline",
+        "default_dimension": 32
+      },
+      "languages": ["RU", "KZ"],
+      "labels": [],
+      "training_config": {
+        "deterministic": true,
+        "normalization": "l2"
+      },
+      "artifact_checksum": "sha256:demo-embedder-2026-09-21-001"
+    },
+    "forecast": {
+      "model_version": "forecast-seasonal-naive-2026-09-21-001",
+      "model_family": "seasonal_naive",
+      "base_model": "local-no-download",
+      "dataset_version": "demo-time-series-v1",
+      "created_at": "2026-09-21T00:00:00Z",
+      "metrics": {
+        "status": "baseline",
+        "backtest": "computed_per_request"
+      },
+      "languages": [],
+      "labels": [],
+      "training_config": {
+        "default_season_length": 7,
+        "horizons": [30, 60, 90]
+      },
+      "artifact_checksum": "sha256:demo-forecast-seasonal-naive-2026-09-21-001"
+    },
+    "anomaly": {
+      "model_version": "anomaly-robust-zscore-2026-09-21-001",
+      "model_family": "rolling_median_mad",
+      "base_model": "local-no-download",
+      "dataset_version": "demo-time-series-v1",
+      "created_at": "2026-09-21T00:00:00Z",
+      "metrics": {
+        "status": "baseline",
+        "threshold": 3.0
+      },
+      "languages": [],
+      "labels": [],
+      "training_config": {
+        "default_window": 7,
+        "robust_scale": "mad"
+      },
+      "artifact_checksum": "sha256:demo-anomaly-robust-zscore-2026-09-21-001"
+    }
+  }
+}

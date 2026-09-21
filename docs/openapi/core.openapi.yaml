@@ -202,6 +202,23 @@ paths:
           description: XLSX report
           content: { application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: { schema: { type: string, format: binary } } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/reports:
+    get:
+      tags: [analytics]
+      summary: List generated report slices
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Ready report downloads
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, source]
+                properties:
+                  items: { type: array, items: { type: object, additionalProperties: true } }
+                  source: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/learning/cycle:
     get:
       tags: [learning]
@@ -398,7 +415,7 @@ components:
       type: object
       required: [relation, decision]
       properties:
-        relation: { type: string, enum: [duplicate, repeat] }
+        relation: { type: string, enum: [duplicate, repeat, similar, unrelated] }
         decision: { type: string, enum: [confirmed, rejected] }
         related_ticket_id: { type: string }
     StoredResponse:
@@ -417,20 +434,34 @@ components:
         series: { type: array, items: { type: object, additionalProperties: true } }
     QueryIntent:
       type: object
-      required: [intent, filters]
+      required: [intent]
       properties:
-        intent: { type: string, enum: [count, trend, compare, top_topics, forecast] }
-        filters: { type: object, additionalProperties: true }
+        intent: { type: string, enum: [count, trend, compare, compare_regions, top_topics, spikes, forecast] }
+        region_id: { type: string }
+        topic_id: { type: string }
+        range: { type: string, default: 7d }
+        filters:
+          type: object
+          properties:
+            region_id: { type: string }
+            topic_id: { type: string }
+            range: { type: string }
+          additionalProperties: false
         group_by: { type: string, enum: [region, topic, day, week, month] }
         limit: { type: integer, minimum: 1, maximum: 100 }
     AnalyticsQueryResponse:
       type: object
-      required: [number, table, series]
+      required: [intent, number, rows, chart, filters]
       properties:
+        intent: { type: string }
         number: { type: number }
+        rows: { type: array, items: { type: object, additionalProperties: true } }
         table: { type: array, items: { type: object, additionalProperties: true } }
         series: { type: array, items: { type: object, additionalProperties: true } }
+        chart: { type: object, additionalProperties: true }
+        filters: { type: object, additionalProperties: true }
         interpreted_filters: { type: object, additionalProperties: true }
+        source: { type: string }
     Alert:
       type: object
       required: [alert_id, status, severity]
@@ -446,10 +477,18 @@ components:
     ForecastResponse:
       type: object
       properties:
+        source: { type: string }
+        model: { type: string }
         horizon_days: { type: integer }
-        model_version: { type: string }
-        points: { type: array, items: { type: object, additionalProperties: true } }
-        expected_peaks: { type: array, items: { type: object, additionalProperties: true } }
+        points: { type: array, items: { $ref: '#/components/schemas/TimeSeriesPoint' } }
+        expected_peaks: { type: array, items: { type: string } }
+    TimeSeriesPoint:
+      type: object
+      required: [date, tickets, resolved]
+      properties:
+        date: { type: string, format: date }
+        tickets: { type: integer }
+        resolved: { type: integer }
     LearningCycle:
       type: object
       required: [cycle_id, state, production_model_version]

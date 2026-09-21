@@ -1,7 +1,9 @@
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
-COPY src ./src
+COPY backend/Cargo.toml backend/Cargo.lock* ./
+COPY backend/src ./src
+# sqlx embeds and applies the repository migrations at startup.
+COPY migrations /migrations
 RUN cargo build --release
 
 FROM debian:bookworm-slim

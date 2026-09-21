@@ -1,0 +1,34 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Pulse 109 API contract",
+    "version": "1.0.0",
+    "description": "Machine-readable route index for the deterministic demo. Detailed request and response schemas live in core.openapi.yaml and ml.openapi.yaml."
+  },
+  "paths": {
+    "/healthz": { "get": { "summary": "Liveness" } },
+    "/readyz": { "get": { "summary": "Readiness" } },
+    "/api/v1/tickets": { "get": { "summary": "List tickets" } },
+    "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
+    "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Confirm duplicate/repeat relation" } },
+    "/api/v1/assist/preview": { "post": { "summary": "Assist preview" } },
+    "/api/v1/analytics/overview": { "get": { "summary": "Analytics overview" } },
+    "/api/v1/analytics/query": { "post": { "summary": "Validated analytics query" } },
+    "/api/v1/alerts": { "get": { "summary": "Alerts" } },
+    "/api/v1/forecast": { "get": { "summary": "Forecast" } },
+    "/api/v1/reports": { "get": { "summary": "Reports" } },
+    "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback and inspect learning cycle" } },
+    "/api/v1/learning/cycle/close": { "post": { "summary": "Close learning cycle and train" } },
+    "/api/v1/learning/candidate/evaluation": { "get": { "summary": "Candidate evaluation" } },
+    "/api/v1/learning/candidate/promote": { "post": { "summary": "Promote candidate" } },
+    "/api/v1/learning/candidate/reject": { "post": { "summary": "Reject candidate" } },
+    "/api/v1/models": { "get": { "summary": "Model management" } },
+    "/api/v1/events": { "get": { "summary": "Server-sent events" } },
+    "/internal/v1/classify": { "post": { "summary": "Classification inference" } },
+    "/internal/v1/embed": { "post": { "summary": "Embedding inference" } },
+    "/internal/v1/forecast": { "post": { "summary": "Forecast inference" } },
+    "/internal/v1/anomaly": { "post": { "summary": "Anomaly inference" } },
+    "/internal/v1/training/classifier": { "post": { "summary": "Offline training" } },
+    "/internal/v1/evaluation/classifier": { "post": { "summary": "Offline evaluation" } }
+  }
+}

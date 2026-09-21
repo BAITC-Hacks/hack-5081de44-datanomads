@@ -145,6 +145,23 @@ class MigrationTests(unittest.TestCase):
         self.assertIn("insert into topics", seed)
         self.assertIn("service_other", seed)
 
+    def test_pulse_state_migration_covers_learning_and_alerts(self) -> None:
+        state = (ROOT / "migrations" / "003_pulse_state.sql").read_text(encoding="utf-8").lower()
+        for table in (
+            "response_templates",
+            "alerts",
+            "alert_ticket_links",
+            "relation_feedback",
+            "learning_cycles",
+            "learning_feedback",
+            "model_evaluations",
+            "background_jobs",
+            "audit_log",
+        ):
+            self.assertIn(f"create table if not exists {table}", state)
+        self.assertIn("operator_confirmed_decision", state)
+        self.assertIn("production_model_version", state)
+
 
 if __name__ == "__main__":
     unittest.main()

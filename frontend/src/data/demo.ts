@@ -121,45 +121,18 @@ export const demoTickets: Ticket[] = [
 ]
 
 export const demoData: DashboardData = {
-  tickets: demoTickets,
-  regions: [
-    { name: 'г. Алматы', tickets: 1824, change: 12.4, risk: 'critical' },
-    { name: 'г. Астана', tickets: 1432, change: 6.1, risk: 'watch' },
-    { name: 'Карагандинская обл.', tickets: 983, change: -2.8, risk: 'stable' },
-    { name: 'Шымкент', tickets: 876, change: 8.7, risk: 'watch' },
-    { name: 'Актюбинская обл.', tickets: 742, change: 1.9, risk: 'stable' },
-    { name: 'Түркістан обл.', tickets: 619, change: -4.2, risk: 'stable' },
-  ],
-  topics: [
-    { name: 'Дороги и благоустройство', value: 28, change: 8.4, color: '#8cf0c8' },
-    { name: 'ЖКХ и инфраструктура', value: 21, change: 4.2, color: '#a7d9ff' },
-    { name: 'Социальная помощь', value: 15, change: -1.6, color: '#f8d488' },
-    { name: 'Здравоохранение', value: 13, change: 5.8, color: '#d2b5ff' },
-    { name: 'Цифровые услуги', value: 11, change: 2.5, color: '#ff9d9d' },
-    { name: 'Безопасность', value: 7, change: 10.2, color: '#ff9e73' },
-  ],
-  alerts: [
-    { id: 'ALT-204', title: 'Рост обращений по дорогам', description: 'На 42% больше сообщений о ямах и повреждениях покрытия, чем обычно по понедельникам.', severity: 'critical', region: 'г. Алматы', topic: 'Дороги и благоустройство', detectedAt: 'Сегодня, 10:15', affectedTickets: 128, status: 'Новый' },
-    { id: 'ALT-203', title: 'Повторные обращения по воде', description: 'Доля повторов превысила порог в Туркестанской области за последние 24 часа.', severity: 'watch', region: 'Түркістан обл.', topic: 'Сумен жабдықтау', detectedAt: 'Сегодня, 09:48', affectedTickets: 46, status: 'В работе' },
-    { id: 'ALT-201', title: 'Снижение ответа по соцвыплатам', description: 'Медианное время первого ответа выросло на 18 минут.', severity: 'info', region: 'Актюбинская обл.', topic: 'Социальная помощь', detectedAt: 'Вчера, 18:20', affectedTickets: 31, status: 'Закрыт' },
-  ],
-  forecast: [
-    { label: 'Пн', actual: 620 }, { label: 'Вт', actual: 648 }, { label: 'Ср', actual: 690 }, { label: 'Чт', actual: 718 }, { label: 'Пт', actual: 744 }, { label: 'Сб', actual: 702 }, { label: 'Вс', actual: 688 },
-    { label: 'Пн', forecast: 760, low: 710, high: 806 }, { label: 'Вт', forecast: 782, low: 728, high: 834 }, { label: 'Ср', forecast: 801, low: 742, high: 866 }, { label: 'Чт', forecast: 786, low: 730, high: 849 }, { label: 'Пт', forecast: 824, low: 760, high: 891 },
-  ],
-  models: [
-    { name: 'Классификатор тем', version: 'cls-2026-09-18.4', status: 'production', metric: 'Macro F1', metricValue: '0.884', updatedAt: '18 сен 2026' },
-    { name: 'Поиск похожих', version: 'emb-2026-09-12.2', status: 'production', metric: 'Recall@10', metricValue: '0.912', updatedAt: '12 сен 2026' },
-    { name: 'Кандидат классификатора', version: 'cls-2026-09-21.1', status: 'candidate', metric: 'Macro F1', metricValue: '0.901', updatedAt: 'Сегодня, 08:30' },
-    { name: 'Аномалии', version: 'anom-2026-08-29.1', status: 'shadow', metric: 'Precision', metricValue: '0.76', updatedAt: '29 авг 2026' },
-  ],
+  tickets: [],
+  regions: [],
+  topics: [],
+  alerts: [],
+  forecast: [],
+  models: [],
   learning: {
-    id: 'LC-2026-09-21',
-    stage: 'REVIEW',
-    dataset: 'dataset-2026-09-20.3',
-    feedbackCount: 1842,
-    candidate: 'cls-2026-09-21.1',
-    updatedAt: 'Сегодня, 08:30',
+    id: 'нет данных',
+    stage: 'COLLECT',
+    dataset: 'нет данных',
+    feedbackCount: 0,
+    candidate: 'нет данных',
+    updatedAt: 'нет данных',
   },
 }
-

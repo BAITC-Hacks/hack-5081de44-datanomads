@@ -1,0 +1,26 @@
+# Build and dependency output
+frontend/node_modules/
+frontend/dist/
+backend/target/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local runtime configuration and generated demo output
+.env
+.env.*
+!.env.example
+data/processed/
+data/quarantine/*.jsonl
+
+# Local logs and reports
+*.log
+.tmp/
+
+# Tool metadata
+.serena/

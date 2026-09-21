@@ -59,13 +59,13 @@ const routeTitles: Record<Route, { eyebrow: string; title: string; description: 
   '/situation/models': { eyebrow: 'Центр ситуации', title: 'Статус моделей', description: 'Версии, метрики и решение о продвижении' },
 }
 
-const operatorNav = [{ label: 'Входящие', route: '/operator' as Route, icon: 'inbox' as IconName, badge: '24' }]
+const operatorNav = [{ label: 'Входящие', route: '/operator' as Route, icon: 'inbox' as IconName }]
 const situationNav = [
   { label: 'Обзор', route: '/situation/overview' as Route, icon: 'grid' as IconName },
   { label: 'Регионы', route: '/situation/regions' as Route, icon: 'map' as IconName },
   { label: 'Темы', route: '/situation/topics' as Route, icon: 'tag' as IconName },
   { label: 'Временная динамика', route: '/situation/time-series' as Route, icon: 'trend' as IconName },
-  { label: 'Оповещения', route: '/situation/alerts' as Route, icon: 'bell' as IconName, badge: '3' },
+  { label: 'Оповещения', route: '/situation/alerts' as Route, icon: 'bell' as IconName },
   { label: 'Прогноз', route: '/situation/forecast' as Route, icon: 'forecast' as IconName },
   { label: 'Отчёты', route: '/situation/reports' as Route, icon: 'file' as IconName },
   { label: 'Цикл обучения', route: '/situation/learning' as Route, icon: 'cycle' as IconName },
@@ -177,7 +177,7 @@ function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
   return <header className="topbar">
     <button className="mobile-menu-button icon-button" aria-label="Открыть меню" onClick={onOpenNav}><span className="menu-lines" /></button>
     <div className="topbar-search"><Icon name="search" size={17} /><input aria-label="Поиск по обращениям" placeholder="Поиск по ID, тексту или региону" /><kbd>⌘ K</kbd></div>
-    <div className="topbar-actions"><button className="icon-button" aria-label="Помощь"><Icon name="help" size={18} /></button><button className="notification-button" aria-label="3 новых оповещения"><Icon name="bell" size={18} /><span /></button><div className="topbar-date"><span className="live-dot" />21 сентября 2026</div></div>
+    <div className="topbar-actions"><button className="icon-button" aria-label="Помощь"><Icon name="help" size={18} /></button><button className="notification-button" aria-label="Оповещения"><Icon name="bell" size={18} /><span /></button><div className="topbar-date"><span className="live-dot" />дата из API</div></div>
   </header>
 }
 
@@ -189,14 +189,14 @@ function RouteContent({ route, data, onDataChange, onToast }: { route: Route; da
   switch (route) {
     case '/operator': return <OperatorPage tickets={data.tickets} onDataChange={(tickets) => onDataChange({ ...data, tickets })} onToast={onToast} />
     case '/situation/overview': return <OverviewPage data={data} onNavigate={navigate} />
-    case '/situation/regions': return <RegionsPage regions={data.regions} />
-    case '/situation/topics': return <TopicsPage topics={data.topics} />
-    case '/situation/time-series': return <TimeSeriesPage />
-    case '/situation/alerts': return <AlertsPage alerts={data.alerts} onToast={onToast} />
-    case '/situation/forecast': return <ForecastPage forecast={data.forecast} />
-    case '/situation/reports': return <ReportsPage onToast={onToast} />
-    case '/situation/learning': return <LearningPage learning={data.learning} />
-    case '/situation/models': return <ModelsPage models={data.models} />
+    case '/situation/regions': return <CleanRegionsPage regions={data.regions} />
+    case '/situation/topics': return <CleanTopicsPage topics={data.topics} />
+    case '/situation/time-series': return <CleanTimeSeriesPage />
+    case '/situation/alerts': return <CleanAlertsPage alerts={data.alerts} onToast={onToast} />
+    case '/situation/forecast': return <CleanForecastPage forecast={data.forecast} />
+    case '/situation/reports': return <CleanReportsPage onToast={onToast} />
+    case '/situation/learning': return <CleanLearningPage learning={data.learning} />
+    case '/situation/models': return <CleanModelsPage models={data.models} />
   }
 }
 
@@ -234,7 +234,7 @@ function OperatorPage({ tickets, onDataChange, onToast }: { tickets: Ticket[]; o
   }
 
   return <div className="operator-page">
-    <div className="operator-summary"><div className="summary-item"><span className="summary-value">24</span><span className="summary-label">новых сегодня</span><span className="summary-trend positive">+8,4%</span></div><div className="summary-item"><span className="summary-value">89%</span><span className="summary-label">подтверждено без правок</span><span className="summary-trend positive">+2,1 п.п.</span></div><div className="summary-item"><span className="summary-value">14 мин</span><span className="summary-label">медиана до решения</span><span className="summary-trend negative">+3 мин</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">система в норме</span><span className="summary-sub">Последнее обновление 1 мин назад</span></span></div></div>
+    <div className="operator-summary"><div className="summary-item"><span className="summary-value">{filtered.length}</span><span className="summary-label">обращений в загруженной выборке</span><span className="summary-trend">из API</span></div><div className="summary-item"><span className="summary-value">—</span><span className="summary-label">подтверждение без правок</span><span className="summary-trend">нет данных</span></div><div className="summary-item"><span className="summary-value">—</span><span className="summary-label">время до решения</span><span className="summary-trend">нет данных</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">состояние API</span><span className="summary-sub">Метрики SLA не подключены</span></span></div></div>
     <div className="workbench-grid">
       <section className="ticket-queue" aria-label="Очередь обращений">
         <div className="section-toolbar"><div><h2>Очередь на разбор <span className="count-pill">{filtered.length}</span></h2><p>Сначала — обращения с высоким влиянием</p></div><button className="icon-button" aria-label="Настроить очередь"><Icon name="settings" size={17} /></button></div>
@@ -275,12 +275,71 @@ function PriorityBadge({ priority }: { priority: Priority }) {
   return <span className={`priority-badge priority-${priority === 'Высокий' ? 'high' : priority === 'Средний' ? 'medium' : 'low'}`}><span />{priority}</span>
 }
 
+function CleanRegionsPage({ regions }: { regions: RegionMetric[] }) {
+  if (!regions.length) return <div className="analytics-page"><NoData message="Нет данных по регионам." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Нагрузка по регионам" /><div className="region-table region-table-full"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{regions.map((region) => <div className="region-table-row region-table-row-full" key={region.name}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{region.change == null ? '—' : String(region.change) + '%'}</span><span>{region.risk ?? 'нет данных'}</span></div>)}</div></section></div>
+}
+
+function CleanTopicsPage({ topics }: { topics: TopicMetric[] }) {
+  if (!topics.length) return <div className="analytics-page"><NoData message="Нет данных по темам." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Распределение по темам" /><div className="topic-bars">{topics.map((topic) => <div className="topic-bar-row" key={topic.name}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value) + '%', background: topic.color }} /></div></div>)}</div></section></div>
+}
+
+function CleanTimeSeriesPage() {
+  return <div className="analytics-page"><NoData message="Временной ряд не предоставлен API." /></div>
+}
+
+function CleanAlertsPage({ alerts, onToast: _onToast }: { alerts: Alert[]; onToast: (message: string) => void }) {
+  if (!alerts.length) return <div className="analytics-page"><NoData message="Нет подключённых оповещений." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Оповещения" /><div className="alerts-table">{alerts.map((alert) => <div className="alert-row" key={alert.id}><span className={"alert-dot alert-" + alert.severity} /><span className="alert-row-main"><strong>{alert.title}</strong><span>{alert.description}</span><small>{alert.detectedAt} · {alert.region}</small></span><span className="alert-count">{alert.affectedTickets}</span></div>)}</div></section></div>
+}
+
+function CleanForecastPage({ forecast }: { forecast: ForecastPoint[] }) {
+  if (!forecast.length) return <div className="analytics-page"><NoData message="Прогноз не предоставлен API." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
+}
+
+function CleanReportsPage({ onToast: _onToast }: { onToast: (message: string) => void }) {
+  return <div className="analytics-page"><NoData message="Отчёты появятся после подключения генератора отчётов." /></div>
+}
+
+function CleanLearningPage({ learning }: { learning: LearningCycle }) {
+  if (learning.id === 'нет данных') return <div className="analytics-page"><NoData message="Цикл обучения не предоставлен API." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title={'Цикл ' + learning.id} /><div className="dataset-stat"><span>Состояние</span><strong>{learning.stage}</strong></div><div className="dataset-stat"><span>Обратная связь</span><strong>{learning.feedbackCount}</strong></div><div className="dataset-stat"><span>Датасет</span><strong>{learning.dataset}</strong></div><div className="dataset-stat"><span>Кандидат</span><strong>{learning.candidate}</strong></div></section></div>
+}
+
+function CleanModelsPage({ models }: { models: ModelStatus[] }) {
+  if (!models.length) return <div className="analytics-page"><NoData message="Реестр моделей не предоставлен API." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Реестр моделей" /><div className="models-table">{models.map((model) => <div className="models-row" key={model.version}><strong>{model.name}</strong><code>{model.version}</code><span>{model.status}</span><span><strong>{model.metricValue}</strong><small>{model.metric}</small></span><span>{model.updatedAt}</span></div>)}</div></section></div>
+}
+
+
 function OverviewPage({ data, onNavigate }: { data: DashboardData; onNavigate: (route: Route) => void }) {
-  return <div className="analytics-page"><div className="metrics-grid"><MetricCard label="Всего обращений" value="6 476" change="+6,8%" detail="к прошлой неделе" tone="mint" icon="inbox" /><MetricCard label="В работе" value="1 184" change="−4,2%" detail="очередь сокращается" tone="blue" icon="pulse" /><MetricCard label="SLA первого ответа" value="92,6%" change="+1,9 п.п." detail="цель — 90%" tone="amber" icon="clock" /><MetricCard label="Аномальные сигналы" value="3" change="1 новый" detail="требуют внимания" tone="rose" icon="bell" /></div><div className="analytics-grid overview-grid"><section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} /><div className="chart-headline"><div><strong>6 476</strong><span>обращений за 7 дней</span></div><div className="chart-legend"><span><i className="legend-dot mint-dot" />факт</span><span><i className="legend-dot muted-dot" />предыдущая неделя</span></div></div><Sparkline large /></section><section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} /><div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <div className="topic-bar-row" key={topic.name}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: `${topic.value * 2.7}%`, background: topic.color }} /></div></div>)}</div></section><section className="panel"><PanelHeading title="Сигналы" action="Открыть все" onClick={() => onNavigate('/situation/alerts')} /><div className="alert-list">{data.alerts.map((alert) => <AlertListItem alert={alert} key={alert.id} />)}</div></section><section className="panel span-two region-panel"><PanelHeading title="Регионы" action="К карте регионов" onClick={() => onNavigate('/situation/regions')} /><div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} />)}</div></section><section className="panel query-panel"><div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div><h3>Найдите ответ в потоке</h3><p>Например: «Где больше всего повторных обращений?»</p><div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Задайте вопрос на русском" /><button aria-label="Выполнить поиск"><Icon name="arrow" size={16} /></button></div><span className="query-note">Ответы строятся по проверенным срезам данных</span></section></div></div>
+  const total = data.tickets.length
+  const highPriority = data.tickets.filter((ticket) => ticket.priority === 'Высокий').length
+  return <div className="analytics-page">
+    <div className="metrics-grid">
+      <MetricCard label="Обращений в выборке" value={String(total)} change="из API" detail="загруженная выборка" tone="mint" icon="inbox" />
+      <MetricCard label="Высокий приоритет" value={String(highPriority)} change="из API" detail="по текущей выборке" tone="rose" icon="pulse" />
+      <MetricCard label="SLA первого ответа" value="—" change="нет данных" detail="метрика не подключена" tone="amber" icon="clock" />
+      <MetricCard label="Аномальные сигналы" value="—" change="нет данных" detail="метрика не подключена" tone="blue" icon="bell" />
+    </div>
+    <div className="analytics-grid overview-grid">
+      <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} /><NoData message="Временной ряд появится после подключения источника аналитики." /></section>
+      <section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} />{data.topics.length ? <div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <div className="topic-bar-row" key={topic.name}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value * 2.7) + '%', background: topic.color }} /></div></div>)}</div> : <NoData message="Нет данных по темам." />}</section>
+      <section className="panel"><PanelHeading title="Сигналы" action="Открыть все" onClick={() => onNavigate('/situation/alerts')} />{data.alerts.length ? <div className="alert-list">{data.alerts.map((alert) => <AlertListItem alert={alert} key={alert.id} />)}</div> : <NoData message="Нет подключённых сигналов." />}</section>
+      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="К карте регионов" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
+      <section className="panel query-panel"><div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div><h3>Найдите ответ в потоке</h3><p>Запросы доступны после подключения аналитического источника.</p><div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Источник аналитики не подключён" disabled /><button aria-label="Выполнить поиск" disabled><Icon name="arrow" size={16} /></button></div><span className="query-note">Нет неподтверждённых агрегатов</span></section>
+    </div>
+  </div>
 }
 
 function MetricCard({ label, value, change, detail, tone, icon }: { label: string; value: string; change: string; detail: string; tone: string; icon: IconName }) {
   return <article className={`metric-card metric-${tone}`}><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon name={icon} size={17} /></span></div><div className="metric-value">{value}</div><div className="metric-bottom"><span className="metric-change">{change}</span><span>{detail}</span></div></article>
+}
+
+function NoData({ message }: { message: string }) {
+  return <div className="state-card"><div className="state-icon">—</div><p>{message}</p></div>
 }
 
 function PanelHeading({ title, action, onClick }: { title: string; action?: string; onClick?: () => void }) {
@@ -297,43 +356,19 @@ function AlertListItem({ alert }: { alert: Alert }) {
 }
 
 function RegionRow({ region }: { region: RegionMetric }) {
-  return <div className="region-table-row"><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span className={region.change >= 0 ? 'trend-up' : 'trend-down'}>{region.change >= 0 ? '+' : ''}{region.change}%</span><span className={`risk-state risk-${region.risk}`}><i />{region.risk === 'critical' ? 'Внимание' : region.risk === 'watch' ? 'Наблюдение' : 'Стабильно'}</span></div>
+  const change = region.change == null ? '—' : String(region.change) + '%'
+  const risk = region.risk ?? 'нет данных'
+  return <div className="region-table-row"><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{change}</span><span>{risk}</span></div>
 }
 
-function RegionsPage({ regions }: { regions: RegionMetric[] }) {
-  return <div className="analytics-page"><div className="metrics-grid"><MetricCard label="Регионов под наблюдением" value="20" change="3 сигнала" detail="за последние 24 часа" tone="mint" icon="map" /><MetricCard label="Максимальная динамика" value="+12,4%" change="г. Алматы" detail="к прошлой неделе" tone="rose" icon="trend" /><MetricCard label="Стабильная нагрузка" value="14" change="из 20 регионов" detail="без значимых сдвигов" tone="blue" icon="check" /></div><div className="panel"><PanelHeading title="Нагрузка по регионам" action="Скачать CSV" /><div className="region-table region-table-full"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span><span>Тренд</span></div>{regions.map((region) => <div className="region-table-row region-table-row-full" key={region.name}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span className={region.change >= 0 ? 'trend-up' : 'trend-down'}>{region.change >= 0 ? '+' : ''}{region.change}%</span><span className={`risk-state risk-${region.risk}`}><i />{region.risk === 'critical' ? 'Внимание' : region.risk === 'watch' ? 'Наблюдение' : 'Стабильно'}</span><Sparkline /></div>)}</div></div></div>
-}
 
-function TopicsPage({ topics }: { topics: TopicMetric[] }) {
-  return <div className="analytics-page"><div className="topics-layout"><section className="panel topic-distribution"><PanelHeading title="Распределение по темам" action="Таксономия v1.4" /><div className="donut-wrap"><div className="donut"><div><strong>100%</strong><span>обращений</span></div></div><div className="donut-legend">{topics.map((topic) => <div key={topic.name}><span className="legend-color" style={{ background: topic.color }} /><span>{topic.name}</span><strong>{topic.value}%</strong></div>)}</div></div></section><section className="panel topic-rank"><PanelHeading title="Изменения за неделю" /><div className="topic-rank-list">{topics.map((topic, index) => <div className="topic-rank-row" key={topic.name}><span className="rank-number">{String(index + 1).padStart(2, '0')}</span><span className="rank-color" style={{ background: topic.color }} /><strong>{topic.name}</strong><span className={topic.change >= 0 ? 'trend-up' : 'trend-down'}>{topic.change >= 0 ? '+' : ''}{topic.change}%</span><div className="rank-bar"><span style={{ width: `${Math.min(100, Math.abs(topic.change) * 8 + 14)}%`, background: topic.color }} /></div></div>)}</div></section></div></div>
-}
 
-function TimeSeriesPage() {
-  return <div className="analytics-page"><section className="panel time-series-panel"><div className="panel-heading"><div><h2>Обращения по дням</h2><p className="panel-subtitle">Последние 30 дней · все регионы</p></div><div className="chart-controls"><button className="period-button active">Все</button><button className="period-button">Новые</button><button className="period-button">Повторные</button></div></div><div className="big-chart"><div className="y-axis"><span>900</span><span>600</span><span>300</span><span>0</span></div><div className="chart-area"><div className="chart-grid-lines"><i /><i /><i /><i /></div><svg viewBox="0 0 900 290" preserveAspectRatio="none" aria-label="Динамика обращений за 30 дней"><defs><linearGradient id="area-gradient" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#8cf0c8" stopOpacity=".32" /><stop offset="1" stopColor="#8cf0c8" stopOpacity="0" /></linearGradient></defs><path d="M0 205 L30 218 L60 195 L90 202 L120 172 L150 182 L180 160 L210 170 L240 146 L270 152 L300 130 L330 139 L360 117 L390 123 L420 100 L450 109 L480 88 L510 104 L540 81 L570 88 L600 63 L630 73 L660 51 L690 60 L720 35 L750 48 L780 29 L810 39 L840 22 L870 31 L900 15 L900 290 L0 290Z" fill="url(#area-gradient)" /><path d="M0 205 L30 218 L60 195 L90 202 L120 172 L150 182 L180 160 L210 170 L240 146 L270 152 L300 130 L330 139 L360 117 L390 123 L420 100 L450 109 L480 88 L510 104 L540 81 L570 88 L600 63 L630 73 L660 51 L690 60 L720 35 L750 48 L780 29 L810 39 L840 22 L870 31 L900 15" fill="none" stroke="#8cf0c8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg><div className="x-axis"><span>23 авг</span><span>30 авг</span><span>06 сен</span><span>13 сен</span><span>20 сен</span></div></div></div></section><div className="metrics-grid"><MetricCard label="Пиковый день" value="824" change="18 сен" detail="+14% к обычному" tone="mint" icon="trend" /><MetricCard label="Среднее в день" value="648" change="+6,8%" detail="к предыдущему периоду" tone="blue" icon="pulse" /><MetricCard label="Повторные" value="11,4%" change="−0,8 п.п." detail="доля от потока" tone="amber" icon="cycle" /></div></div>
-}
 
-function AlertsPage({ alerts, onToast }: { alerts: Alert[]; onToast: (message: string) => void }) {
-  const [selected, setSelected] = useState<Alert | null>(alerts[0] ?? null)
-  return <div className="analytics-page"><div className="alerts-layout"><section className="panel alerts-list-panel"><PanelHeading title="Все оповещения" action="Настроить пороги" /><div className="alert-filter-row"><button className="filter-chip active">Все <span>{alerts.length}</span></button><button className="filter-chip">Новые <span>1</span></button><button className="filter-chip">В работе <span>1</span></button></div><div className="alerts-table">{alerts.map((alert) => <button className={`alert-row ${selected?.id === alert.id ? 'alert-row-active' : ''}`} key={alert.id} onClick={() => setSelected(alert)}><span className={`alert-dot alert-${alert.severity}`} /><span className="alert-row-main"><strong>{alert.title}</strong><span>{alert.description}</span><small>{alert.detectedAt} · {alert.region}</small></span><span className="alert-count">{alert.affectedTickets}<small>обращений</small></span><Icon name="chevron" size={16} /></button>)}</div></section>{selected && <section className="panel alert-detail-panel"><div className="detail-overline"><span className={`alert-dot alert-${selected.severity}`} />{selected.status}</div><h2>{selected.title}</h2><p>{selected.description}</p><div className="alert-facts"><div><span>Регион</span><strong>{selected.region}</strong></div><div><span>Тема</span><strong>{selected.topic}</strong></div><div><span>Обнаружено</span><strong>{selected.detectedAt}</strong></div><div><span>Затронуто</span><strong>{selected.affectedTickets} обращений</strong></div></div><div className="alert-detail-chart"><div className="field-label">Сигнал за 24 часа</div><Sparkline large /></div><button className="button button-primary full-width" onClick={() => onToast(`Открыта очередь по сигналу «${selected.title}»`)}>Открыть связанные обращения <Icon name="arrow" size={16} /></button></section>}</div></div>
-}
 
-function ForecastPage({ forecast }: { forecast: ForecastPoint[] }) {
-  return <div className="analytics-page"><section className="panel forecast-panel"><div className="panel-heading"><div><h2>Прогноз нагрузки</h2><p className="panel-subtitle">Seasonal Naive · горизонт 5 дней · обновлено сегодня в 08:00</p></div><span className="model-status-chip"><i />модель в норме</span></div><div className="forecast-chart"><div className="y-axis"><span>900</span><span>600</span><span>300</span><span>0</span></div><div className="chart-area"><div className="chart-grid-lines"><i /><i /><i /><i /></div><div className="forecast-bars">{forecast.map((point, index) => <div className={`forecast-column ${point.forecast ? 'forecast-column-predicted' : ''}`} key={`${point.label}-${index}`}><div className="forecast-range" style={point.forecast ? { height: `${((point.high ?? 0) - (point.low ?? 0)) / 3.2}px`, bottom: `${(point.low ?? 0) / 3.2}px` } : undefined} /><div className="forecast-bar" style={{ height: `${((point.actual ?? point.forecast ?? 0) / 900) * 230}px` }} /><span>{point.label}</span></div>)}</div></div></div><div className="forecast-legend"><span><i className="legend-dot mint-dot" />фактические обращения</span><span><i className="legend-dot blue-dot" />прогноз</span><span><i className="legend-band" />диапазон неопределённости</span></div></section><div className="forecast-callout"><div className="callout-icon"><Icon name="forecast" size={20} /></div><div><strong>Ожидается рост к пятнице</strong><p>Прогноз показывает до 824 обращений в пятницу (+8,2% к среднему). Проверьте доступность операторов в Алматы и Астане.</p></div></div></div>
-}
 
-function ReportsPage({ onToast }: { onToast: (message: string) => void }) {
-  const reports = [{ title: 'Еженедельная сводка по обращениям', meta: '16–22 сентября 2026 · 8 страниц', type: 'PDF', color: 'rose' }, { title: 'Региональные показатели SLA', meta: 'Сентябрь 2026 · 20 регионов', type: 'XLSX', color: 'mint' }, { title: 'Контрольная выборка обучения', meta: 'Цикл LC-2026-09-21 · 1 842 решения', type: 'PDF', color: 'blue' }]
-  return <div className="analytics-page"><section className="reports-toolbar"><div className="report-filter"><Icon name="search" size={16} /><input aria-label="Поиск отчётов" placeholder="Найти отчёт" /></div><button className="button button-primary" onClick={() => onToast('Новый отчёт добавлен в очередь формирования')}><span>+</span>Сформировать отчёт</button></section><section className="panel reports-panel"><PanelHeading title="Последние отчёты" action="Архив отчётов" /><div className="reports-list">{reports.map((report) => <div className="report-row" key={report.title}><div className={`report-file report-file-${report.color}`}><Icon name="file" size={19} /><small>{report.type}</small></div><div className="report-copy"><strong>{report.title}</strong><span>{report.meta}</span></div><span className="report-ready"><i />Готов</span><button className="button button-quiet"><Icon name="download" size={15} />Скачать</button><button className="icon-button" aria-label={`Другие действия: ${report.title}`}><Icon name="more" size={17} /></button></div>)}</div></section></div>
-}
 
-function LearningPage({ learning }: { learning: LearningCycle }) {
-  const steps = [{ key: 'COLLECT', label: 'Сбор обратной связи', detail: `${learning.feedbackCount.toLocaleString('ru-RU')} решений`, done: true }, { key: 'TRAIN', label: 'Обучение кандидата', detail: 'cls-2026-09-21.1', done: true }, { key: 'EVALUATE', label: 'Оценка в shadow', detail: 'Macro F1 · 0.901', done: true }, { key: 'REVIEW', label: 'Решение человека', detail: 'Ожидает ревью', done: false }]
-  return <div className="analytics-page"><div className="learning-layout"><section className="panel learning-progress"><div className="panel-heading"><div><h2>Цикл {learning.id}</h2><p className="panel-subtitle">Последнее обновление · {learning.updatedAt}</p></div><span className="stage-chip">{learning.stage}</span></div><div className="learning-stepper">{steps.map((step, index) => <div className={`learning-step ${step.done ? 'step-done' : 'step-current'}`} key={step.key}><div className="step-marker">{step.done ? <Icon name="check" size={15} /> : index + 1}</div><div><strong>{step.label}</strong><span>{step.detail}</span></div>{index < steps.length - 1 && <div className="step-line" />}</div>)}</div><div className="learning-rule"><Icon name="help" size={17} /><p>Кандидат не попадёт в production автоматически. После ревью результат можно <strong>продвинуть</strong> или <strong>отклонить</strong>.</p></div></section><section className="panel dataset-panel"><PanelHeading title="Датасет цикла" action="Открыть манифест" /><div className="dataset-stat"><span>Версия</span><strong>{learning.dataset}</strong></div><div className="dataset-stat"><span>Решений оператора</span><strong>{learning.feedbackCount.toLocaleString('ru-RU')}</strong></div><div className="dataset-stat"><span>Кандидат</span><strong>{learning.candidate}</strong></div><div className="dataset-stat"><span>Языки</span><strong>RU · KZ</strong></div></section></div><section className="panel learning-log"><PanelHeading title="История цикла" action="Все события" /><div className="event-list"><div><span className="event-dot" /><span><strong>Кандидат готов к ревью</strong><small>Сегодня, 08:30 · ML Reviewer</small></span></div><div><span className="event-dot" /><span><strong>Shadow-оценка завершена</strong><small>Сегодня, 07:55 · Macro F1 0.901</small></span></div><div><span className="event-dot" /><span><strong>Выборка зафиксирована</strong><small>Вчера, 18:12 · 1 842 решения</small></span></div></div></section></div>
-}
 
-function ModelsPage({ models }: { models: ModelStatus[] }) {
-  return <div className="analytics-page"><div className="model-summary"><div className="model-summary-copy"><span className="eyebrow"><span className="eyebrow-line" />Контур моделей</span><h2>Модели работают штатно</h2><p>Все production-версии отвечают за последние 24 часа. Один кандидат ожидает решения ревьюера.</p></div><div className="model-health"><span className="health-ring"><Icon name="check" size={22} /></span><strong>99,98%</strong><span>доступность inference</span></div></div><section className="panel models-panel"><PanelHeading title="Реестр моделей" action="Открыть реестр" /><div className="models-table"><div className="models-head"><span>Модель</span><span>Версия</span><span>Статус</span><span>Метрика</span><span>Обновлена</span><span /></div>{models.map((model) => <div className="models-row" key={model.version}><strong>{model.name}</strong><code>{model.version}</code><span className={`model-status model-${model.status}`}><i />{model.status === 'production' ? 'Production' : model.status === 'candidate' ? 'Кандидат' : 'Shadow'}</span><span><strong>{model.metricValue}</strong><small>{model.metric}</small></span><span>{model.updatedAt}</span><button className="icon-button" aria-label={`Действия для ${model.name}`}><Icon name="more" size={17} /></button></div>)}</div></section></div>
-}
+
+
 
 export default App
-

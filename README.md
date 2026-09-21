@@ -10,16 +10,16 @@ operator feedback, аналитику, alerts, forecasts и версии мод�
 
 | Контур | Статус в репозитории |
 | --- | --- |
-| Compose topology, Nginx gateway и env contract | зафиксированы в корне |
-| Operator Workspace / Situation Center | реализуется в `frontend/` |
-| Rust Core API | реализуется в `backend/` |
-| Python ML runtime/worker | реализуется в `ml-service/` |
-| Data importers и demo fixtures | реализуются в `data/` |
-| OpenAPI и инженерные контракты | `docs/` |
+| Compose topology, Nginx gateway и env contract | demo-контур реализован |
+| Operator Workspace / Situation Center | demo-контур реализован в `frontend/` |
+| Rust Core API | demo-контур реализован в `backend/` |
+| Python ML runtime/worker | deterministic runtime реализован в `ml-service/` |
+| Data importers и demo fixtures | import/quarantine и fixtures реализованы в `data/` |
+| OpenAPI и инженерные контракты | зафиксированы в `docs/` |
 
-Compose-контракт ожидает Dockerfiles и runtime endpoints от сервисных
-компонентов: frontend `0.0.0.0:5174`, Core API `0.0.0.0:8080`, ML service
-`0.0.0.0:8000`. Внешний доступ идёт через Nginx на `PULSE_HTTP_PORT`.
+Compose-контракт запускает сервисы на frontend `0.0.0.0:5174`, Core API
+`0.0.0.0:8080` и ML service `0.0.0.0:8000`. Внешний доступ идёт через Nginx
+на `PULSE_HTTP_PORT`.
 
 ## Быстрый запуск demo
 
@@ -64,11 +64,11 @@ Frontend никогда не вызывает ML service напрямую. Core 
 экспорт. ML service отвечает только за inference, embeddings, anomaly,
 forecast, training/evaluation и model metadata.
 
-Основной vertical slice:
+Основной реализованный demo vertical slice:
 
 ```text
 demo ticket → assist preview → AI prediction → operator confirm/correct
-→ persisted feedback → analytics/alerts → controlled learning cycle
+→ persisted feedback → analytics/alerts → controlled learning cycle → export
 ```
 
 Controlled Learning Loop не является online self-learning:
@@ -111,6 +111,8 @@ npm run build --prefix frontend
 scripts/smoke
 ```
 
-Если конкретный сервис ещё не имеет Dockerfile или endpoint, это означает
-незавершённый P0 и должно быть отражено в статусе, а не скрыто фиктивным
-healthcheck.
+Полный `docker compose ... up --build` зависит от доступного Docker Engine и
+локального image cache. В текущем demo Core использует deterministic in-memory
+store; PostgreSQL/Qdrant миграции, контракты и Compose topology подготовлены для
+подключения production repository, но synthetic demo не выдаётся за реальные
+данные или model quality.

@@ -34,14 +34,14 @@ export interface Ticket {
 export interface RegionMetric {
   name: string
   tickets: number
-  change: number
-  risk: 'stable' | 'watch' | 'critical'
+  change?: number
+  risk?: 'stable' | 'watch' | 'critical'
 }
 
 export interface TopicMetric {
   name: string
   value: number
-  change: number
+  change?: number
   color: string
 }
 
@@ -94,4 +94,3 @@ export interface DashboardData {
 }
 
 export type ApiSource = 'api' | 'demo'
-

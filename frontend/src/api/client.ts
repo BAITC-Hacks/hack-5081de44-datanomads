@@ -73,16 +73,18 @@ interface BackendTicketDetail {
 }
 
 interface BackendAnalytics {
+  source?: string
   overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number }
   by_region: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number }>
   by_topic: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number }>
   time_series: Array<{ date: string; tickets: number; resolved: number }>
 }
 
-interface BackendForecast { points: Array<{ date: string; tickets: number; resolved: number }>; model: string }
+interface BackendForecast { source?: string; points: Array<{ date: string; tickets: number; resolved: number }>; model: string }
 interface BackendAlert { id: string; severity: string; status: string; title: string; description: string; region_id: string; topic_id: string; ticket_count: number; detected_at: string }
-interface BackendLearning { active_cycle?: { id: string; state: string; dataset_version: string; candidate_model_version: string; feedback_count: number; updated_at: string; metrics: { macro_f1: number } } }
-interface BackendModels { items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number; accuracy: number }; created_at: string }> }
+interface BackendAlerts { source?: string; items: BackendAlert[] }
+interface BackendLearning { source?: string; active_cycle?: { id: string; state: string; dataset_version: string; candidate_model_version: string; feedback_count: number; updated_at: string; metrics: { macro_f1: number } } }
+interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
 
 function mapPriority(value: string): Priority {
   if (value === 'high' || value === 'Высокий') return 'Высокий'
@@ -163,21 +165,21 @@ async function loadApiDashboard(): Promise<DashboardData> {
     request<{ items: BackendTicket[] }>('/tickets?limit=50'),
     request<BackendAnalytics>('/analytics?range=7d'),
     request<BackendForecast>('/forecast'),
-    request<{ items: BackendAlert[] }>('/alerts'),
+    request<BackendAlerts>('/alerts'),
     request<BackendLearning>('/learning'),
     request<BackendModels>('/models'),
   ])
   const detailResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticket.id)}`).catch(() => undefined)))
   const previewResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendAssistPreview>('/assist/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket_id: ticket.id }) }).catch(() => undefined)))
   const tickets = ticketResponse.items.map((ticket, index) => mapBackendTicket(ticket, detailResults[index], ticketResponse.items, previewResults[index]))
-  const regions: RegionMetric[] = analytics.by_region.filter((region) => region.tickets > 0).map((region, index) => ({ name: region.label, tickets: region.tickets, change: index % 2 === 0 ? 6.4 : -2.1, risk: region.high_priority > 2 ? 'watch' : 'stable' }))
-  const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0).map((topic, index) => ({ name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), change: index % 2 === 0 ? 4.2 : -1.4, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
-  const alerts: Alert[] = alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity === 'critical' ? 'critical' : alert.severity === 'warning' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status === 'acknowledged' ? 'В работе' : alert.status === 'closed' ? 'Закрыт' : 'Новый' }))
-  const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date.slice(5), forecast: point.tickets, low: Math.max(0, point.tickets - 2), high: point.tickets + 2 }))
+  const regions: RegionMetric[] = analytics.source === 'postgres' ? analytics.by_region.filter((region) => region.tickets > 0).map((region) => ({ name: region.label, tickets: region.tickets })) : []
+  const topics: TopicMetric[] = analytics.source === 'postgres' ? analytics.by_topic.filter((topic) => topic.tickets > 0).map((topic, index) => ({ name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] })) : []
+  const alerts: Alert[] = alertsResponse.source === 'postgres' ? alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity === 'critical' ? 'critical' : alert.severity === 'warning' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status === 'acknowledged' ? 'В работе' : alert.status === 'closed' ? 'Закрыт' : 'Новый' })) : []
+  const forecastPoints: ForecastPoint[] = forecast.source === 'postgres' ? forecast.points.map((point) => ({ label: point.date.slice(5), actual: point.tickets })) : []
   const cycle = learning.active_cycle
-  const learningData: LearningCycle = cycle ? { id: cycle.id, stage: cycle.state === 'REVIEW' ? 'REVIEW' : cycle.state === 'EVALUATE' ? 'EVALUATE' : cycle.state === 'TRAIN' ? 'TRAIN' : 'COLLECT', dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, updatedAt: cycle.updated_at } : demoData.learning
-  const modelData: ModelStatus[] = models.items.map((model) => ({ name: model.model_family, version: model.id, status: model.status === 'production' ? 'production' : model.status === 'candidate' ? 'candidate' : 'shadow', metric: 'Macro F1', metricValue: model.metrics.macro_f1.toFixed(3), updatedAt: model.created_at }))
-  return { tickets, regions: regions.length ? regions : demoData.regions, topics: topics.length ? topics : demoData.topics, alerts: alerts.length ? alerts : demoData.alerts, forecast: forecastPoints.length ? forecastPoints : demoData.forecast, models: modelData.length ? modelData : demoData.models, learning: learningData }
+  const learningData: LearningCycle = learning && learning.source === 'postgres' && cycle ? { id: cycle.id, stage: cycle.state === 'REVIEW' ? 'REVIEW' : cycle.state === 'EVALUATE' ? 'EVALUATE' : cycle.state === 'TRAIN' ? 'TRAIN' : 'COLLECT', dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, updatedAt: cycle.updated_at } : demoData.learning
+  const modelData: ModelStatus[] = models.source === 'postgres' ? models.items.map((model) => ({ name: model.model_family, version: model.id, status: model.status === 'production' ? 'production' : model.status === 'candidate' ? 'candidate' : 'shadow', metric: 'доступно в реестре', metricValue: model.metrics.macro_f1 == null ? '—' : model.metrics.macro_f1.toFixed(3), updatedAt: model.created_at })) : []
+  return { tickets, regions, topics, alerts, forecast: forecastPoints, models: modelData, learning: learningData }
 }
 
 export async function loadDashboard(): Promise<ApiResult<DashboardData>> {
@@ -194,8 +196,21 @@ export async function loadDashboard(): Promise<ApiResult<DashboardData>> {
 
 export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
   try {
-    const data = await request<Ticket[]>('/tickets?limit=50')
-    return { data, source: 'api' }
+    const response = await request<{ items: BackendTicket[] }>('/tickets?limit=50')
+    const tickets = await Promise.all(
+      response.items.map(async (item) => {
+        const [detail, preview] = await Promise.all([
+          request<BackendTicketDetail>(`/tickets/${encodeURIComponent(item.id)}`).catch(() => undefined),
+          request<BackendAssistPreview>('/assist/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket_id: item.id }),
+          }).catch(() => undefined),
+        ])
+        return mapBackendTicket(item, detail, response.items, preview)
+      }),
+    )
+    return { data: tickets, source: 'api' }
   } catch (error) {
     return {
       data: demoData.tickets,
