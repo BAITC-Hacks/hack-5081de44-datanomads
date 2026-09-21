@@ -1,0 +1,122 @@
+[
+  {
+    "id": "KZ-ABAY",
+    "name_ru": "Абайская область",
+    "name_kk": "Абай облысы",
+    "name_en": "Abai Region"
+  },
+  {
+    "id": "KZ-AKMOLA",
+    "name_ru": "Акмолинская область",
+    "name_kk": "Ақмола облысы",
+    "name_en": "Akmola Region"
+  },
+  {
+    "id": "KZ-AKTOBE",
+    "name_ru": "Актюбинская область",
+    "name_kk": "Ақтөбе облысы",
+    "name_en": "Aktobe Region"
+  },
+  {
+    "id": "KZ-ALMATY-REGION",
+    "name_ru": "Алматинская область",
+    "name_kk": "Алматы облысы",
+    "name_en": "Almaty Region"
+  },
+  {
+    "id": "KZ-ATYRAU",
+    "name_ru": "Атырауская область",
+    "name_kk": "Атырау облысы",
+    "name_en": "Atyrau Region"
+  },
+  {
+    "id": "KZ-EAST-KAZAKHSTAN",
+    "name_ru": "Восточно-Казахстанская область",
+    "name_kk": "Шығыс Қазақстан облысы",
+    "name_en": "East Kazakhstan Region"
+  },
+  {
+    "id": "KZ-ZHAMBYL",
+    "name_ru": "Жамбылская область",
+    "name_kk": "Жамбыл облысы",
+    "name_en": "Zhambyl Region"
+  },
+  {
+    "id": "KZ-ZHETISU",
+    "name_ru": "Область Жетісу",
+    "name_kk": "Жетісу облысы",
+    "name_en": "Zhetisu Region"
+  },
+  {
+    "id": "KZ-WEST-KAZAKHSTAN",
+    "name_ru": "Западно-Казахстанская область",
+    "name_kk": "Батыс Қазақстан облысы",
+    "name_en": "West Kazakhstan Region"
+  },
+  {
+    "id": "KZ-KARAGANDA",
+    "name_ru": "Карагандинская область",
+    "name_kk": "Қарағанды облысы",
+    "name_en": "Karaganda Region"
+  },
+  {
+    "id": "KZ-KOSTANAY",
+    "name_ru": "Костанайская область",
+    "name_kk": "Қостанай облысы",
+    "name_en": "Kostanay Region"
+  },
+  {
+    "id": "KZ-KYZYLORDA",
+    "name_ru": "Кызылординская область",
+    "name_kk": "Қызылорда облысы",
+    "name_en": "Kyzylorda Region"
+  },
+  {
+    "id": "KZ-MANGYSTAU",
+    "name_ru": "Мангистауская область",
+    "name_kk": "Маңғыстау облысы",
+    "name_en": "Mangystau Region"
+  },
+  {
+    "id": "KZ-PAVLODAR",
+    "name_ru": "Павлодарская область",
+    "name_kk": "Павлодар облысы",
+    "name_en": "Pavlodar Region"
+  },
+  {
+    "id": "KZ-NORTH-KAZAKHSTAN",
+    "name_ru": "Северо-Казахстанская область",
+    "name_kk": "Солтүстік Қазақстан облысы",
+    "name_en": "North Kazakhstan Region"
+  },
+  {
+    "id": "KZ-TURKESTAN",
+    "name_ru": "Туркестанская область",
+    "name_kk": "Түркістан облысы",
+    "name_en": "Turkistan Region"
+  },
+  {
+    "id": "KZ-ULYTAU",
+    "name_ru": "Улытауская область",
+    "name_kk": "Ұлытау облысы",
+    "name_en": "Ulytau Region"
+  },
+  {
+    "id": "KZ-ASTANA",
+    "name_ru": "город Астана",
+    "name_kk": "Астана қаласы",
+    "name_en": "Astana City"
+  },
+  {
+    "id": "KZ-ALMATY",
+    "name_ru": "город Алматы",
+    "name_kk": "Алматы қаласы",
+    "name_en": "Almaty City"
+  },
+  {
+    "id": "KZ-SHYMKENT",
+    "name_ru": "город Шымкент",
+    "name_kk": "Шымкент қаласы",
+    "name_en": "Shymkent City"
+  }
+]

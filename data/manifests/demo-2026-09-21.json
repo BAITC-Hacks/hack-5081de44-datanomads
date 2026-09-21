@@ -1,0 +1,122 @@
+{
+  "coverage": {
+    "language_counts": {
+      "KZ": 80,
+      "RU": 80
+    },
+    "region_count": 20,
+    "source_system_count": 7,
+    "topic_count": 16
+  },
+  "dataset_id": "pulse109-demo",
+  "dataset_version": "demo-2026-09-21.v1",
+  "files": [
+    {
+      "kind": "regions",
+      "path": "data/demo/regions.json",
+      "records": 20,
+      "sha256": "a6c5276d840050437156c976bbb22fdcefe39715088d1249eec4fd2b4114066c"
+    },
+    {
+      "kind": "topics",
+      "path": "data/demo/topics.json",
+      "records": 16,
+      "sha256": "6bae21d2278f9e4b9faa859877b14bd768f382be2fde16efa5e27417f918931c"
+    },
+    {
+      "kind": "raw_rows",
+      "path": "data/demo/raw_tickets.jsonl",
+      "records": 160,
+      "sha256": "3b20d01cd2ca3d72866268f58a3d5cec312ad2c2661c4fbc7b4f15a960157433"
+    },
+    {
+      "kind": "normalized_tickets",
+      "path": "data/demo/tickets.jsonl",
+      "records": 160,
+      "sha256": "cea7088a3849e0fc91a4e807e7447e1aa2c408e88c075b32b9d5bf7e48018760"
+    },
+    {
+      "kind": "quarantine_rows",
+      "path": "data/demo/quarantine.jsonl",
+      "records": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "generated_at": "2026-09-21T00:00:00Z",
+  "languages": [
+    "KZ",
+    "RU"
+  ],
+  "manifest_version": "dataset-manifest.v1",
+  "pii_policy": {
+    "raw_pii_in_normalized_fixture": false,
+    "text_redaction_tokens": [
+      "[EMAIL]",
+      "[PHONE]",
+      "[IIN]",
+      "[NAME]",
+      "[ADDRESS]"
+    ],
+    "vector_payload_fields": [
+      "external_ticket_id",
+      "region_id",
+      "topic_id",
+      "created_at"
+    ]
+  },
+  "purpose": "deterministic demo and pipeline smoke tests; not real service metrics",
+  "quarantine_record_count": 0,
+  "record_count": 160,
+  "region_ids": [
+    "KZ-ABAY",
+    "KZ-AKMOLA",
+    "KZ-AKTOBE",
+    "KZ-ALMATY",
+    "KZ-ALMATY-REGION",
+    "KZ-ASTANA",
+    "KZ-ATYRAU",
+    "KZ-EAST-KAZAKHSTAN",
+    "KZ-KARAGANDA",
+    "KZ-KOSTANAY",
+    "KZ-KYZYLORDA",
+    "KZ-MANGYSTAU",
+    "KZ-NORTH-KAZAKHSTAN",
+    "KZ-PAVLODAR",
+    "KZ-SHYMKENT",
+    "KZ-TURKESTAN",
+    "KZ-ULYTAU",
+    "KZ-WEST-KAZAKHSTAN",
+    "KZ-ZHAMBYL",
+    "KZ-ZHETISU"
+  ],
+  "schema_version": "unified-ticket.v1",
+  "seed": 109,
+  "source_systems": [
+    "aikey",
+    "as_komek109",
+    "e_sep_su",
+    "ekc109",
+    "ikomek109",
+    "open_city",
+    "rdjardem3"
+  ],
+  "synthetic": true,
+  "topic_ids": [
+    "buildings",
+    "education",
+    "electricity",
+    "environment",
+    "gas_supply",
+    "healthcare",
+    "heating",
+    "landscaping",
+    "public_transport",
+    "roads",
+    "street_lighting",
+    "telecom",
+    "veterinary",
+    "waste_management",
+    "wastewater",
+    "water_supply"
+  ]
+}

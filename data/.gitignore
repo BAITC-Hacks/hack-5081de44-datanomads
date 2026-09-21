@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+processed/*
+quarantine/*
+!processed/.gitkeep
+!quarantine/.gitkeep

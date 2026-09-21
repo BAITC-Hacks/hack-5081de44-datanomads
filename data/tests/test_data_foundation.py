@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from data.importers import IKOMEK109Importer, get_importer
+from data.normalization import minimize_text, scan_pii
+from data.normalization.pipeline import normalize_row
+from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
+from data.schemas.unified_ticket import UnifiedTicket
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class UnifiedTicketTests(unittest.TestCase):
+    def test_minimal_contract_serializes_dates_and_defaults(self) -> None:
+        ticket = UnifiedTicket.from_mapping(
+            {
+                "external_ticket_id": "x-1",
+                "source_system": "ikomek109",
+                "region_id": "KZ-ABAY",
+                "created_at": "2026-01-01T00:00:00Z",
+                "original_text": "Проверить освещение",
+            }
+        )
+        payload = ticket.to_dict()
+        self.assertEqual(payload["schema_version"], "unified-ticket.v1")
+        self.assertEqual(payload["status"], "UNKNOWN")
+        self.assertEqual(payload["created_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_pii_is_masked_before_ticket_is_created(self) -> None:
+        text, report = minimize_text("ФИО: Иван Иванов, телефон +7 777 123-45-67, ИИН 900101123456")
+        self.assertTrue(report.detected)
+        self.assertNotIn("Иван Иванов", text)
+        self.assertNotIn("+7 777", text)
+        self.assertNotIn("900101123456", text)
+        self.assertEqual(scan_pii(text).categories, ())
+        result = normalize_row(
+            {
+                "external_ticket_id": "pii-1",
+                "region_id": "Акмолинская область",
+                "created_at": "2026-01-01",
+                "original_text": "ФИО: Иван Иванов, телефон +7 777 123-45-67",
+            },
+            source_system="ikomek109",
+        )
+        self.assertTrue(result.valid)
+        self.assertNotIn("Иван Иванов", result.ticket.original_text)
+
+
+class ImporterTests(unittest.TestCase):
+    def test_source_specific_aliases_and_bad_rows(self) -> None:
+        importer = IKOMEK109Importer()
+        result = importer.import_rows(
+            [
+                {
+                    "requestNumber": "a-1",
+                    "createdDate": "2026-01-02T00:00:00Z",
+                    "appealText": "Не горит фонарь",
+                    "region": "Ақмола облысы",
+                    "direction": "Наружное освещение",
+                },
+                {
+                    "requestNumber": "a-2",
+                    "createdDate": "not-a-date",
+                    "appealText": "Текст",
+                    "region": "Ақмола облысы",
+                },
+                {
+                    "requestNumber": "a-3",
+                    "createdDate": "2026-01-02",
+                    "appealText": "",
+                    "region": "Ақмола облысы",
+                },
+            ]
+        )
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual(result.quarantine_count, 2)
+        self.assertEqual(
+            {row.reason for row in result.quarantine},
+            {"INVALID_DATE", "MISSING_REQUIRED_FIELD"},
+        )
+        self.assertEqual(result.tickets[0].topic_id, "street_lighting")
+
+    def test_csv_structure_is_quarantined(self) -> None:
+        importer = get_importer("AIKEY")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.csv"
+            path.write_text(
+                "id,region,created_at,text\n1,Астана,2026-01-01,ok\n2,Астана,2026-01-02\n",
+                encoding="utf-8",
+            )
+            result = importer.import_file(path)
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual(result.quarantine_count, 1)
+        self.assertEqual(result.quarantine[0].reason, "BAD_CSV_STRUCTURE")
+
+    def test_duplicate_ids_are_not_loaded_twice(self) -> None:
+        result = get_importer("open_city").import_rows(
+            [
+                {"id": "same", "region": "Астана", "created": "2026-01-01", "description": "A"},
+                {"id": "same", "region": "Астана", "created": "2026-01-02", "description": "B"},
+            ]
+        )
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual(result.duplicate_external_ids, ["same"])
+
+
+class DemoFixtureTests(unittest.TestCase):
+    def test_manifest_and_fixture_coverage(self) -> None:
+        manifest_path = ROOT / "data" / "manifests" / "demo-2026-09-21.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertTrue(manifest["synthetic"])
+        self.assertGreaterEqual(manifest["coverage"]["region_count"], 20)
+        self.assertGreaterEqual(manifest["coverage"]["topic_count"], 10)
+        self.assertEqual(set(manifest["languages"]), {"RU", "KZ"})
+        tickets_path = ROOT / "data" / "demo" / "tickets.jsonl"
+        rows = [json.loads(line) for line in tickets_path.read_text(encoding="utf-8").splitlines() if line]
+        self.assertEqual(len(rows), manifest["record_count"])
+        self.assertEqual(len({row["region_id"] for row in rows}), 20)
+        self.assertGreaterEqual(len({row["topic_id"] for row in rows}), 10)
+        self.assertFalse(any(scan_pii(row["original_text"]).detected for row in rows))
+        for entry in manifest["files"]:
+            path = ROOT / entry["path"]
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(digest, entry["sha256"])
+
+    def test_taxonomy_matches_fixture_contract(self) -> None:
+        self.assertEqual(len(REGION_DEFINITIONS), 20)
+        self.assertGreaterEqual(len(TOPIC_DEFINITIONS), 10)
+
+
+class MigrationTests(unittest.TestCase):
+    def test_postgres_migrations_include_source_of_truth_tables(self) -> None:
+        schema = (ROOT / "migrations" / "001_data_foundation.sql").read_text(encoding="utf-8").lower()
+        seed = (ROOT / "migrations" / "002_seed_data_taxonomy.sql").read_text(encoding="utf-8").lower()
+        for table in ("regions", "topics", "topic_source_mappings", "tickets", "ticket_predictions", "operator_decisions", "quarantine_rows", "dataset_versions", "model_versions"):
+            self.assertIn(f"create table if not exists {table}", schema)
+        self.assertIn("insert into regions", seed)
+        self.assertIn("insert into topics", seed)
+        self.assertIn("service_other", seed)
+
+
+if __name__ == "__main__":
+    unittest.main()
