@@ -491,12 +491,12 @@ ROLE_PROBES: dict[str, tuple[str, str, Mapping[str, Any] | None]] = {
         "/api/v1/assist/preview",
         {"ticket_id": "demo-0001", "text": "Синтетическое acceptance обращение."},
     ),
-    "analytics": ("GET", "/api/v1/analytics/overview", None),
+    "analytics": ("GET", "/api/v1/analytics", None),
     "alerts": ("GET", "/api/v1/alerts", None),
     "forecast": ("GET", "/api/v1/forecast", None),
     "reports": ("GET", "/api/v1/reports", None),
-    "learning_cycles": ("GET", "/api/v1/learning/cycles", None),
-    "candidate_evaluation": ("GET", "/api/v1/learning/cycles", None),
+    "learning_cycles": ("GET", "/api/v1/learning", None),
+    "candidate_evaluation": ("GET", "/api/v1/learning", None),
     "model_management": ("GET", "/api/v1/models", None),
 }
 
