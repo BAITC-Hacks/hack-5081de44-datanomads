@@ -122,6 +122,7 @@ export const demoTickets: Ticket[] = [
 
 export const demoData: DashboardData = {
   tickets: [],
+  overview: { totalTickets: 0, openTickets: 0, resolvedTickets: 0, highPriorityTickets: 0, operatorDecisions: 0, confirmedDecisions: 0, correctedDecisions: 0, changeAbs: 0, avgDecisionMinutes: 0 },
   regions: [],
   topics: [],
   alerts: [],
@@ -135,4 +136,8 @@ export const demoData: DashboardData = {
     candidate: 'нет данных',
     updatedAt: 'нет данных',
   },
+  timeSeries: [],
+  reportSource: 'нет данных',
+  forecastStatus: 'нет данных',
+  filterOptions: { regions: [], topics: [], services: [], statuses: [], districts: [], channels: [] },
 }

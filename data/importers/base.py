@@ -6,6 +6,8 @@ import csv
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from data.normalization.pipeline import NormalizationResult, normalize_row
@@ -201,7 +203,15 @@ class SourceImporter:
         text = path.read_text(encoding="utf-8-sig")
         try:
             parsed = json.loads(text)
-            values = parsed if isinstance(parsed, list) else [parsed]
+            if isinstance(parsed, list):
+                values = parsed
+            elif isinstance(parsed, Mapping) and isinstance(parsed.get("tickets"), list):
+                # Accept deterministic dataset manifests as well as a plain
+                # object-per-file export; manifest metadata never becomes a
+                # ticket row.
+                values = parsed["tickets"]
+            else:
+                values = [parsed]
         except json.JSONDecodeError:
             values = []
             for row_number, line in enumerate(text.splitlines(), start=1):
@@ -234,6 +244,55 @@ class SourceImporter:
                 rows.append(value)
         return rows, errors
 
+    def _read_xlsx(self, path: Path) -> Tuple[List[Mapping[str, Any]], List[QuarantineRecord]]:
+        """Read the first worksheet using only the XLSX ZIP/XML contract.
+
+        Government exports are often simple tabular workbooks.  Keeping this
+        parser dependency-free makes the ingestion CLI usable in the same
+        restricted environment as the validation tests; formulas and rich
+        formatting are intentionally ignored.
+        """
+
+        namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        errors: List[QuarantineRecord] = []
+        try:
+            with zipfile.ZipFile(path) as archive:
+                shared: List[str] = []
+                if "xl/sharedStrings.xml" in archive.namelist():
+                    root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                    for item in root.findall("main:si", namespace):
+                        shared.append("".join(node.text or "" for node in item.iter() if node.tag.endswith("}t")))
+                sheet_name = "xl/worksheets/sheet1.xml"
+                if sheet_name not in archive.namelist():
+                    raise ValueError("workbook has no first worksheet")
+                root = ET.fromstring(archive.read(sheet_name))
+                matrix: List[List[str]] = []
+                for row in root.findall(".//main:sheetData/main:row", namespace):
+                    values: List[str] = []
+                    for cell in row.findall("main:c", namespace):
+                        cell_type = cell.attrib.get("t")
+                        value = cell.find("main:v", namespace)
+                        inline = cell.find("main:is/main:t", namespace)
+                        text = inline.text if inline is not None else (value.text if value is not None else "")
+                        if cell_type == "s" and text:
+                            text = shared[int(text)] if int(text) < len(shared) else ""
+                        values.append(text or "")
+                    matrix.append(values)
+                if not matrix:
+                    return [], [QuarantineRecord(self.source_system, 1, "BAD_CSV_STRUCTURE", "XLSX has no rows", {})]
+                headers = matrix[0]
+                if not headers or any(not str(header).strip() for header in headers):
+                    return [], [QuarantineRecord(self.source_system, 1, "BAD_CSV_STRUCTURE", "XLSX contains an empty header", {str(i): value for i, value in enumerate(headers)})]
+                rows: List[Mapping[str, Any]] = []
+                for row_number, values in enumerate(matrix[1:], start=2):
+                    if len(values) != len(headers):
+                        errors.append(QuarantineRecord(self.source_system, row_number, "BAD_CSV_STRUCTURE", f"expected {len(headers)} columns, got {len(values)}", {str(i): value for i, value in enumerate(values)}))
+                        continue
+                    rows.append(dict(zip(headers, values)))
+                return rows, errors
+        except (OSError, zipfile.BadZipFile, ET.ParseError, ValueError, IndexError) as error:
+            return [], [QuarantineRecord(self.source_system, 1, "UNKNOWN_SCHEMA", f"invalid XLSX: {error}", {"path": str(path)})]
+
     def import_file(self, path: Path | str) -> ImportResult:
         """Import CSV, JSON array or JSONL and retain every bad-row reason."""
 
@@ -243,6 +302,8 @@ class SourceImporter:
             rows, parse_errors = self._read_json(source_path)
         elif suffix in {".csv", ".tsv"}:
             rows, parse_errors = self._read_csv(source_path)
+        elif suffix in {".xlsx", ".xlsm"}:
+            rows, parse_errors = self._read_xlsx(source_path)
         else:
             return ImportResult(
                 source_system=self.source_system,

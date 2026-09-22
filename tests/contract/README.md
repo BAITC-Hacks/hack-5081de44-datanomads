@@ -23,6 +23,28 @@ PULSE_BASE_URL=http://localhost:8080 \
   python scripts/smoke_test.py --log-file .tmp/pulse.jsonl
 ```
 
+Полный stateful acceptance-контур (уникальный synthetic import, идемпотентный
+повтор, PostgreSQL/Qdrant preview, operator decision, relation feedback,
+analytics/drill-down, spike alerts + SSE, forecast, QueryIntent, PDF/XLSX,
+RBAC, reindex и learning-cycle) запускается так:
+
+```bash
+PULSE_BASE_URL=http://localhost:8080 \
+  python scripts/e2e_acceptance.py
+```
+
+Для дополнительной проверки сохранения решения после перезапуска Core:
+
+```bash
+PULSE_BASE_URL=http://localhost:8080 \
+  python scripts/e2e_acceptance.py --restart-core
+```
+
+В обычном Compose worker ожидаемо возвращает `TRAINER_NOT_CONFIGURED` и
+acceptance отклоняет тестовый candidate. При явном `PULSE_TEST_FAKE_TRAINER=true`
+тот же сценарий проверяет candidate → evaluation → promotion; fake metrics не
+выдаются за реальные ML-метрики.
+
 Ролевые HTTP-пробы запускаются, если передан JSON с bearer-токенами. Значения
 токенов не печатаются:
 

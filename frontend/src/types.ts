@@ -17,12 +17,14 @@ export interface SimilarTicket {
 export interface Ticket {
   id: string
   originalText: string
+  modelVersion?: string
   language: 'RU' | 'KZ'
   topic: string
   confidence: number
   alternatives: TicketAlternative[]
   service: string
   priority: Priority
+  routingReason?: string
   region: string
   createdAt: string
   status: TicketStatus
@@ -32,6 +34,7 @@ export interface Ticket {
 }
 
 export interface RegionMetric {
+  id?: string
   name: string
   tickets: number
   change?: number
@@ -39,6 +42,7 @@ export interface RegionMetric {
 }
 
 export interface TopicMetric {
+  id?: string
   name: string
   value: number
   change?: number
@@ -68,7 +72,7 @@ export interface ForecastPoint {
 export interface ModelStatus {
   name: string
   version: string
-  status: 'production' | 'candidate' | 'shadow'
+  status: 'production' | 'candidate' | 'shadow' | 'rejected' | 'archived'
   metric: string
   metricValue: string
   updatedAt: string
@@ -85,12 +89,35 @@ export interface LearningCycle {
 
 export interface DashboardData {
   tickets: Ticket[]
+  overview: {
+    totalTickets: number
+    openTickets: number
+    resolvedTickets: number
+    highPriorityTickets: number
+    operatorDecisions: number
+    confirmedDecisions: number
+    correctedDecisions: number
+    changeAbs: number
+    avgDecisionMinutes?: number
+    changePct?: number
+  }
   regions: RegionMetric[]
   topics: TopicMetric[]
   alerts: Alert[]
   forecast: ForecastPoint[]
   models: ModelStatus[]
   learning: LearningCycle
+  timeSeries: Array<{ date: string; tickets: number; resolved: number }>
+  reportSource: string
+  forecastStatus?: string
+  filterOptions: {
+    regions: Array<{ id: string; label: string }>
+    topics: Array<{ id: string; label: string }>
+    services: Array<{ id: string; label: string }>
+    statuses: Array<{ id: string; label: string }>
+    districts: Array<{ id: string; label: string }>
+    channels: Array<{ id: string; label: string }>
+  }
 }
 
 export type ApiSource = 'api' | 'demo'

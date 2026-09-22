@@ -238,3 +238,27 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.alert-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.report-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.panel-note { color: var(--muted); font-size: 12px; }
+.error-banner { margin: 0 28px; padding: 10px 14px; border: 1px solid rgba(255,157,157,.35); border-radius: 8px; color: #ffd0d0; background: rgba(255,157,157,.08); font-size: 12px; }
+.period-buttons { display: flex; }
+.analytics-filter-selects { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.analytics-filter-selects label { display: grid; gap: 4px; min-width: 145px; color: #71857c; font-size: 9px; }
+.analytics-filter-selects select { width: 100%; min-height: 28px; padding: 0 8px; color: #cfe0d7; background: #1c2a27; border: 1px solid rgba(140,240,200,.16); border-radius: 5px; font-size: 10px; }
+.similar-open { display: flex; align-items: center; gap: 8px; width: 100%; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.similar-open span { flex: 1; }
+.similar-open:hover strong, .similar-open:focus-visible strong { color: #8cf0c8; }
+.drilldown-row { width: 100%; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; background: transparent; }
+.drilldown-row:hover, .drilldown-row:focus-visible { background: rgba(140,240,200,.08); outline: 2px solid rgba(140,240,200,.45); outline-offset: -2px; }
+.alert-drilldown { display: flex; flex: 1; min-width: 0; align-items: center; gap: 12px; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.alert-drilldown:hover .alert-row-main strong, .alert-drilldown:focus-visible .alert-row-main strong { color: #8cf0c8; }
+.drilldown-panel { margin-top: 20px; }
+.drilldown-label { color: var(--muted); font-size: .85rem; }
+.drilldown-list { display: grid; gap: 8px; }
+.drilldown-ticket { padding: 12px 14px; border: 1px solid rgba(154,181,176,.18); border-radius: 12px; background: rgba(10,25,24,.35); }
+.drilldown-ticket > div { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: .82rem; }
+.drilldown-ticket strong { color: #e9f3ef; }
+.drilldown-ticket p { margin: 8px 0 6px; color: #d2dfdb; line-height: 1.45; }
+.drilldown-ticket small { color: var(--muted); }

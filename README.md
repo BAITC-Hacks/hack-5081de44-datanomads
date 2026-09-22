@@ -112,7 +112,7 @@ scripts/smoke
 ```
 
 Полный `docker compose ... up --build` зависит от доступного Docker Engine и
-локального image cache. В текущем demo Core использует deterministic in-memory
-store; PostgreSQL/Qdrant миграции, контракты и Compose topology подготовлены для
-подключения production repository, но synthetic demo не выдаётся за реальные
-данные или model quality.
+локального image cache. В текущем Compose Core использует PostgreSQL как source
+of truth и Qdrant как vector index; deterministic in-memory store остаётся
+только явно выбранным режимом `PULSE_STORAGE=memory` для unit/API тестов.
+Synthetic demo не выдаётся за реальные данные или model quality.

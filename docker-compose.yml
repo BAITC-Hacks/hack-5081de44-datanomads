@@ -46,6 +46,7 @@ services:
       ML_PORT: 8000
       MODEL_DIR: ${MODEL_DIR:-/app/artifacts}
       LOG_LEVEL: ${ML_LOG_LEVEL:-INFO}
+      PULSE_TEST_FAKE_TRAINER: ${PULSE_TEST_FAKE_TRAINER:-false}
     volumes:
       - ml-artifacts:/app/artifacts
     expose:
@@ -74,9 +75,13 @@ services:
       PULSE_ENV: ${PULSE_ENV:-demo}
       DATABASE_URL: postgresql://${POSTGRES_USER:-pulse}:${POSTGRES_PASSWORD:-pulse_demo_only}@postgres:5432/${POSTGRES_DB:-pulse}
       QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-32}
+      EMBEDDER_VERSION: ${EMBEDDER_VERSION:-embedder-demo-2026-09-21-001}
       ML_SERVICE_URL: http://ml-service:8000
       MODEL_DIR: ${MODEL_DIR:-/app/artifacts}
       LOG_LEVEL: ${ML_LOG_LEVEL:-INFO}
+      PULSE_TEST_FAKE_TRAINER: ${PULSE_TEST_FAKE_TRAINER:-false}
     volumes:
       - ml-artifacts:/app/artifacts
       - ./ml-service/worker.py:/app/worker.py:ro
@@ -100,9 +105,12 @@ services:
       PULSE_STORAGE: ${PULSE_STORAGE:-postgres}
       PULSE_HOST: 0.0.0.0
       PULSE_PORT: 8080
-      PULSE_DEV_AUTH: ${PULSE_DEV_AUTH:-true}
+      PULSE_DEV_AUTH: ${PULSE_DEV_AUTH:-}
       DATABASE_URL: postgresql://${POSTGRES_USER:-pulse}:${POSTGRES_PASSWORD:-pulse_demo_only}@postgres:5432/${POSTGRES_DB:-pulse}
       QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-32}
+      EMBEDDER_VERSION: ${EMBEDDER_VERSION:-embedder-demo-2026-09-21-001}
       ML_SERVICE_URL: http://ml-service:8000
       RUST_LOG: ${RUST_LOG:-info}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}

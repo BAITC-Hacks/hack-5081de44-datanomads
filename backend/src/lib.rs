@@ -4,13 +4,15 @@
 //! fixture for tests and local UI work.  Compose and production use the
 //! PostgreSQL repository in `pg.rs`, which calls the ML and Qdrant services.
 
+#![recursion_limit = "512"]
+
 use axum::{
     body::Body,
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use chrono::{Duration, NaiveDate, Utc};
@@ -27,7 +29,7 @@ use tower_http::cors::CorsLayer;
 use tracing::info;
 
 mod pg;
-use pg::PgRepository;
+use pg::{default_qdrant_collection, PgRepository};
 
 const SERVICE_NAME: &str = "pulse109-core";
 const API_VERSION: &str = "0.1.0";
@@ -58,16 +60,22 @@ impl Default for Config {
 impl Config {
     pub fn from_env() -> Self {
         let defaults = Self::default();
-        let storage = env::var("PULSE_STORAGE").unwrap_or_else(|_| {
-            if env::var("PULSE_ENV")
-                .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "test" | "unit"))
-                .unwrap_or(false)
-            {
+        let pulse_env = env::var("PULSE_ENV").ok();
+        let storage = env::var("PULSE_STORAGE").unwrap_or_else(|_| match pulse_env.as_deref() {
+            Some(value) if !matches!(value.to_ascii_lowercase().as_str(), "test" | "unit") => {
                 "postgres".to_owned()
-            } else {
-                defaults.storage.clone()
             }
+            _ => defaults.storage.clone(),
         });
+        let default_dev_auth = pulse_env
+            .as_deref()
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "demo" | "test" | "unit"
+                )
+            })
+            .unwrap_or_else(|| !storage.eq_ignore_ascii_case("postgres"));
         Self {
             host: env::var("PULSE_HOST").unwrap_or(defaults.host),
             port: env::var("PULSE_PORT")
@@ -75,8 +83,10 @@ impl Config {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(defaults.port),
             dev_auth: env::var("PULSE_DEV_AUTH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
                 .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-                .unwrap_or(defaults.dev_auth),
+                .unwrap_or(default_dev_auth && defaults.dev_auth),
             storage,
         }
     }
@@ -109,9 +119,28 @@ impl AppState {
                 env::var("QDRANT_URL").unwrap_or_else(|_| "http://127.0.0.1:6333".to_owned());
             let ml_service_url =
                 env::var("ML_SERVICE_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".to_owned());
+            let embedding_dimension = env::var("EMBEDDING_DIMENSION")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(32);
+            let embedder_version = env::var("EMBEDDER_VERSION")
+                .unwrap_or_else(|_| "embedder-demo-2026-09-21-001".to_owned());
+            let qdrant_collection = env::var("QDRANT_COLLECTION")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| {
+                    default_qdrant_collection(&embedder_version, embedding_dimension)
+                });
             Some(Arc::new(
-                PgRepository::connect_lazy(&database_url, qdrant_url, ml_service_url)
-                    .unwrap_or_else(|error| panic!("invalid PostgreSQL configuration: {error}")),
+                PgRepository::connect_lazy_with_options(
+                    &database_url,
+                    qdrant_url,
+                    ml_service_url,
+                    qdrant_collection,
+                    embedding_dimension,
+                    embedder_version,
+                )
+                .unwrap_or_else(|error| panic!("invalid PostgreSQL configuration: {error}")),
             ))
         } else {
             None
@@ -210,6 +239,7 @@ pub struct Prediction {
     pub confidence_state: String,
     pub recommended_service: String,
     pub predicted_priority: String,
+    pub routing_reason: String,
     pub alternatives: Vec<AlternativePrediction>,
     pub created_at: String,
 }
@@ -248,6 +278,7 @@ pub struct ResponseTemplate {
 #[derive(Clone, Debug, Serialize)]
 pub struct Alert {
     pub id: String,
+    pub incident_key: String,
     pub alert_type: String,
     pub severity: String,
     pub status: String,
@@ -260,6 +291,9 @@ pub struct Alert {
     pub detected_at: String,
     pub acknowledged_by: Option<String>,
     pub acknowledged_at: Option<String>,
+    pub closed_by: Option<String>,
+    pub closed_at: Option<String>,
+    pub detail: Value,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -343,14 +377,28 @@ struct Actor {
 }
 
 fn actor(headers: &HeaderMap, config: &Config) -> Result<Actor, ApiError> {
+    let role_header_name = if config.dev_auth {
+        "x-pulse-role"
+    } else {
+        "x-authenticated-role"
+    };
+    let user_header_name = if config.dev_auth {
+        "x-user-id"
+    } else {
+        "x-authenticated-user"
+    };
     let role_header = headers
-        .get("x-pulse-role")
+        .get(role_header_name)
         .and_then(|value| value.to_str().ok());
     let user_id = headers
-        .get("x-user-id")
+        .get(user_header_name)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("demo-admin")
+        .unwrap_or(if config.dev_auth {
+            "demo-admin"
+        } else {
+            "unknown"
+        })
         .to_owned();
 
     match role_header {
@@ -362,19 +410,14 @@ fn actor(headers: &HeaderMap, config: &Config) -> Result<Actor, ApiError> {
             role: Role::Admin,
         }),
         None => Err(ApiError::Unauthorized(
-            "x-pulse-role is required outside development mode".to_owned(),
+            "trusted auth gateway headers are required outside development mode".to_owned(),
         )),
     }
 }
 
 fn require_role(headers: &HeaderMap, config: &Config, allowed: &[Role]) -> Result<Actor, ApiError> {
-    let role_was_supplied = headers.contains_key("x-pulse-role");
     let current = actor(headers, config)?;
-    if !role_was_supplied && config.dev_auth {
-        // A local browser demo has no auth gateway. Explicit role headers are
-        // still checked below, while headerless local requests remain usable.
-        Ok(current)
-    } else if allowed.contains(&current.role) {
+    if allowed.contains(&current.role) {
         Ok(current)
     } else {
         Err(ApiError::Forbidden(format!(
@@ -673,6 +716,7 @@ fn prediction_for_ticket(ticket: &Ticket, topics: &[Topic]) -> Prediction {
         confidence_state: confidence_state(confidence).to_owned(),
         recommended_service: service,
         predicted_priority: priority,
+        routing_reason: "deterministic memory fallback".to_owned(),
         alternatives,
         created_at: ticket.created_at.clone(),
     }
@@ -799,6 +843,7 @@ impl Store {
         let alerts = [
             Alert {
                 id: "alert-001".to_owned(),
+                incident_key: "demo:topic_spike:R01:TOPIC-WATER".to_owned(),
                 alert_type: "topic_spike".to_owned(),
                 severity: "high".to_owned(),
                 status: "open".to_owned(),
@@ -811,9 +856,13 @@ impl Store {
                 detected_at: DEMO_TIMESTAMP.to_owned(),
                 acknowledged_by: None,
                 acknowledged_at: None,
+                closed_by: None,
+                closed_at: None,
+                detail: json!({"source": "DEMO_ONLY"}),
             },
             Alert {
                 id: "alert-002".to_owned(),
+                incident_key: "demo:anomaly:R02:TOPIC-TRANSPORT".to_owned(),
                 alert_type: "anomaly".to_owned(),
                 severity: "medium".to_owned(),
                 status: "acknowledged".to_owned(),
@@ -826,6 +875,9 @@ impl Store {
                 detected_at: "2026-09-20T11:00:00Z".to_owned(),
                 acknowledged_by: Some("demo-manager".to_owned()),
                 acknowledged_at: Some("2026-09-20T12:00:00Z".to_owned()),
+                closed_by: None,
+                closed_at: None,
+                detail: json!({"source": "DEMO_ONLY"}),
             },
         ]
         .into_iter()
@@ -924,7 +976,12 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/openapi.json", get(openapi))
         .route("/api/v1/docs", get(openapi))
         .route("/api/v1/tickets", get(list_tickets).post(create_ticket))
+        .route("/api/v1/import", post(import_tickets))
         .route("/api/v1/tickets/{ticket_id}", get(get_ticket))
+        .route(
+            "/api/v1/tickets/{ticket_id}/vector",
+            delete(delete_ticket_vector),
+        )
         .route(
             "/api/v1/tickets/{ticket_id}/pulse-state",
             put(store_pulse_state),
@@ -942,16 +999,21 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/assist/correct/{ticket_id}", post(correct_ticket))
         .route("/api/v1/analytics", get(analytics))
         .route("/api/v1/analytics/overview", get(analytics))
+        .route("/api/v1/analytics/drilldown", get(analytics_drilldown))
+        .route("/api/v1/taxonomy", get(taxonomy))
         .route("/api/v1/analytics/query", post(analytics_query))
+        .route("/api/v1/retrieval/reindex", post(reindex_vectors))
         .route("/api/v1/analytics/export.pdf", get(export_pdf))
         .route("/api/v1/analytics/export.xlsx", get(export_xlsx))
         .route("/api/v1/reports", get(reports))
         .route("/api/v1/events", get(events))
         .route("/api/v1/forecast", get(forecast))
         .route("/api/v1/alerts", get(list_alerts))
+        .route("/api/v1/alerts/detect", post(detect_alerts))
         .route("/api/v1/alerts/{alert_id}", get(get_alert))
         .route("/api/v1/alerts/{alert_id}/ack", post(ack_alert))
         .route("/api/v1/alerts/{alert_id}/acknowledge", post(ack_alert))
+        .route("/api/v1/alerts/{alert_id}/close", post(close_alert))
         .route(
             "/api/v1/learning",
             get(learning_overview).post(create_learning_cycle),
@@ -1163,6 +1225,33 @@ pub struct CreateTicketRequest {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ImportRequest {
+    pub source_system: String,
+    pub source_uri: Option<String>,
+    pub dataset_version: Option<String>,
+    pub manifest_uri: Option<String>,
+    pub manifest_sha256: Option<String>,
+    pub is_synthetic: Option<bool>,
+    #[serde(default)]
+    pub tickets: Vec<Value>,
+    #[serde(default)]
+    pub quarantine: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportResponse {
+    pub import_run_id: String,
+    pub source_system: String,
+    pub dataset_version: String,
+    pub total_rows: usize,
+    pub imported_rows: usize,
+    pub duplicate_rows: usize,
+    pub quarantined_rows: usize,
+    pub indexed_rows: usize,
+    pub source: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct TicketDetailResponse {
     pub ticket: Ticket,
@@ -1198,6 +1287,18 @@ async fn create_ticket(
                 request.priority.as_deref(),
                 request.source.as_deref(),
                 &request_id_from_headers(&headers),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "CREATE_TICKET",
+                "ticket",
+                Some(&response.ticket.id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({"source": &response.ticket.source}),
             )
             .await
             .map_err(ApiError::Internal)?;
@@ -1278,6 +1379,116 @@ async fn create_ticket(
             latest_decision: None,
         }),
     ))
+}
+
+async fn import_tickets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ImportRequest>,
+) -> Result<(StatusCode, Json<ImportResponse>), ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::Admin, Role::Manager])?;
+    let Some(repository) = state.repository() else {
+        return Err(ApiError::Conflict(
+            "imports require PULSE_STORAGE=postgres".to_owned(),
+        ));
+    };
+    let response = repository
+        .import_tickets(&request, &request_id_from_headers(&headers))
+        .await
+        .map_err(ApiError::Internal)?;
+    repository
+        .audit(
+            &actor.user_id,
+            "IMPORT_DATASET",
+            "data_import_run",
+            Some(&response.import_run_id),
+            Some(&request_id_from_headers(&headers)),
+            None,
+            json!({"source_system": &response.source_system, "dataset_version": &response.dataset_version}),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+    info!(
+        service = SERVICE_NAME,
+        user_id = %actor.user_id,
+        source_system = %response.source_system,
+        import_run_id = %response.import_run_id,
+        imported_rows = response.imported_rows,
+        quarantined_rows = response.quarantined_rows,
+        request_id = %request_id_from_headers(&headers),
+        trace_id = %request_id_from_headers(&headers),
+        endpoint = "/api/v1/import",
+        latency_ms = 0.0_f64,
+        status = 201_u16,
+        error_code = "none",
+        "data_import_completed"
+    );
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn reindex_vectors(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let Some(repository) = state.repository() else {
+        return Err(ApiError::Conflict(
+            "Qdrant reindex requires PULSE_STORAGE=postgres".to_owned(),
+        ));
+    };
+    let response = repository
+        .queue_reindex()
+        .await
+        .map_err(ApiError::Internal)?;
+    repository
+        .audit(
+            &actor.user_id,
+            "QUEUE_QDRANT_REINDEX",
+            "background_job",
+            response.get("job_id").and_then(Value::as_str),
+            Some(&request_id_from_headers(&headers)),
+            None,
+            response.clone(),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn delete_ticket_vector(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let Some(repository) = state.repository() else {
+        return Err(ApiError::Conflict(
+            "Qdrant vector deletion requires PULSE_STORAGE=postgres".to_owned(),
+        ));
+    };
+    let response = repository
+        .delete_vector(&ticket_id)
+        .await
+        .map_err(|error| {
+            if error.contains("not found") {
+                ApiError::NotFound(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })?;
+    repository
+        .audit(
+            &actor.user_id,
+            "DELETE_QDRANT_VECTOR",
+            "ticket",
+            Some(&ticket_id),
+            Some(&request_id_from_headers(&headers)),
+            None,
+            response.clone(),
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(response))
 }
 
 async fn get_ticket(
@@ -1410,7 +1621,7 @@ async fn assist_preview(
     headers: HeaderMap,
     Json(request): Json<PreviewRequest>,
 ) -> Result<Json<AssistPreviewResponse>, ApiError> {
-    require_role(
+    let actor = require_role(
         &headers,
         &state.config,
         &[Role::Operator, Role::Manager, Role::Admin],
@@ -1439,6 +1650,18 @@ async fn assist_preview(
                     ApiError::Internal(error)
                 }
             })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "ASSIST_PREVIEW",
+                "ticket",
+                request.ticket_id.as_deref(),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({"source": &response.source}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
         return Ok(Json(response));
     }
     let store = state.read_store()?;
@@ -1661,6 +1884,18 @@ async fn apply_decision(
                     ApiError::Internal(error)
                 }
             })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "OPERATOR_DECISION",
+                "ticket",
+                Some(&ticket_id),
+                Some(&request_id_from_headers(&headers)),
+                Some(action),
+                json!({"topic_id": request.topic_id, "service": request.service, "priority": request.priority}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
         info!(
             service = SERVICE_NAME,
             ticket_id = %ticket_id,
@@ -1783,30 +2018,48 @@ async fn apply_decision(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AnalyticsQuery {
     pub region_id: Option<String>,
     pub topic_id: Option<String>,
+    pub service_id: Option<String>,
+    pub status: Option<String>,
+    pub district: Option<String>,
+    pub channel: Option<String>,
     pub range: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
+pub struct AnalyticsDrilldownQuery {
+    #[serde(flatten)]
+    pub filters: AnalyticsQuery,
+    pub dimension: Option<String>,
+    pub value: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct MetricBucket {
     pub id: String,
     pub label: String,
     pub tickets: usize,
     pub high_priority: usize,
     pub avg_confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_abs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_pct: Option<f32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TimeSeriesPoint {
     pub date: String,
     pub tickets: u32,
     pub resolved: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct AnalyticsResponse {
     pub generated_at: String,
     pub source: String,
@@ -1815,6 +2068,14 @@ pub struct AnalyticsResponse {
     pub by_region: Vec<MetricBucket>,
     pub by_topic: Vec<MetricBucket>,
     pub time_series: Vec<TimeSeriesPoint>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReportSlice {
+    filters: AnalyticsQuery,
+    analytics: AnalyticsResponse,
+    alerts: Vec<Alert>,
+    forecast: ForecastResponse,
 }
 
 async fn analytics(
@@ -1875,6 +2136,7 @@ async fn analytics(
         "operator_decisions": store.decisions.iter().filter(|decision| filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
         "confirmed_decisions": store.decisions.iter().filter(|decision| decision.action == "confirm" && filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
         "corrected_decisions": store.decisions.iter().filter(|decision| decision.action == "correct" && filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
+        "avg_decision_minutes": 0,
         "average_confidence": avg_confidence,
     });
     let by_region = store
@@ -1958,22 +2220,186 @@ async fn analytics(
     }))
 }
 
+async fn analytics_drilldown(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AnalyticsDrilldownQuery>,
+) -> Result<Json<TicketListResponse>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    let dimension = query
+        .dimension
+        .as_deref()
+        .unwrap_or("overview")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        dimension.as_str(),
+        "overview" | "region" | "topic" | "date" | "alert"
+    ) {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported drilldown dimension: {dimension}"
+        )));
+    }
+    if dimension != "overview" && query.value.as_deref().is_none_or(str::is_empty) {
+        return Err(ApiError::BadRequest(
+            "drilldown value is required for this dimension".to_owned(),
+        ));
+    }
+    if let Some(repository) = state.repository() {
+        return repository
+            .analytics_drilldown(&query, &dimension)
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
+    let store = state.read_store()?;
+    let value = query.value.as_deref();
+    let mut items = store
+        .tickets
+        .values()
+        .filter(|ticket| {
+            query
+                .filters
+                .region_id
+                .as_deref()
+                .is_none_or(|filter| ticket.region_id == filter)
+                && query
+                    .filters
+                    .topic_id
+                    .as_deref()
+                    .is_none_or(|filter| ticket.topic_id == filter)
+                && match dimension.as_str() {
+                    "region" => value.is_none_or(|filter| ticket.region_id == filter),
+                    "topic" => value.is_none_or(|filter| ticket.topic_id == filter),
+                    _ => true,
+                }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = items.len();
+    let limit = query.limit.unwrap_or(100).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0);
+    items = items.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(TicketListResponse {
+        items,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+async fn taxonomy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .taxonomy()
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
+    let store = state.read_store()?;
+    Ok(Json(json!({
+        "topics": store.topics,
+        "services": store.topics.iter().map(|topic| json!({"id": service_for_topic(&topic.id), "label": service_for_topic(&topic.id)})).collect::<Vec<_>>(),
+        "regions": store.regions.iter().map(|region| json!({"id": region.id, "label": region.name})).collect::<Vec<_>>(),
+        "statuses": store.tickets.values().map(|ticket| ticket.status.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().map(|value| json!({"id": value, "label": value})).collect::<Vec<_>>(),
+        "districts": [],
+        "channels": [],
+        "source": "memory"
+    })))
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct QueryIntentFilters {
     pub region_id: Option<String>,
     pub topic_id: Option<String>,
+    pub service_id: Option<String>,
+    pub status: Option<String>,
+    pub district: Option<String>,
+    pub channel: Option<String>,
     pub range: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct QueryIntentRequest {
-    pub intent: String,
+    pub intent: Option<String>,
+    /// Optional natural-language question.  Core maps it to the small
+    /// allow-list below; no free-form SQL or model-generated query reaches
+    /// the repository.
+    #[serde(alias = "query")]
+    pub text: Option<String>,
     pub region_id: Option<String>,
     pub topic_id: Option<String>,
     pub range: Option<String>,
     pub filters: Option<QueryIntentFilters>,
     pub group_by: Option<String>,
     pub limit: Option<usize>,
+}
+
+fn infer_query_intent(text: &str) -> Option<&'static str> {
+    let value = text.trim().to_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    if value.contains("прогноз") || value.contains("forecast") {
+        Some("forecast")
+    } else if value.contains("всплес")
+        || value.contains("аномал")
+        || value.contains("пик")
+        || value.contains("spike")
+    {
+        Some("spikes")
+    } else if value.contains("тренд")
+        || value.contains("динамик")
+        || value.contains("измен")
+        || value.contains("trend")
+    {
+        Some("trend")
+    } else if value.contains("регион")
+        || value.contains("област")
+        || value.contains("сравн")
+        || value.contains("region")
+    {
+        Some("compare_regions")
+    } else if value.contains("тем") || value.contains("категор") || value.contains("topic")
+    {
+        Some("top_topics")
+    } else if value.contains("сколько")
+        || value.contains("колич")
+        || value.contains("count")
+        || value.contains("how many")
+    {
+        Some("count")
+    } else {
+        None
+    }
+}
+
+fn resolved_query_intent(query: &QueryIntentRequest) -> Option<String> {
+    query
+        .intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            query
+                .text
+                .as_deref()
+                .and_then(infer_query_intent)
+                .map(str::to_owned)
+        })
 }
 
 /// Execute a deliberately small allow-listed analytics language.  The public
@@ -1985,7 +2411,13 @@ async fn analytics_query(
     Json(query): Json<QueryIntentRequest>,
 ) -> Result<Json<Value>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
-    let intent = query.intent.trim().to_ascii_lowercase();
+    let mut query = query;
+    let intent = resolved_query_intent(&query).ok_or_else(|| {
+        ApiError::BadRequest(
+            "QueryIntent must provide intent or text for count, trend, compare_regions, top_topics, spikes or forecast".to_owned(),
+        )
+    })?;
+    query.intent = Some(intent.clone());
     let allowed = [
         "count",
         "trend",
@@ -1999,6 +2431,13 @@ async fn analytics_query(
         return Err(ApiError::BadRequest(format!(
             "unsupported QueryIntent: {intent}"
         )));
+    }
+    if let Some(repository) = state.repository() {
+        return repository
+            .analytics_query(&query)
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
     let region_id = query.region_id.clone().or_else(|| {
@@ -2181,8 +2620,191 @@ fn zip_store(entries: &[(&str, &[u8])]) -> Vec<u8> {
     archive
 }
 
-fn pdf_report() -> Vec<u8> {
-    let content = "BT /F1 12 Tf 72 760 Td (Pulse 109 ReportSlice) Tj 0 -18 Td (period=7d region=all topic=all count=12) Tj ET\n";
+async fn build_report_slice(
+    repository: &PgRepository,
+    query: &AnalyticsQuery,
+) -> Result<ReportSlice, String> {
+    let analytics = repository.analytics(query).await?;
+    let alerts = repository
+        .list_alerts(&AlertQuery {
+            status: None,
+            severity: None,
+            region_id: query.region_id.clone(),
+        })
+        .await?;
+    let forecast = repository
+        .forecast(&ForecastQuery {
+            horizon: Some(30),
+            horizon_days: None,
+            region_id: query.region_id.clone(),
+            topic_id: query.topic_id.clone(),
+            service_id: query.service_id.clone(),
+            status: query.status.clone(),
+            district: query.district.clone(),
+            channel: query.channel.clone(),
+        })
+        .await?;
+    Ok(ReportSlice {
+        filters: query.clone(),
+        analytics,
+        alerts,
+        forecast,
+    })
+}
+
+fn report_metric(report: Option<&ReportSlice>, key: &str) -> String {
+    report
+        .map(|value| &value.analytics)
+        .and_then(|value| value.overview.get(key))
+        .map(Value::to_string)
+        .unwrap_or_else(|| "0".to_owned())
+}
+
+fn report_range(report: Option<&ReportSlice>) -> String {
+    report
+        .map(|value| value.analytics.range.clone())
+        .unwrap_or_else(|| "demo".to_owned())
+}
+
+/// Canonical HTML template for a report slice.
+///
+/// The PDF renderer below is intentionally dependency-free for the Core image:
+/// it consumes this template and lays out its text in a small, valid PDF.  The
+/// The XLSX exporter consumes the same `ReportSlice` directly, so all outputs
+/// are reproducible from one backend snapshot.
+fn report_html(report: Option<&ReportSlice>) -> String {
+    let range = xml_escape(&report_range(report));
+    let total = xml_escape(&report_metric(report, "total_tickets"));
+    let open = xml_escape(&report_metric(report, "open_tickets"));
+    let resolved = xml_escape(&report_metric(report, "resolved_tickets"));
+    let mut region_rows = String::new();
+    let mut topic_rows = String::new();
+    let mut series_rows = String::new();
+    let mut alert_rows = String::new();
+    let mut forecast_rows = String::new();
+    let forecast_status = xml_escape(
+        report
+            .map(|value| value.forecast.status.as_str())
+            .unwrap_or("NO_DATA"),
+    );
+    if let Some(value) = report {
+        for bucket in &value.analytics.by_region {
+            region_rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                xml_escape(&bucket.label),
+                bucket.tickets,
+                bucket
+                    .change_pct
+                    .map(|change| format!("{change:.1}%"))
+                    .unwrap_or_else(|| "—".to_owned()),
+            ));
+        }
+        for bucket in &value.analytics.by_topic {
+            topic_rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                xml_escape(&bucket.label),
+                bucket.tickets,
+                bucket.high_priority,
+            ));
+        }
+        for point in &value.analytics.time_series {
+            series_rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                xml_escape(&point.date),
+                point.tickets,
+                point.resolved,
+            ));
+        }
+        for alert in &value.alerts {
+            alert_rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                xml_escape(&alert.id),
+                xml_escape(&alert.status),
+                xml_escape(&alert.region_id),
+                alert.ticket_count,
+            ));
+        }
+        for point in &value.forecast.points {
+            forecast_rows.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td></tr>",
+                xml_escape(&point.date),
+                point.tickets,
+            ));
+        }
+    }
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pulse 109 report</title>
+<style>body{{font:14px sans-serif;color:#17202a}}table{{border-collapse:collapse;width:100%;margin:8px 0 18px}}th,td{{border:1px solid #ccd3da;padding:5px;text-align:left}}h1,h2{{margin:12px 0 6px}}</style>
+</head><body><h1>Pulse 109 report</h1><p>Period: {range}</p>
+<h2>Overview</h2><table><tr><th>Metric</th><th>Value</th></tr><tr><td>Total tickets</td><td>{total}</td></tr><tr><td>Open tickets</td><td>{open}</td></tr><tr><td>Resolved tickets</td><td>{resolved}</td></tr></table>
+<h2>Regions</h2><table><tr><th>Region</th><th>Tickets</th><th>Change</th></tr>{region_rows}</table>
+<h2>Topics</h2><table><tr><th>Topic</th><th>Tickets</th><th>High priority</th></tr>{topic_rows}</table>
+<h2>Time series</h2><table><tr><th>Date</th><th>Tickets</th><th>Resolved</th></tr>{series_rows}</table>
+<h2>Alerts</h2><table><tr><th>ID</th><th>Status</th><th>Region</th><th>Tickets</th></tr>{alert_rows}</table>
+<h2>Forecast</h2><p>Status: {forecast_status}</p><table><tr><th>Date</th><th>Tickets</th></tr>{forecast_rows}</table>
+</body></html>"#
+    )
+}
+
+fn html_to_pdf_lines(html: &str) -> Vec<String> {
+    let block_html = html
+        .replace("</h1>", "</h1>\n")
+        .replace("</h2>", "</h2>\n")
+        .replace("</p>", "</p>\n")
+        .replace("</tr>", "</tr>\n")
+        .replace("</td>", " | </td>");
+    let mut plain = String::with_capacity(block_html.len());
+    let mut in_tag = false;
+    for character in block_html.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                plain.push(' ');
+            }
+            _ if !in_tag => plain.push(character),
+            _ => {}
+        }
+    }
+    plain
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn pdf_escape(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            '(' => "\\(".to_owned(),
+            ')' => "\\)".to_owned(),
+            '\\' => "\\\\".to_owned(),
+            character if character.is_ascii() && !character.is_control() => character.to_string(),
+            _ => "?".to_owned(),
+        })
+        .collect()
+}
+
+fn pdf_report(report: Option<&ReportSlice>) -> Vec<u8> {
+    let html = report_html(report);
+    let mut content = String::from("BT /F1 10 Tf 48 760 Td ");
+    for (index, line) in html_to_pdf_lines(&html).into_iter().take(48).enumerate() {
+        if index > 0 {
+            content.push_str("0 -14 Td ");
+        }
+        content.push('(');
+        content.push_str(&pdf_escape(&line));
+        content.push_str(") Tj ");
+    }
+    content.push_str("ET\n");
     let bodies = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -2215,12 +2837,101 @@ fn pdf_report() -> Vec<u8> {
     pdf
 }
 
-fn xlsx_report() -> Vec<u8> {
+fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
     let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
     let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
     let workbook = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
     let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
-    let sheet = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>period</t></is></c><c r="B1" t="inlineStr"><is><t>region</t></is></c><c r="C1" t="inlineStr"><is><t>topic</t></is></c><c r="D1" t="inlineStr"><is><t>count</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>7d</t></is></c><c r="B2" t="inlineStr"><is><t>all</t></is></c><c r="C2" t="inlineStr"><is><t>all</t></is></c><c r="D2"><v>12</v></c></row></sheetData></worksheet>"#;
+    let range = report_range(report);
+    let mut rows: Vec<[String; 4]> = vec![
+        [
+            "period".to_owned(),
+            "metric".to_owned(),
+            "value".to_owned(),
+            "details".to_owned(),
+        ],
+        [
+            range.clone(),
+            "total_tickets".to_owned(),
+            report_metric(report, "total_tickets"),
+            String::new(),
+        ],
+        [
+            range.clone(),
+            "open_tickets".to_owned(),
+            report_metric(report, "open_tickets"),
+            String::new(),
+        ],
+        [
+            range.clone(),
+            "resolved_tickets".to_owned(),
+            report_metric(report, "resolved_tickets"),
+            String::new(),
+        ],
+    ];
+    if let Some(value) = report {
+        for point in &value.analytics.time_series {
+            rows.push([
+                range.clone(),
+                "series".to_owned(),
+                point.tickets.to_string(),
+                format!("{} resolved={}", point.date, point.resolved),
+            ]);
+        }
+        for alert in &value.alerts {
+            rows.push([
+                range.clone(),
+                "alert".to_owned(),
+                alert.ticket_count.to_string(),
+                format!("{} {} {}", alert.id, alert.status, alert.region_id),
+            ]);
+        }
+        for point in &value.forecast.points {
+            rows.push([
+                range.clone(),
+                "forecast".to_owned(),
+                point.tickets.to_string(),
+                point.date.clone(),
+            ]);
+        }
+        rows.push([
+            range.clone(),
+            "forecast_status".to_owned(),
+            value.forecast.status.clone(),
+            value.forecast.model.clone(),
+        ]);
+    } else {
+        rows.push([
+            range.clone(),
+            "forecast_status".to_owned(),
+            "NO_DATA".to_owned(),
+            String::new(),
+        ]);
+    }
+    let cell = |column: &str, row: usize, value: &str| {
+        format!(
+            r#"<c r="{column}{row}" t="inlineStr"><is><t>{}</t></is></c>"#,
+            xml_escape(value)
+        )
+    };
+    let mut sheet_data = String::new();
+    for (index, row) in rows.iter().enumerate() {
+        let row_number = index + 1;
+        sheet_data.push_str(&format!(
+            r#"<row r="{row_number}">{}</row>"#,
+            [
+                cell("A", row_number, &row[0]),
+                cell("B", row_number, &row[1]),
+                cell("C", row_number, &row[2]),
+                cell("D", row_number, &row[3]),
+            ]
+            .join("")
+        ));
+    }
+    let sheet = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D{}"/><sheetData>{sheet_data}</sheetData></worksheet>"#,
+        rows.len()
+    );
     let entries = [
         ("[Content_Types].xml", content_types.as_bytes()),
         ("_rels/.rels", root_rels.as_bytes()),
@@ -2231,12 +2942,21 @@ fn xlsx_report() -> Vec<u8> {
     zip_store(&entries)
 }
 
-fn report_response(format: &str) -> Response {
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn report_response(format: &str, report: Option<&ReportSlice>) -> Response {
     let (body, content_type, filename) = if format == "pdf" {
-        (pdf_report(), "application/pdf", "pulse109-report.pdf")
+        (pdf_report(report), "application/pdf", "pulse109-report.pdf")
     } else {
         (
-            xlsx_report(),
+            xlsx_report(report),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "pulse109-report.xlsx",
         )
@@ -2257,24 +2977,76 @@ fn report_response(format: &str) -> Response {
 async fn export_pdf(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<AnalyticsQuery>,
 ) -> Result<Response, ApiError> {
-    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
-    Ok(report_response("pdf"))
+    let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let report = build_report_slice(&repository, &query)
+            .await
+            .map_err(ApiError::Internal)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "EXPORT_REPORT",
+                "report",
+                None,
+                Some(&request_id_from_headers(&headers)),
+                Some("pdf"),
+                serde_json::to_value(&query).unwrap_or_else(|_| json!({})),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(report_response("pdf", Some(&report)));
+    }
+    Ok(report_response("pdf", None))
 }
 
 async fn export_xlsx(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<AnalyticsQuery>,
 ) -> Result<Response, ApiError> {
-    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
-    Ok(report_response("xlsx"))
+    let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let report = build_report_slice(&repository, &query)
+            .await
+            .map_err(ApiError::Internal)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "EXPORT_REPORT",
+                "report",
+                None,
+                Some(&request_id_from_headers(&headers)),
+                Some("xlsx"),
+                serde_json::to_value(&query).unwrap_or_else(|_| json!({})),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(report_response("xlsx", Some(&report)));
+    }
+    Ok(report_response("xlsx", None))
 }
 
 async fn reports(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<AnalyticsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let report = build_report_slice(&repository, &query)
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(Json(json!({
+            "items": [
+                {"id": "report-current-slice", "format": "pdf", "status": "ready", "download": "/api/v1/analytics/export.pdf"},
+                {"id": "report-current-slice", "format": "xlsx", "status": "ready", "download": "/api/v1/analytics/export.xlsx"}
+            ],
+            "slice": report,
+            "source": "postgres"
+        })));
+    }
     Ok(Json(json!({
         "items": [
             {"id": "report-demo-7d", "format": "pdf", "status": "ready", "download": "/api/v1/analytics/export.pdf"},
@@ -2286,6 +3058,33 @@ async fn reports(
 
 async fn events(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let alerts = repository
+            .list_alerts(&AlertQuery {
+                status: None,
+                severity: None,
+                region_id: None,
+            })
+            .await
+            .map_err(ApiError::Internal)?;
+        let payload = serde_json::to_string(&json!({
+            "type": "alerts.snapshot",
+            "source": "postgres",
+            "alerts": alerts,
+        }))
+        .map_err(|error| ApiError::Internal(format!("serialize events: {error}")))?;
+        let mut response = Response::new(Body::from(format!(
+            "event: alerts\ndata: {payload}\n\nevent: pulse\ndata: {{\"type\":\"heartbeat\",\"source\":\"postgres\"}}\n\n"
+        )));
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        return Ok(response);
+    }
     let mut response = Response::new(Body::from(
         "event: pulse\ndata: {\"type\":\"heartbeat\",\"source\":\"deterministic-demo\"}\n\n",
     ));
@@ -2319,22 +3118,34 @@ fn metric_bucket(id: String, label: String, tickets: Vec<&Ticket>, store: &Store
             .filter(|ticket| ticket.priority == "high")
             .count(),
         avg_confidence,
+        change_abs: None,
+        change_pct: None,
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ForecastResponse {
     pub source: String,
     pub model: String,
+    pub status: String,
+    pub insufficient_history: bool,
     pub horizon_days: u32,
+    pub history: Vec<TimeSeriesPoint>,
     pub points: Vec<TimeSeriesPoint>,
     pub expected_peaks: Vec<String>,
+    pub backtest: Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ForecastQuery {
     pub horizon: Option<u32>,
     pub horizon_days: Option<u32>,
+    pub region_id: Option<String>,
+    pub topic_id: Option<String>,
+    pub service_id: Option<String>,
+    pub status: Option<String>,
+    pub district: Option<String>,
+    pub channel: Option<String>,
 }
 
 async fn forecast(
@@ -2343,13 +3154,20 @@ async fn forecast(
     Query(query): Query<ForecastQuery>,
 ) -> Result<Json<ForecastResponse>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
-    let _store = state.read_store()?;
     let horizon_days = query.horizon.or(query.horizon_days).unwrap_or(30);
     if !matches!(horizon_days, 30 | 60 | 90) {
         return Err(ApiError::BadRequest(
             "horizon must be 30, 60 or 90 days".to_owned(),
         ));
     }
+    if let Some(repository) = state.repository() {
+        return repository
+            .forecast(&query)
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
+    let _store = state.read_store()?;
     let pattern = [11_u32, 12, 10, 13, 14, 12, 15];
     let resolved_pattern = [7_u32, 7, 6, 8, 8, 7, 9];
     let start = NaiveDate::from_ymd_opt(2026, 9, 22).expect("fixed demo date is valid");
@@ -2369,9 +3187,13 @@ async fn forecast(
     Ok(Json(ForecastResponse {
         source: "deterministic-demo".to_owned(),
         model: "seasonal-naive-demo".to_owned(),
+        status: "OK".to_owned(),
+        insufficient_history: false,
         horizon_days,
+        history: Vec::new(),
         points,
         expected_peaks,
+        backtest: json!({"status": "DEMO_ONLY"}),
     }))
 }
 
@@ -2394,6 +3216,14 @@ async fn list_alerts(
     Query(query): Query<AlertQuery>,
 ) -> Result<Json<AlertListResponse>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let items = repository
+            .list_alerts(&query)
+            .await
+            .map_err(ApiError::Internal)?;
+        let total = items.len();
+        return Ok(Json(AlertListResponse { items, total }));
+    }
     let store = state.read_store()?;
     let items = store
         .alerts
@@ -2428,6 +3258,19 @@ async fn get_alert(
     Path(alert_id): Path<String>,
 ) -> Result<Json<Alert>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .get_alert(&alert_id)
+            .await
+            .map(Json)
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            });
+    }
     let store = state.read_store()?;
     store
         .alerts
@@ -2443,6 +3286,31 @@ async fn ack_alert(
     Path(alert_id): Path<String>,
 ) -> Result<Json<Alert>, ApiError> {
     let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .acknowledge_alert(&alert_id, &actor.user_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "ACK_ALERT",
+                "alert",
+                Some(&alert_id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(Json(response));
+    }
     let mut store = state.write_store()?;
     let alert = store
         .alerts
@@ -2452,6 +3320,67 @@ async fn ack_alert(
     alert.acknowledged_by = Some(actor.user_id);
     alert.acknowledged_at = Some(DEMO_TIMESTAMP.to_owned());
     Ok(Json(alert.clone()))
+}
+
+async fn close_alert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(alert_id): Path<String>,
+) -> Result<Json<Alert>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let response = repository
+            .close_alert(&alert_id, &actor.user_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "CLOSE_ALERT",
+                "alert",
+                Some(&alert_id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(Json(response));
+    }
+    let mut store = state.write_store()?;
+    let alert = store
+        .alerts
+        .get_mut(&alert_id)
+        .ok_or_else(|| ApiError::NotFound(format!("alert {alert_id} not found")))?;
+    alert.status = "closed".to_owned();
+    alert.closed_by = Some(actor.user_id);
+    alert.closed_at = Some(Utc::now().to_rfc3339());
+    Ok(Json(alert.clone()))
+}
+
+async fn detect_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AlertListResponse>, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let items = repository
+            .detect_alerts()
+            .await
+            .map_err(ApiError::Internal)?;
+        let total = items.len();
+        return Ok(Json(AlertListResponse { items, total }));
+    }
+    let store = state.read_store()?;
+    let items = store.alerts.values().cloned().collect::<Vec<_>>();
+    let total = items.len();
+    Ok(Json(AlertListResponse { items, total }))
 }
 
 #[derive(Debug, Serialize)]
@@ -2467,6 +3396,13 @@ async fn learning_overview(
     headers: HeaderMap,
 ) -> Result<Json<LearningOverview>, ApiError> {
     require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .learning_overview()
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
     let store = state.read_store()?;
     let items = store.learning_cycles.values().cloned().collect::<Vec<_>>();
     let active_cycle = items
@@ -2502,6 +3438,13 @@ async fn create_learning_cycle(
     Json(request): Json<CreateLearningCycleRequest>,
 ) -> Result<(StatusCode, Json<LearningCycle>), ApiError> {
     require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let cycle = repository
+            .create_learning_cycle(&request)
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok((StatusCode::CREATED, Json(cycle)));
+    }
     let mut store = state.write_store()?;
     let cycle = LearningCycle {
         id: format!("cycle-{:03}", store.next_cycle_number),
@@ -2538,6 +3481,19 @@ async fn get_learning_cycle(
     Path(cycle_id): Path<String>,
 ) -> Result<Json<LearningCycle>, ApiError> {
     require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .get_learning_cycle(&cycle_id)
+            .await
+            .map(Json)
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            });
+    }
     let store = state.read_store()?;
     store
         .learning_cycles
@@ -2568,6 +3524,19 @@ async fn add_learning_feedback(
         &state.config,
         &[Role::Operator, Role::Manager, Role::MlReviewer, Role::Admin],
     )?;
+    if let Some(repository) = state.repository() {
+        let feedback = repository
+            .add_learning_feedback(&cycle_id, &request, &actor.user_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        return Ok((StatusCode::CREATED, Json(feedback)));
+    }
     let mut store = state.write_store()?;
     if !store.learning_cycles.contains_key(&cycle_id) {
         return Err(ApiError::NotFound(format!(
@@ -2659,6 +3628,18 @@ async fn relation_feedback(
                     ApiError::Internal(error)
                 }
             })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "RELATION_FEEDBACK",
+                "ticket",
+                Some(&ticket_id),
+                Some(&request_id_from_headers(&headers)),
+                Some(&decision),
+                json!({"relation": &relation, "related_ticket_id": &request.related_ticket_id}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
         return Ok((
             StatusCode::CREATED,
             Json(LearningFeedback {
@@ -2716,7 +3697,25 @@ async fn close_learning_cycle(
     headers: HeaderMap,
     Json(request): Json<CloseLearningCycleRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let result = repository
+            .close_learning_cycle(&request)
+            .await
+            .map_err(ApiError::Internal)?;
+        let _ = repository
+            .audit(
+                &actor.user_id,
+                "CLOSE_LEARNING_CYCLE",
+                "learning_cycle",
+                request.cycle_id.as_deref(),
+                None,
+                None,
+                json!({}),
+            )
+            .await;
+        return Ok((StatusCode::ACCEPTED, Json(result)));
+    }
     let mut store = state.write_store()?;
     let cycle_id = request.cycle_id.or_else(|| {
         store
@@ -2755,6 +3754,19 @@ async fn candidate_evaluation(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .candidate_evaluation()
+            .await
+            .map(Json)
+            .map_err(|error| {
+                if error.contains("no active") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            });
+    }
     let store = state.read_store()?;
     let cycle = store
         .learning_cycles
@@ -2786,6 +3798,21 @@ async fn promote_active_learning_cycle(
     headers: HeaderMap,
     Json(request): Json<CycleDecisionRequest>,
 ) -> Result<Json<LearningCycle>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let cycle_id = repository
+            .learning_overview()
+            .await
+            .map_err(ApiError::Internal)?
+            .active_cycle
+            .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?
+            .id;
+        let cycle = repository
+            .promote_learning_cycle(&cycle_id, request.note.as_deref(), &actor.user_id)
+            .await
+            .map_err(ApiError::Conflict)?;
+        return Ok(Json(cycle));
+    }
     let cycle_id = {
         let store = state.read_store()?;
         active_cycle_id(&store)
@@ -2799,6 +3826,21 @@ async fn reject_active_learning_cycle(
     headers: HeaderMap,
     Json(request): Json<CycleDecisionRequest>,
 ) -> Result<Json<LearningCycle>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let cycle_id = repository
+            .learning_overview()
+            .await
+            .map_err(ApiError::Internal)?
+            .active_cycle
+            .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?
+            .id;
+        let cycle = repository
+            .reject_learning_cycle(&cycle_id, request.note.as_deref(), &actor.user_id)
+            .await
+            .map_err(ApiError::Conflict)?;
+        return Ok(Json(cycle));
+    }
     let cycle_id = {
         let store = state.read_store()?;
         active_cycle_id(&store)
@@ -2814,6 +3856,13 @@ async fn promote_learning_cycle(
     Json(request): Json<CycleDecisionRequest>,
 ) -> Result<Json<LearningCycle>, ApiError> {
     let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let cycle = repository
+            .promote_learning_cycle(&cycle_id, request.note.as_deref(), &actor.user_id)
+            .await
+            .map_err(ApiError::Conflict)?;
+        return Ok(Json(cycle));
+    }
     let mut store = state.write_store()?;
     let (candidate_id, metrics) = {
         let cycle = store
@@ -2873,6 +3922,13 @@ async fn reject_learning_cycle(
     Json(request): Json<CycleDecisionRequest>,
 ) -> Result<Json<LearningCycle>, ApiError> {
     let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let cycle = repository
+            .reject_learning_cycle(&cycle_id, request.note.as_deref(), &actor.user_id)
+            .await
+            .map_err(ApiError::Conflict)?;
+        return Ok(Json(cycle));
+    }
     let mut store = state.write_store()?;
     let cycle = store
         .learning_cycles
@@ -2912,6 +3968,14 @@ async fn list_models(
         &state.config,
         &[Role::Manager, Role::MlReviewer, Role::Admin],
     )?;
+    if let Some(repository) = state.repository() {
+        let items = repository
+            .list_models(&query)
+            .await
+            .map_err(ApiError::Internal)?;
+        let total = items.len();
+        return Ok(Json(ModelListResponse { items, total }));
+    }
     let store = state.read_store()?;
     let items = store
         .models
@@ -2938,6 +4002,19 @@ async fn get_model(
         &state.config,
         &[Role::Manager, Role::MlReviewer, Role::Admin],
     )?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .get_model(&model_id)
+            .await
+            .map(Json)
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            });
+    }
     let store = state.read_store()?;
     store
         .models
@@ -2953,6 +4030,19 @@ async fn promote_model(
     Path(model_id): Path<String>,
 ) -> Result<Json<ModelVersion>, ApiError> {
     let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .promote_model(&model_id, &actor.user_id)
+            .await
+            .map(Json)
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Conflict(error)
+                }
+            });
+    }
     let mut store = state.write_store()?;
     if !store.models.contains_key(&model_id) {
         return Err(ApiError::NotFound(format!("model {model_id} not found")));
@@ -2990,7 +4080,7 @@ async fn openapi() -> Json<Value> {
         "info": {
             "title": "Pulse 109 Core API",
             "version": API_VERSION,
-            "description": "P0 operator workflow and situation center API. Demo responses are deterministic and marked with source=deterministic-demo."
+            "description": "P0 operator workflow and situation center API. Compose uses PostgreSQL/Qdrant/ML baseline; deterministic memory responses are test-only."
         },
         "servers": [{ "url": "/" }],
         "security": [{ "PulseRole": [] }],
@@ -3000,7 +4090,7 @@ async fn openapi() -> Json<Value> {
                     "type": "apiKey",
                     "in": "header",
                     "name": "x-pulse-role",
-                    "description": "Development role stub: OPERATOR, MANAGER, ML_REVIEWER or ADMIN."
+                    "description": "Demo/test role header. Production uses x-authenticated-role from the trusted auth gateway."
                 }
             }
         },
@@ -3009,19 +4099,28 @@ async fn openapi() -> Json<Value> {
             "/readyz": { "get": { "summary": "Readiness" } },
             "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
             "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
+            "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
             "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
+            "/api/v1/import": { "post": { "summary": "Import validated tickets into PostgreSQL and Qdrant" } },
             "/api/v1/assist/preview": { "post": { "summary": "Preview prediction and related tickets" } },
             "/api/v1/assist/{ticket_id}/confirm": { "post": { "summary": "Confirm prediction" } },
             "/api/v1/assist/{ticket_id}/correct": { "post": { "summary": "Correct prediction" } },
             "/api/v1/analytics": { "get": { "summary": "Situation center analytics" } },
             "/api/v1/analytics/overview": { "get": { "summary": "Situation center overview" } },
+            "/api/v1/analytics/drilldown": { "get": { "summary": "Drill analytics metrics down to source tickets" } },
+            "/api/v1/taxonomy": { "get": { "summary": "Current regions, topics, services and available ticket filters" } },
             "/api/v1/analytics/query": { "post": { "summary": "Validated QueryIntent analytics" } },
+            "/api/v1/retrieval/reindex": { "post": { "summary": "Queue a PostgreSQL-backed Qdrant reindex" } },
             "/api/v1/analytics/export.pdf": { "get": { "summary": "Export ReportSlice as PDF" } },
             "/api/v1/analytics/export.xlsx": { "get": { "summary": "Export ReportSlice as XLSX" } },
             "/api/v1/reports": { "get": { "summary": "List generated reports" } },
             "/api/v1/events": { "get": { "summary": "SSE notifications" } },
             "/api/v1/forecast": { "get": { "summary": "Forecast baseline" } },
             "/api/v1/alerts": { "get": { "summary": "List alerts" } },
+            "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist spike alerts" } },
+            "/api/v1/alerts/{alert_id}": { "get": { "summary": "Get alert detail and linked tickets" } },
+            "/api/v1/alerts/{alert_id}/ack": { "post": { "summary": "Acknowledge alert" } },
+            "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },
             "/api/v1/learning": { "get": { "summary": "Learning loop status" }, "post": { "summary": "Start candidate cycle" } },
             "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
             "/api/v1/learning/cycle/close": { "post": { "summary": "Close collect and train candidate" } },
@@ -3295,5 +4394,17 @@ mod tests {
             assert_eq!(value["horizon_days"], horizon);
             assert_eq!(value["points"].as_array().unwrap().len(), horizon as usize);
         }
+    }
+
+    #[test]
+    fn qdrant_collection_is_stable_for_baseline_and_versioned_for_new_embedder() {
+        assert_eq!(
+            default_qdrant_collection("embedder-demo-2026-09-21-001", 32),
+            "pulse109_tickets_v1"
+        );
+        assert_eq!(
+            default_qdrant_collection("e5-multilingual-v2", 768),
+            "pulse109_e5_multilingual_v2_d768"
+        );
     }
 }

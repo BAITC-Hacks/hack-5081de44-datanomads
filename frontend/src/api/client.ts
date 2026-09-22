@@ -3,11 +3,35 @@ import type { Alert, DashboardData, ForecastPoint, LearningCycle, ModelStatus, P
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
+const DEMO_ENABLED = import.meta.env.VITE_PULSE_DEMO === 'true'
 
 export interface ApiResult<T> {
   data: T
   source: 'api' | 'demo'
   error?: string
+}
+
+export interface DashboardFilters {
+  range: string
+  regionId?: string
+  topicId?: string
+  serviceId?: string
+  status?: string
+  district?: string
+  channel?: string
+}
+
+export type DrilldownDimension = 'overview' | 'region' | 'topic' | 'date' | 'alert'
+
+function queryString(filters: DashboardFilters) {
+  const params = new URLSearchParams({ range: filters.range })
+  if (filters.regionId) params.set('region_id', filters.regionId)
+  if (filters.topicId) params.set('topic_id', filters.topicId)
+  if (filters.serviceId) params.set('service_id', filters.serviceId)
+  if (filters.status) params.set('status', filters.status)
+  if (filters.district) params.set('district', filters.district)
+  if (filters.channel) params.set('channel', filters.channel)
+  return params.toString()
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -21,7 +45,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
-interface BackendTicket {
+export interface BackendTicket {
   id: string
   external_ref: string
   text: string
@@ -52,6 +76,7 @@ interface BackendPrediction {
   confidence_state: string
   recommended_service: string
   predicted_priority: string
+  routing_reason?: string
   alternatives: BackendAlternative[]
 }
 
@@ -74,17 +99,26 @@ interface BackendTicketDetail {
 
 interface BackendAnalytics {
   source?: string
-  overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number }
-  by_region: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number }>
-  by_topic: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number }>
+  overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number; operator_decisions?: number; confirmed_decisions?: number; corrected_decisions?: number; avg_decision_minutes?: number; change_abs?: number; change_pct?: number | null }
+  by_region: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number; change_abs?: number; change_pct?: number }>
+  by_topic: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number; change_abs?: number; change_pct?: number }>
   time_series: Array<{ date: string; tickets: number; resolved: number }>
 }
 
-interface BackendForecast { source?: string; points: Array<{ date: string; tickets: number; resolved: number }>; model: string }
+interface BackendForecast { source?: string; status?: string; insufficient_history?: boolean; history?: Array<{ date: string; tickets: number; resolved: number }>; points: Array<{ date: string; tickets: number; resolved: number }>; model: string; expected_peaks?: string[]; backtest?: Record<string, unknown> }
 interface BackendAlert { id: string; severity: string; status: string; title: string; description: string; region_id: string; topic_id: string; ticket_count: number; detected_at: string }
 interface BackendAlerts { source?: string; items: BackendAlert[] }
 interface BackendLearning { source?: string; active_cycle?: { id: string; state: string; dataset_version: string; candidate_model_version: string; feedback_count: number; updated_at: string; metrics: { macro_f1: number } } }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
+export interface TaxonomyOption { id: string; label: string }
+interface BackendTaxonomy {
+  regions: TaxonomyOption[]
+  topics: TaxonomyOption[]
+  services: TaxonomyOption[]
+  statuses?: TaxonomyOption[]
+  districts?: TaxonomyOption[]
+  channels?: TaxonomyOption[]
+}
 
 function mapPriority(value: string): Priority {
   if (value === 'high' || value === 'Высокий') return 'Высокий'
@@ -102,36 +136,25 @@ function mapRelation(value: string): SimilarTicket['relation'] {
   return 'Похожий'
 }
 
-const topicIds: Record<string, string> = {
-  'Водоснабжение': 'TOPIC-WATER',
-  'Сумен жабдықтау': 'TOPIC-WATER',
-  'Дороги и благоустройство': 'TOPIC-ROADS',
-  'Здравоохранение': 'TOPIC-HEALTH',
-  'Социальная поддержка': 'TOPIC-SOCIAL',
-  'Социальная помощь': 'TOPIC-SOCIAL',
-  'Образование': 'TOPIC-EDUCATION',
-  'Коммунальные услуги': 'TOPIC-UTILITIES',
-  'ЖКХ и инфраструктура': 'TOPIC-UTILITIES',
-  'Безопасность': 'TOPIC-SAFETY',
-  'Безопасность и освещение': 'TOPIC-SAFETY',
-  'Общественный транспорт': 'TOPIC-TRANSPORT',
-  'Экология': 'TOPIC-ENVIRONMENT',
-  'Санитарлық жағдай': 'TOPIC-ENVIRONMENT',
-  'Государственные сервисы': 'TOPIC-DIGITAL',
-  'Цифровые услуги': 'TOPIC-DIGITAL',
-  'Жильё': 'TOPIC-HOUSING',
+function topicIdForLabel(label?: string, topics: TaxonomyOption[] = []) {
+  if (!label) return undefined
+  const option = topics.find((item) => item.id === label || item.label === label)
+  if (option) return option.id
+  if (label.trim().toLocaleLowerCase() === 'другая тема') return 'unknown'
+  return label
 }
 
-function topicIdForLabel(label?: string) {
+function serviceIdForLabel(label?: string, services: TaxonomyOption[] = []) {
   if (!label) return undefined
-  return label.startsWith('TOPIC-') ? label : topicIds[label] ?? 'TOPIC-OTHER'
+  if (label.trim().toLocaleLowerCase() === 'другая служба') return 'service_other'
+  return services.find((item) => item.id === label || item.label === label)?.id ?? label
 }
 
 function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, knownTickets: BackendTicket[] = [], preview?: BackendAssistPreview): Ticket {
   const prediction = detail?.prediction
   const latest = detail?.latest_decision
   const related = preview?.similar_tickets ?? []
-  const topic = prediction?.topic_label ?? item.topic_label
+  const topic = latest ? item.topic_label : prediction?.topic_label ?? item.topic_label
   const alternatives = prediction?.alternatives ?? []
   const text = item.text
   const similar = related.map((candidate) => ({
@@ -145,47 +168,95 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   return {
     id: item.id,
     originalText: text,
+    modelVersion: prediction?.model_version,
     language: mapLanguage(item.language),
     topic,
     confidence: prediction?.confidence ?? .75,
     alternatives: alternatives.map((alternative) => ({ topic: alternative.topic_label, confidence: alternative.confidence })),
     service: latest?.service ?? prediction?.recommended_service ?? 'Служба обработки обращений',
     priority: mapPriority(latest?.priority ?? prediction?.predicted_priority ?? item.priority),
+    routingReason: prediction?.routing_reason,
     region: item.region_name,
     createdAt: item.created_at,
     status,
     similar,
-    responseTemplate: preview?.response_template?.body ?? 'Обращение зарегистрировано и передано ответственному подразделению. О статусе сообщим дополнительно.',
+    responseTemplate: preview?.response_template?.body ?? 'Утверждённый шаблон ответа не найден в PostgreSQL.',
     channel: item.source === 'mobile' ? 'Мобильное приложение' : item.source === 'call-center' ? 'Call-центр' : item.source === 'whatsapp' ? 'WhatsApp' : 'eGov',
   }
 }
 
-async function loadApiDashboard(): Promise<DashboardData> {
-  const [ticketResponse, analytics, forecast, alertsResponse, learning, models] = await Promise.all([
+async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardData> {
+  const analyticsQuery = queryString(filters)
+  const forecastQuery = new URLSearchParams({ horizon: '30', ...(filters.regionId ? { region_id: filters.regionId } : {}), ...(filters.topicId ? { topic_id: filters.topicId } : {}), ...(filters.serviceId ? { service_id: filters.serviceId } : {}), ...(filters.status ? { status: filters.status } : {}), ...(filters.district ? { district: filters.district } : {}), ...(filters.channel ? { channel: filters.channel } : {}) }).toString()
+  const alertsQuery = filters.regionId ? `?region_id=${encodeURIComponent(filters.regionId)}` : ''
+  const [ticketResponse, analytics, forecast, alertsResponse, learning, models, taxonomy] = await Promise.all([
     request<{ items: BackendTicket[] }>('/tickets?limit=50'),
-    request<BackendAnalytics>('/analytics?range=7d'),
-    request<BackendForecast>('/forecast'),
-    request<BackendAlerts>('/alerts'),
+    request<BackendAnalytics>(`/analytics?${analyticsQuery}`),
+    request<BackendForecast>(`/forecast?${forecastQuery}`),
+    request<BackendAlerts>(`/alerts${alertsQuery}`),
     request<BackendLearning>('/learning'),
     request<BackendModels>('/models'),
+    request<BackendTaxonomy>('/taxonomy'),
   ])
-  const detailResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticket.id)}`).catch(() => undefined)))
-  const previewResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendAssistPreview>('/assist/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket_id: ticket.id }) }).catch(() => undefined)))
+  const detailResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticket.id)}`)))
+  const previewResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendAssistPreview>('/assist/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket_id: ticket.id }) })))
   const tickets = ticketResponse.items.map((ticket, index) => mapBackendTicket(ticket, detailResults[index], ticketResponse.items, previewResults[index]))
-  const regions: RegionMetric[] = analytics.source === 'postgres' ? analytics.by_region.filter((region) => region.tickets > 0).map((region) => ({ name: region.label, tickets: region.tickets })) : []
-  const topics: TopicMetric[] = analytics.source === 'postgres' ? analytics.by_topic.filter((topic) => topic.tickets > 0).map((topic, index) => ({ name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] })) : []
-  const alerts: Alert[] = alertsResponse.source === 'postgres' ? alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity === 'critical' ? 'critical' : alert.severity === 'warning' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status === 'acknowledged' ? 'В работе' : alert.status === 'closed' ? 'Закрыт' : 'Новый' })) : []
-  const forecastPoints: ForecastPoint[] = forecast.source === 'postgres' ? forecast.points.map((point) => ({ label: point.date.slice(5), actual: point.tickets })) : []
+  const regions: RegionMetric[] = analytics.by_region.filter((region) => region.tickets > 0).map((region) => ({ id: region.id, name: region.label, tickets: region.tickets, change: region.change_pct }))
+  const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), change: topic.change_pct, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
+  const alerts: Alert[] = alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity.toLowerCase() === 'critical' ? 'critical' : alert.severity.toLowerCase() === 'high' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status.toLowerCase() === 'acknowledged' ? 'В работе' : alert.status.toLowerCase() === 'closed' ? 'Закрыт' : 'Новый' }))
+  const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date.slice(5), forecast: point.tickets }))
   const cycle = learning.active_cycle
-  const learningData: LearningCycle = learning && learning.source === 'postgres' && cycle ? { id: cycle.id, stage: cycle.state === 'REVIEW' ? 'REVIEW' : cycle.state === 'EVALUATE' ? 'EVALUATE' : cycle.state === 'TRAIN' ? 'TRAIN' : 'COLLECT', dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, updatedAt: cycle.updated_at } : demoData.learning
-  const modelData: ModelStatus[] = models.source === 'postgres' ? models.items.map((model) => ({ name: model.model_family, version: model.id, status: model.status === 'production' ? 'production' : model.status === 'candidate' ? 'candidate' : 'shadow', metric: 'доступно в реестре', metricValue: model.metrics.macro_f1 == null ? '—' : model.metrics.macro_f1.toFixed(3), updatedAt: model.created_at })) : []
-  return { tickets, regions, topics, alerts, forecast: forecastPoints, models: modelData, learning: learningData }
+  const learningData: LearningCycle = cycle ? { id: cycle.id, stage: cycle.state === 'REVIEW' ? 'REVIEW' : cycle.state === 'EVALUATE' ? 'EVALUATE' : cycle.state === 'TRAINING' || cycle.state === 'TRAIN' ? 'TRAIN' : 'COLLECT', dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, updatedAt: cycle.updated_at } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', updatedAt: 'нет данных' }
+  const modelData: ModelStatus[] = models.items.map((model) => {
+    const status = model.status.toLowerCase()
+    return {
+      name: model.model_family,
+      version: model.id,
+      status: status === 'production' || status === 'candidate' || status === 'shadow' || status === 'rejected' || status === 'archived' ? status : 'shadow',
+      metric: 'доступно в реестре',
+      metricValue: model.metrics.macro_f1 == null ? '—' : model.metrics.macro_f1.toFixed(3),
+      updatedAt: model.created_at,
+    }
+  })
+  return {
+    tickets,
+    overview: {
+      totalTickets: analytics.overview.total_tickets,
+      openTickets: analytics.overview.open_tickets,
+      resolvedTickets: analytics.overview.resolved_tickets,
+      highPriorityTickets: analytics.overview.high_priority_tickets,
+      operatorDecisions: analytics.overview.operator_decisions ?? 0,
+      confirmedDecisions: analytics.overview.confirmed_decisions ?? 0,
+      correctedDecisions: analytics.overview.corrected_decisions ?? 0,
+      changeAbs: analytics.overview.change_abs ?? 0,
+      avgDecisionMinutes: analytics.overview.avg_decision_minutes ?? 0,
+      changePct: analytics.overview.change_pct ?? undefined,
+    },
+    regions,
+    topics,
+    alerts,
+    forecast: forecastPoints,
+    models: modelData,
+    learning: learningData,
+    timeSeries: analytics.time_series,
+    reportSource: 'postgres',
+    forecastStatus: forecast.status,
+    filterOptions: {
+      regions: taxonomy.regions ?? analytics.by_region.map((region) => ({ id: region.id, label: region.label })),
+      topics: taxonomy.topics ?? [],
+      services: taxonomy.services ?? [],
+      statuses: taxonomy.statuses ?? [],
+      districts: taxonomy.districts ?? [],
+      channels: taxonomy.channels ?? [],
+    },
+  }
 }
 
-export async function loadDashboard(): Promise<ApiResult<DashboardData>> {
+export async function loadDashboard(filters: DashboardFilters = { range: '7d' }): Promise<ApiResult<DashboardData>> {
   try {
-    return { data: await loadApiDashboard(), source: 'api' }
+    return { data: await loadApiDashboard(filters), source: 'api' }
   } catch (error) {
+    if (!DEMO_ENABLED) throw error
     return {
       data: demoData,
       source: 'demo',
@@ -200,18 +271,19 @@ export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
     const tickets = await Promise.all(
       response.items.map(async (item) => {
         const [detail, preview] = await Promise.all([
-          request<BackendTicketDetail>(`/tickets/${encodeURIComponent(item.id)}`).catch(() => undefined),
+          request<BackendTicketDetail>(`/tickets/${encodeURIComponent(item.id)}`),
           request<BackendAssistPreview>('/assist/preview', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ticket_id: item.id }),
-          }).catch(() => undefined),
+          }),
         ])
         return mapBackendTicket(item, detail, response.items, preview)
       }),
     )
     return { data: tickets, source: 'api' }
   } catch (error) {
+    if (!DEMO_ENABLED) throw error
     return {
       data: demoData.tickets,
       source: 'demo',
@@ -220,20 +292,72 @@ export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
   }
 }
 
-export async function submitDecision(ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) {
+export async function submitDecision(ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }, taxonomy?: Pick<DashboardData['filterOptions'], 'topics' | 'services'>) {
   try {
     const action = decision.status === 'confirmed' ? 'confirm' : 'correct'
     await request(`/assist/${encodeURIComponent(ticketId)}/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        topic_id: topicIdForLabel(decision.topic),
-        service: decision.service,
+        topic_id: topicIdForLabel(decision.topic, taxonomy?.topics),
+        service: serviceIdForLabel(decision.service, taxonomy?.services),
         priority: decision.priority === 'Высокий' ? 'high' : decision.priority === 'Низкий' ? 'low' : decision.priority === 'Средний' ? 'medium' : undefined,
       }),
     })
-    return { source: 'api' as const }
+    const detail = await request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticketId)}`)
+    return { source: 'api' as const, ticket: mapBackendTicket(detail.ticket, detail, [detail.ticket]) }
   } catch (error) {
+    if (!DEMO_ENABLED) throw error
     return { source: 'demo' as const, error: error instanceof Error ? error.message : 'API недоступен' }
   }
+}
+
+export async function submitRelationFeedback(ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') {
+  return request(`/tickets/${encodeURIComponent(ticketId)}/relation-feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ related_ticket_id: relatedTicketId, relation, decision }),
+  })
+}
+
+export async function acknowledgeAlert(alertId: string): Promise<Pick<BackendAlert, 'id' | 'status'>> {
+  return request<Pick<BackendAlert, 'id' | 'status'>>(`/alerts/${encodeURIComponent(alertId)}/ack`, { method: 'POST' })
+}
+
+export async function closeAlert(alertId: string): Promise<Pick<BackendAlert, 'id' | 'status'>> {
+  return request<Pick<BackendAlert, 'id' | 'status'>>(`/alerts/${encodeURIComponent(alertId)}/close`, { method: 'POST' })
+}
+
+export function reportUrl(format: 'pdf' | 'xlsx', filters: DashboardFilters = { range: '30d' }) {
+  return `${API_BASE}/analytics/export.${format}?${queryString(filters)}`
+}
+
+export async function loadAnalyticsDrilldown(dimension: DrilldownDimension, value: string | undefined, filters: DashboardFilters = { range: '30d' }) {
+  const params = new URLSearchParams(queryString(filters))
+  params.set('dimension', dimension)
+  if (value) params.set('value', value)
+  return request<{ items: BackendTicket[]; total: number; limit: number; offset: number }>(`/analytics/drilldown?${params.toString()}`)
+}
+
+export async function runQueryIntent(text: string, filters: DashboardFilters = { range: '30d' }) {
+  return request<{ intent: string; number?: number | string; rows?: unknown[]; result?: unknown; source: string }>('/analytics/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text: text.trim(),
+      range: filters.range,
+      region_id: filters.regionId,
+      topic_id: filters.topicId,
+      filters: {
+        range: filters.range,
+        region_id: filters.regionId,
+        topic_id: filters.topicId,
+        service_id: filters.serviceId,
+        status: filters.status,
+        district: filters.district,
+        channel: filters.channel,
+      },
+      limit: 10,
+    }),
+  })
 }

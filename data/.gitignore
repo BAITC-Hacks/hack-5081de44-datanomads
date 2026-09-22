@@ -4,3 +4,4 @@ processed/*
 quarantine/*
 !processed/.gitkeep
 !quarantine/.gitkeep
+!quarantine/records.py

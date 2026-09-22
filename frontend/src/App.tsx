@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { loadDashboard, submitDecision } from './api/client'
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { acknowledgeAlert, closeAlert, loadAnalyticsDrilldown, loadDashboard, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback } from './api/client'
+import type { BackendTicket, DashboardFilters, DrilldownDimension } from './api/client'
 import type { Alert, ApiSource, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
 
 type Route =
@@ -15,6 +16,8 @@ type Route =
   | '/situation/models'
 
 type IconName = 'inbox' | 'pulse' | 'grid' | 'map' | 'tag' | 'trend' | 'bell' | 'forecast' | 'file' | 'cycle' | 'model' | 'search' | 'settings' | 'help' | 'chevron' | 'arrow' | 'check' | 'edit' | 'external' | 'download' | 'more' | 'clock' | 'close'
+type DrilldownHandler = (dimension: DrilldownDimension, value: string | undefined, label: string) => void
+type DrilldownState = { label: string; items: BackendTicket[]; total: number } | null
 
 const icons: Record<IconName, string> = {
   inbox: 'M4 5h16v14H4z M4 8h16 M8 12h3',
@@ -99,6 +102,9 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [toast, setToast] = useState<string | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [filters, setFilters] = useState<DashboardFilters>({ range: '7d' })
+  const [drilldown, setDrilldown] = useState<DrilldownState>(null)
+  const [drilldownLoading, setDrilldownLoading] = useState(false)
 
   useEffect(() => {
     const onHashChange = () => setRoute(routeFromHash())
@@ -109,15 +115,34 @@ function App() {
   useEffect(() => {
     let active = true
     setLoading(true)
-    loadDashboard().then((result) => {
+    loadDashboard(filters).then((result) => {
       if (!active) return
       setData(result.data)
       setSource(result.source)
       setApiError(result.error)
       setLoading(false)
+    }).catch((error: unknown) => {
+      if (!active) return
+      setData(null)
+      setSource('api')
+      setApiError(error instanceof Error ? error.message : 'API недоступен')
+      setLoading(false)
     })
     return () => { active = false }
-  }, [])
+  }, [filters])
+
+  const openDrilldown = useCallback(async (dimension: DrilldownDimension, value: string | undefined, label: string) => {
+    setDrilldownLoading(true)
+    try {
+      const result = await loadAnalyticsDrilldown(dimension, value, filters)
+      setDrilldown({ label, items: result.items, total: result.total })
+    } catch (error) {
+      setDrilldown({ label, items: [], total: 0 })
+      setApiError(error instanceof Error ? error.message : 'Не удалось открыть исходные обращения')
+    } finally {
+      setDrilldownLoading(false)
+    }
+  }, [filters])
 
   useEffect(() => {
     if (!toast) return
@@ -134,9 +159,10 @@ function App() {
       <main className="main-shell">
         <Topbar onOpenNav={() => setMobileNavOpen(true)} />
         {source === 'demo' && <div className="demo-banner"><span className="status-dot" /> Демо-данные · API подключится автоматически, когда backend будет доступен <span className="demo-banner-detail">{apiError ? `(${apiError})` : ''}</span></div>}
+        {source === 'api' && apiError && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
         <div className="page-wrap">
-          <PageHeader {...title} route={route} onNavigate={navigate} />
-          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onToast={showToast} /> : <ErrorState onRetry={() => window.location.reload()} />}
+          <PageHeader {...title} route={route} onNavigate={navigate} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />
+          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onToast={showToast} filters={filters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
         </div>
       </main>
       {toast && <div role="status" aria-live="polite" className="toast"><span className="toast-check"><Icon name="check" size={15} /></span>{toast}<button aria-label="Закрыть уведомление" className="icon-button toast-close" onClick={() => setToast(null)}><Icon name="close" size={15} /></button></div>}
@@ -181,23 +207,32 @@ function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
   </header>
 }
 
-function PageHeader({ eyebrow, title, description, route, onNavigate }: { eyebrow: string; title: string; description: string; route: Route; onNavigate: (route: Route) => void }) {
-  return <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{route === '/operator' ? <button className="button button-quiet"><Icon name="download" size={16} />Экспорт очереди</button> : <div className="period-control"><button className="period-button active">7 дней</button><button className="period-button">30 дней</button><button className="period-button">90 дней</button><button className="period-button icon-button" aria-label="Другой период"><Icon name="clock" size={15} /></button></div>}</div>
+function PageHeader({ eyebrow, title, description, route, onNavigate, filters, onFiltersChange, filterOptions }: { eyebrow: string; title: string; description: string; route: Route; onNavigate: (route: Route) => void; filters: DashboardFilters; onFiltersChange: (filters: DashboardFilters) => void; filterOptions?: DashboardData['filterOptions'] }) {
+  const situation = route !== '/operator'
+  return <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{route === '/operator' ? <button className="button button-quiet"><Icon name="download" size={16} />Экспорт очереди</button> : <div className="period-control"><div className="period-buttons">{[['7d', '7 дней'], ['30d', '30 дней'], ['90d', '90 дней']].map(([value, label]) => <button key={value} className={`period-button ${filters.range === value ? 'active' : ''}`} onClick={() => onFiltersChange({ ...filters, range: value })}>{label}</button>)}<button className="period-button icon-button" aria-label="Текущий период" title="Период задаётся в днях"><Icon name="clock" size={15} /></button></div>{situation && filterOptions && <div className="analytics-filter-selects"><label><span>Регион</span><select value={filters.regionId ?? ''} onChange={(event) => onFiltersChange({ ...filters, regionId: event.target.value || undefined })}><option value="">Все регионы</option>{filterOptions.regions.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label><label><span>Тема</span><select value={filters.topicId ?? ''} onChange={(event) => onFiltersChange({ ...filters, topicId: event.target.value || undefined })}><option value="">Все темы</option>{filterOptions.topics.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>{filterOptions.services.length > 0 && <label><span>Служба</span><select value={filters.serviceId ?? ''} onChange={(event) => onFiltersChange({ ...filters, serviceId: event.target.value || undefined })}><option value="">Все службы</option>{filterOptions.services.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.statuses.length > 0 && <label><span>Статус</span><select value={filters.status ?? ''} onChange={(event) => onFiltersChange({ ...filters, status: event.target.value || undefined })}><option value="">Все статусы</option>{filterOptions.statuses.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.districts.length > 0 && <label><span>Район</span><select value={filters.district ?? ''} onChange={(event) => onFiltersChange({ ...filters, district: event.target.value || undefined })}><option value="">Все районы</option>{filterOptions.districts.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.channels.length > 0 && <label><span>Канал</span><select value={filters.channel ?? ''} onChange={(event) => onFiltersChange({ ...filters, channel: event.target.value || undefined })}><option value="">Все каналы</option>{filterOptions.channels.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}</div>}</div>}</div>
 }
 
-function RouteContent({ route, data, onDataChange, onToast }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onToast: (message: string) => void }) {
+function RouteContent({ route, data, onDataChange, onToast, filters, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onToast: (message: string) => void; filters: DashboardFilters; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
+  let content: ReactElement
   switch (route) {
-    case '/operator': return <OperatorPage tickets={data.tickets} onDataChange={(tickets) => onDataChange({ ...data, tickets })} onToast={onToast} />
-    case '/situation/overview': return <OverviewPage data={data} onNavigate={navigate} />
-    case '/situation/regions': return <CleanRegionsPage regions={data.regions} />
-    case '/situation/topics': return <CleanTopicsPage topics={data.topics} />
-    case '/situation/time-series': return <CleanTimeSeriesPage />
-    case '/situation/alerts': return <CleanAlertsPage alerts={data.alerts} onToast={onToast} />
-    case '/situation/forecast': return <CleanForecastPage forecast={data.forecast} />
-    case '/situation/reports': return <CleanReportsPage onToast={onToast} />
-    case '/situation/learning': return <CleanLearningPage learning={data.learning} />
-    case '/situation/models': return <CleanModelsPage models={data.models} />
+    case '/operator': content = <OperatorPage tickets={data.tickets} overview={data.overview} taxonomy={data.filterOptions} onDataChange={(tickets) => onDataChange({ ...data, tickets })} onToast={onToast} />; break
+    case '/situation/overview': content = <OverviewPage data={data} filters={filters} onNavigate={navigate} onDrilldown={onDrilldown} />; break
+    case '/situation/regions': content = <CleanRegionsPage regions={data.regions} onDrilldown={onDrilldown} />; break
+    case '/situation/topics': content = <CleanTopicsPage topics={data.topics} onDrilldown={onDrilldown} />; break
+    case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
+    case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onToast={onToast} onDrilldown={onDrilldown} />; break
+    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} status={data.forecastStatus} />; break
+    case '/situation/reports': content = <CleanReportsPage reportSource={data.reportSource} filters={filters} />; break
+    case '/situation/learning': content = <CleanLearningPage learning={data.learning} />; break
+    case '/situation/models': content = <CleanModelsPage models={data.models} />; break
   }
+  return <>{content}{route !== '/operator' && <AnalyticsDrilldownPanel state={drilldown} loading={drilldownLoading} />}</>
+}
+
+function AnalyticsDrilldownPanel({ state, loading }: { state: DrilldownState; loading: boolean }) {
+  if (loading) return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2></div><p className="panel-note">Загружаем tickets из PostgreSQL…</p></section>
+  if (!state) return null
+  return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2><span className="drilldown-label">{state.label} · {state.total}</span></div>{state.items.length ? <div className="drilldown-list">{state.items.map((ticket) => <article className="drilldown-ticket" key={ticket.id}><div><strong>{ticket.id}</strong><span>{ticket.region_name} · {ticket.topic_label}</span></div><p>{ticket.text}</p><small>{ticket.created_at} · {ticket.status} · {ticket.priority}</small></article>)}</div> : <p className="panel-note">За выбранный срез tickets не найдено.</p>}</section>
 }
 
 function LoadingState() {
@@ -208,7 +243,7 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
   return <div className="state-card"><div className="state-icon error-icon">!</div><h2>Не удалось загрузить рабочие данные</h2><p>Проверьте подключение к API и повторите попытку.</p><button className="button button-primary" onClick={onRetry}>Повторить</button></div>
 }
 
-function OperatorPage({ tickets, onDataChange, onToast }: { tickets: Ticket[]; onDataChange: (tickets: Ticket[]) => void; onToast: (message: string) => void }) {
+function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { tickets: Ticket[]; overview: DashboardData['overview']; taxonomy: DashboardData['filterOptions']; onDataChange: (tickets: Ticket[]) => void; onToast: (message: string) => void }) {
   const [selectedId, setSelectedId] = useState(tickets[0]?.id ?? '')
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'new' | 'reviewed'>('all')
@@ -227,41 +262,72 @@ function OperatorPage({ tickets, onDataChange, onToast }: { tickets: Ticket[]; o
   const updateTicket = async (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => {
     const ticket = tickets.find((item) => item.id === ticketId)
     if (!ticket) return
-    const result = await submitDecision(ticketId, decision)
-    const updated = tickets.map((item) => item.id === ticketId ? { ...item, ...decision, priority: (decision.priority as Priority | undefined) ?? item.priority } : item)
-    onDataChange(updated)
-    onToast(result.source === 'demo' ? `Решение по ${ticketId} сохранено в демо-режиме` : `Решение по ${ticketId} сохранено`)
+    try {
+      const result = await submitDecision(ticketId, decision, taxonomy)
+      const updated = tickets.map((item) => item.id === ticketId ? (result.ticket ?? { ...item, ...decision, priority: (decision.priority as Priority | undefined) ?? item.priority }) : item)
+      onDataChange(updated)
+      onToast(result.source === 'demo' ? `Решение по ${ticketId} сохранено в демо-режиме` : `Решение по ${ticketId} перечитано из backend`)
+    } catch (error) {
+      onToast(`Не удалось сохранить решение: ${error instanceof Error ? error.message : 'ошибка API'}`)
+    }
   }
 
+  const updateRelation = async (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') => {
+    try {
+      await submitRelationFeedback(ticketId, relatedTicketId, relation, decision)
+      onToast(`Связь ${relatedTicketId} сохранена: ${relation.toLowerCase()}`)
+    } catch (error) {
+      onToast(`Не удалось сохранить связь: ${error instanceof Error ? error.message : 'ошибка API'}`)
+    }
+  }
+
+  const confirmationRate = overview.operatorDecisions ? Math.round((overview.confirmedDecisions / overview.operatorDecisions) * 100) : 0
+  const decisionLatency = overview.avgDecisionMinutes && overview.avgDecisionMinutes > 0 ? `${Math.round(overview.avgDecisionMinutes)} мин` : 'нет решений'
   return <div className="operator-page">
-    <div className="operator-summary"><div className="summary-item"><span className="summary-value">{filtered.length}</span><span className="summary-label">обращений в загруженной выборке</span><span className="summary-trend">из API</span></div><div className="summary-item"><span className="summary-value">—</span><span className="summary-label">подтверждение без правок</span><span className="summary-trend">нет данных</span></div><div className="summary-item"><span className="summary-value">—</span><span className="summary-label">время до решения</span><span className="summary-trend">нет данных</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">состояние API</span><span className="summary-sub">Метрики SLA не подключены</span></span></div></div>
+    <div className="operator-summary"><div className="summary-item"><span className="summary-value">{filtered.length}</span><span className="summary-label">обращений в загруженной выборке</span><span className="summary-trend">из API</span></div><div className="summary-item"><span className="summary-value">{confirmationRate}%</span><span className="summary-label">подтверждение без правок</span><span className="summary-trend">{overview.confirmedDecisions} из {overview.operatorDecisions}</span></div><div className="summary-item"><span className="summary-value">{decisionLatency}</span><span className="summary-label">среднее до решения</span><span className="summary-trend">из PostgreSQL</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">состояние API</span><span className="summary-sub">PostgreSQL · ML · Qdrant подключены</span></span></div></div>
     <div className="workbench-grid">
       <section className="ticket-queue" aria-label="Очередь обращений">
         <div className="section-toolbar"><div><h2>Очередь на разбор <span className="count-pill">{filtered.length}</span></h2><p>Сначала — обращения с высоким влиянием</p></div><button className="icon-button" aria-label="Настроить очередь"><Icon name="settings" size={17} /></button></div>
         <div className="filter-row"><div className="inline-search"><Icon name="search" size={16} /><input aria-label="Фильтр очереди" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти обращение" /></div><select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">Все статусы</option><option value="new">Новые</option><option value="reviewed">Разобранные</option></select><select aria-label="Фильтр по приоритету" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as typeof priorityFilter)}><option value="all">Все приоритеты</option><option value="Высокий">Высокий</option><option value="Средний">Средний</option><option value="Низкий">Низкий</option></select></div>
         <div className="ticket-table-wrap"><table className="ticket-table"><thead><tr><th scope="col">Обращение</th><th scope="col">Тема</th><th scope="col">Уверенность</th><th scope="col">Регион</th><th scope="col">Приоритет</th><th scope="col"><span className="sr-only">Действия</span></th></tr></thead><tbody>{filtered.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? 'selected-row' : ''} onClick={() => { setSelectedId(ticket.id); setMobileDetailOpen(true) }}><td><div className="ticket-id">{ticket.id}<span className={`channel-dot channel-${ticket.channel.replace(/[^a-zA-Z]/g, '').toLowerCase()}`} /></div><div className="ticket-preview">{ticket.originalText}</div><span className="ticket-time">{ticket.createdAt} · {ticket.language}</span></td><td><span className="topic-cell">{ticket.topic}</span><span className="status-text">{ticket.status === 'new' ? 'Нужно решение' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</span></td><td><Confidence value={ticket.confidence} compact /></td><td><span className="region-cell">{ticket.region}</span></td><td><PriorityBadge priority={ticket.priority} /></td><td><button className="row-arrow icon-button" aria-label={`Открыть ${ticket.id}`} onClick={(event) => { event.stopPropagation(); setSelectedId(ticket.id); setMobileDetailOpen(true) }}><Icon name="arrow" size={17} /></button></td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty-state"><div className="state-icon">⌕</div><h3>Ничего не найдено</h3><p>Измените запрос или сбросьте фильтры.</p><button className="button button-quiet" onClick={() => { setQuery(''); setStatusFilter('all'); setPriorityFilter('all') }}>Сбросить фильтры</button></div>}</div>
       </section>
-      {selected && <TicketDetail ticket={selected} open={mobileDetailOpen} onClose={() => setMobileDetailOpen(false)} onDecision={updateTicket} />}
+      {selected && <TicketDetail ticket={selected} taxonomy={taxonomy} open={mobileDetailOpen} onClose={() => setMobileDetailOpen(false)} onDecision={updateTicket} onRelationFeedback={updateRelation} onOpenRelated={(relatedId) => { setSelectedId(relatedId); setMobileDetailOpen(true) }} />}
     </div>
   </div>
 }
 
-function TicketDetail({ ticket, open, onClose, onDecision }: { ticket: Ticket; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void> }) {
+function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') => Promise<void>; onOpenRelated: (ticketId: string) => void }) {
   const [correctionOpen, setCorrectionOpen] = useState(false)
+  const [templateOpen, setTemplateOpen] = useState(false)
   const [topic, setTopic] = useState(ticket.topic)
   const [service, setService] = useState(ticket.service)
   const [priority, setPriority] = useState<Priority>(ticket.priority)
-  useEffect(() => { setTopic(ticket.topic); setService(ticket.service); setPriority(ticket.priority); setCorrectionOpen(false) }, [ticket.id, ticket.topic, ticket.service, ticket.priority])
+  const topicOptions = useMemo(() => {
+    const options: Array<[string, string]> = [
+      ...taxonomy.topics.map((item) => [item.id, item.label] as [string, string]),
+      [ticket.topic, ticket.topic],
+      ...ticket.alternatives.map((item) => [item.topic, item.topic] as [string, string]),
+    ]
+    return Array.from(new Map(options).values())
+  }, [taxonomy.topics, ticket.topic, ticket.alternatives])
+  const serviceOptions = useMemo(() => {
+    const options: Array<[string, string]> = [
+      ...taxonomy.services.map((item) => [item.id, item.label] as [string, string]),
+      [ticket.service, ticket.service],
+    ]
+    return Array.from(new Map(options).values())
+  }, [taxonomy.services, ticket.service])
+  useEffect(() => { setTopic(ticket.topic); setService(ticket.service); setPriority(ticket.priority); setCorrectionOpen(false); setTemplateOpen(false) }, [ticket.id, ticket.topic, ticket.service, ticket.priority])
 
   return <aside className={`ticket-detail ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
     <div className="detail-header"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</div><h2>{ticket.id}</h2></div><button className="icon-button detail-close" aria-label="Закрыть детали" onClick={onClose}><Icon name="close" size={18} /></button></div>
     <div className="detail-scroll">
       <div className="original-text-block"><div className="field-label">Оригинальный текст <span className="language-chip">{ticket.language}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{ticket.channel} · {ticket.createdAt} · {ticket.region}</div></div>
-      <div className="detail-section"><div className="field-label">Модель предложила</div><div className="prediction-row"><div><div className="prediction-topic">{ticket.topic}</div><div className="confidence-copy">{confidenceLabel(ticket.confidence)} уверенность · модель cls-2026-09-18.4</div></div><Confidence value={ticket.confidence} /></div><div className="alternatives"><span className="field-label">Альтернативы</span>{ticket.alternatives.map((alternative) => <div className="alternative-row" key={alternative.topic}><span>{alternative.topic}</span><span>{formatPercent(alternative.confidence)}</span></div>)}</div></div>
-      <div className="detail-section"><div className="field-label">Маршрутизация</div><div className="routing-grid"><div className="routing-field"><span>Рекомендуемая служба</span><strong>{ticket.service}</strong></div><div className="routing-field"><span>Приоритет</span><PriorityBadge priority={ticket.priority} /></div></div></div>
-      <div className="detail-section"><div className="field-label">Рекомендуемый ответ</div><div className="response-template"><p>{ticket.responseTemplate}</p><button className="text-button"><Icon name="external" size={14} />Открыть шаблон</button></div></div>
-      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">Похожие обращения <span className="count-pill">{ticket.similar.length}</span></div><button className="text-button">Все похожие <Icon name="arrow" size={14} /></button></div><div className="similar-list">{ticket.similar.map((item) => <div className="similar-item" key={item.id}><div className="similar-main"><strong>{item.id}</strong><span>{item.title}</span></div><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span><span>{formatPercent(item.similarity)}</span></div></div>)}</div></div>
-      {correctionOpen && <div className="correction-panel"><div className="correction-heading"><strong>Исправить решение</strong><button className="icon-button" aria-label="Закрыть форму исправления" onClick={() => setCorrectionOpen(false)}><Icon name="close" size={15} /></button></div><label>Тема<select value={topic} onChange={(event) => setTopic(event.target.value)}><option>{ticket.topic}</option>{ticket.alternatives.map((alternative) => <option key={alternative.topic}>{alternative.topic}</option>)}<option>Другая тема</option></select></label><label>Служба<input value={service} onChange={(event) => setService(event.target.value)} /></label><label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}><option>Высокий</option><option>Средний</option><option>Низкий</option></select></label><button className="button button-primary full-width" onClick={() => onDecision(ticket.id, { status: 'corrected', topic, service, priority })}><Icon name="check" size={16} />Сохранить исправление</button></div>}
+      <div className="detail-section"><div className="field-label">Модель предложила</div><div className="prediction-row"><div><div className="prediction-topic">{ticket.topic}</div><div className="confidence-copy">{confidenceLabel(ticket.confidence)} уверенность · модель {ticket.modelVersion ?? 'deterministic-classifier'}</div></div><Confidence value={ticket.confidence} /></div><div className="alternatives"><span className="field-label">Альтернативы</span>{ticket.alternatives.map((alternative) => <div className="alternative-row" key={alternative.topic}><span>{alternative.topic}</span><span>{formatPercent(alternative.confidence)}</span></div>)}</div></div>
+      <div className="detail-section"><div className="field-label">Маршрутизация</div><div className="routing-grid"><div className="routing-field"><span>Рекомендуемая служба</span><strong>{ticket.service}</strong></div><div className="routing-field"><span>Приоритет</span><PriorityBadge priority={ticket.priority} /></div></div>{ticket.routingReason && <p className="panel-note">Причина: {ticket.routingReason}</p>}</div>
+      <div className="detail-section"><div className="field-label">Рекомендуемый ответ</div><div className={`response-template ${templateOpen ? 'response-template-open' : ''}`}><p>{ticket.responseTemplate}</p><button className="text-button" onClick={() => setTemplateOpen((value) => !value)}><Icon name="external" size={14} />{templateOpen ? 'Свернуть шаблон' : 'Открыть шаблон'}</button></div></div>
+      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">Похожие обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span><span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>)}</div></div>
+      {correctionOpen && <div className="correction-panel"><div className="correction-heading"><strong>Исправить решение</strong><button className="icon-button" aria-label="Закрыть форму исправления" onClick={() => setCorrectionOpen(false)}><Icon name="close" size={15} /></button></div><label>Тема<select value={topic} onChange={(event) => setTopic(event.target.value)}>{topicOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая тема">Другая тема</option></select></label><label>Служба<select value={service} onChange={(event) => setService(event.target.value)}>{serviceOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая служба">Другая служба</option></select></label><label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}><option>Высокий</option><option>Средний</option><option>Низкий</option></select></label><button className="button button-primary full-width" onClick={() => onDecision(ticket.id, { status: 'corrected', topic, service, priority })}><Icon name="check" size={16} />Сохранить исправление</button></div>}
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>
@@ -275,32 +341,46 @@ function PriorityBadge({ priority }: { priority: Priority }) {
   return <span className={`priority-badge priority-${priority === 'Высокий' ? 'high' : priority === 'Средний' ? 'medium' : 'low'}`}><span />{priority}</span>
 }
 
-function CleanRegionsPage({ regions }: { regions: RegionMetric[] }) {
+function CleanRegionsPage({ regions, onDrilldown }: { regions: RegionMetric[]; onDrilldown: DrilldownHandler }) {
   if (!regions.length) return <div className="analytics-page"><NoData message="Нет данных по регионам." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Нагрузка по регионам" /><div className="region-table region-table-full"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{regions.map((region) => <div className="region-table-row region-table-row-full" key={region.name}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{region.change == null ? '—' : String(region.change) + '%'}</span><span>{region.risk ?? 'нет данных'}</span></div>)}</div></section></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Нагрузка по регионам" /><div className="region-table region-table-full"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{regions.map((region) => <button className="region-table-row region-table-row-full drilldown-row" key={region.name} onClick={() => onDrilldown('region', region.id, `Регион: ${region.name}`)}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{region.change == null ? '—' : String(region.change) + '%'}</span><span>{region.risk ?? 'нет данных'}</span></button>)}</div></section></div>
 }
 
-function CleanTopicsPage({ topics }: { topics: TopicMetric[] }) {
+function CleanTopicsPage({ topics, onDrilldown }: { topics: TopicMetric[]; onDrilldown: DrilldownHandler }) {
   if (!topics.length) return <div className="analytics-page"><NoData message="Нет данных по темам." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Распределение по темам" /><div className="topic-bars">{topics.map((topic) => <div className="topic-bar-row" key={topic.name}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value) + '%', background: topic.color }} /></div></div>)}</div></section></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Распределение по темам" /><div className="topic-bars">{topics.map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value) + '%', background: topic.color }} /></div></button>)}</div></section></div>
 }
 
-function CleanTimeSeriesPage() {
-  return <div className="analytics-page"><NoData message="Временной ряд не предоставлен API." /></div>
+function CleanTimeSeriesPage({ timeSeries, onDrilldown }: { timeSeries: DashboardData['timeSeries']; onDrilldown: DrilldownHandler }) {
+  if (!timeSeries.length) return <div className="analytics-page"><NoData message="Временной ряд пуст: API вернул 0 наблюдений за выбранный период." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Временная динамика" /><div className="region-table region-table-full"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля закрытия</span></div>{timeSeries.map((point) => <button className="region-table-row region-table-row-full drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div></section></div>
 }
 
-function CleanAlertsPage({ alerts, onToast: _onToast }: { alerts: Alert[]; onToast: (message: string) => void }) {
-  if (!alerts.length) return <div className="analytics-page"><NoData message="Нет подключённых оповещений." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Оповещения" /><div className="alerts-table">{alerts.map((alert) => <div className="alert-row" key={alert.id}><span className={"alert-dot alert-" + alert.severity} /><span className="alert-row-main"><strong>{alert.title}</strong><span>{alert.description}</span><small>{alert.detectedAt} · {alert.region}</small></span><span className="alert-count">{alert.affectedTickets}</span></div>)}</div></section></div>
+function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; onToast: (message: string) => void; onDrilldown: DrilldownHandler }) {
+  const [items, setItems] = useState(alerts)
+  useEffect(() => setItems(alerts), [alerts])
+  if (!items.length) return <div className="analytics-page"><NoData message="Нет подключённых оповещений." /></div>
+  const update = async (alert: Alert, action: 'ack' | 'close') => {
+    try {
+      const updated = action === 'ack' ? await acknowledgeAlert(alert.id) : await closeAlert(alert.id)
+      const status = updated.status.toLowerCase() === 'acknowledged' ? 'В работе' : updated.status.toLowerCase() === 'closed' ? 'Закрыт' : alert.status
+      setItems((current) => current.map((item) => item.id === alert.id ? { ...item, status } : item))
+      onToast(`Оповещение ${alert.id}: состояние подтверждено backend`)
+    } catch (error) {
+      onToast(`Не удалось обновить оповещение: ${error instanceof Error ? error.message : 'ошибка API'}`)
+    }
+  }
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Оповещения" /><div className="alerts-table">{items.map((alert) => <div className="alert-row" key={alert.id}><button className="alert-drilldown" onClick={() => onDrilldown('alert', alert.id, `Оповещение: ${alert.title}`)}><span className={"alert-dot alert-" + alert.severity} /><span className="alert-row-main"><strong>{alert.title}</strong><span>{alert.description}</span><small>{alert.detectedAt} · {alert.region}</small></span><span className="alert-count">{alert.affectedTickets}</span></button><span className="alert-actions">{alert.status === 'Новый' && <button className="text-button" onClick={() => update(alert, 'ack')}>Принять</button>}{alert.status !== 'Закрыт' && <button className="text-button" onClick={() => update(alert, 'close')}>Закрыть</button>}</span></div>)}</div></section></div>
 }
 
-function CleanForecastPage({ forecast }: { forecast: ForecastPoint[] }) {
-  if (!forecast.length) return <div className="analytics-page"><NoData message="Прогноз не предоставлен API." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
+function CleanForecastPage({ forecast, status }: { forecast: ForecastPoint[]; status?: string }) {
+  if (!forecast.length) return <div className="analytics-page"><NoData message="Прогноз пуст: недостаточно истории в PostgreSQL." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Источник: PostgreSQL → ML baseline · состояние {status ?? 'unknown'}</p><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
 }
 
-function CleanReportsPage({ onToast: _onToast }: { onToast: (message: string) => void }) {
-  return <div className="analytics-page"><NoData message="Отчёты появятся после подключения генератора отчётов." /></div>
+function CleanReportsPage({ reportSource, filters }: { reportSource: string; filters: DashboardFilters }) {
+  const filterSummary = [filters.range, filters.regionId ?? 'все регионы', filters.topicId ?? 'все темы', filters.serviceId ?? 'все службы', filters.status ?? 'все статусы', filters.district ?? 'все районы', filters.channel ?? 'все каналы'].join(', ')
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Отчёты" /><p className="panel-note">Один ReportSlice из {reportSource}; применены фильтры {filterSummary}.</p><div className="report-actions"><a className="button button-primary" href={reportUrl('pdf', filters)}>Скачать PDF</a><a className="button button-secondary" href={reportUrl('xlsx', filters)}>Скачать XLSX</a></div></section></div>
 }
 
 function CleanLearningPage({ learning }: { learning: LearningCycle }) {
@@ -314,22 +394,37 @@ function CleanModelsPage({ models }: { models: ModelStatus[] }) {
 }
 
 
-function OverviewPage({ data, onNavigate }: { data: DashboardData; onNavigate: (route: Route) => void }) {
-  const total = data.tickets.length
-  const highPriority = data.tickets.filter((ticket) => ticket.priority === 'Высокий').length
+function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: DashboardData; filters: DashboardFilters; onNavigate: (route: Route) => void; onDrilldown: DrilldownHandler }) {
+  const [query, setQuery] = useState('')
+  const [queryResult, setQueryResult] = useState<string | null>(null)
+  const [queryLoading, setQueryLoading] = useState(false)
+  const total = data.overview.totalTickets
+  const highPriority = data.overview.highPriorityTickets
+  const submitQuery = async () => {
+    if (!query.trim()) return
+    setQueryLoading(true)
+    try {
+      const result = await runQueryIntent(query, filters)
+      setQueryResult(`${result.intent}: ${typeof result.number === 'number' || typeof result.number === 'string' ? result.number : 'см. строки результата'} · ${result.source}`)
+    } catch (error) {
+      setQueryResult(`Ошибка запроса: ${error instanceof Error ? error.message : 'API недоступен'}`)
+    } finally {
+      setQueryLoading(false)
+    }
+  }
   return <div className="analytics-page">
     <div className="metrics-grid">
       <MetricCard label="Обращений в выборке" value={String(total)} change="из API" detail="загруженная выборка" tone="mint" icon="inbox" />
       <MetricCard label="Высокий приоритет" value={String(highPriority)} change="из API" detail="по текущей выборке" tone="rose" icon="pulse" />
-      <MetricCard label="SLA первого ответа" value="—" change="нет данных" detail="метрика не подключена" tone="amber" icon="clock" />
-      <MetricCard label="Аномальные сигналы" value="—" change="нет данных" detail="метрика не подключена" tone="blue" icon="bell" />
+      <MetricCard label="Решения оператора" value={String(data.overview.operatorDecisions)} change={`${data.overview.confirmedDecisions} подтверждено · ${data.overview.correctedDecisions} исправлено`} detail="из PostgreSQL" tone="amber" icon="clock" />
+      <MetricCard label="Аномальные сигналы" value={String(data.alerts.length)} change="из alerts" detail="текущий срез" tone="blue" icon="bell" />
     </div>
     <div className="analytics-grid overview-grid">
-      <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} /><NoData message="Временной ряд появится после подключения источника аналитики." /></section>
-      <section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} />{data.topics.length ? <div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <div className="topic-bar-row" key={topic.name}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value * 2.7) + '%', background: topic.color }} /></div></div>)}</div> : <NoData message="Нет данных по темам." />}</section>
+      <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} />{data.timeSeries.length ? <div className="region-table"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля</span></div>{data.timeSeries.slice(-7).map((point) => <button className="region-table-row drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div> : <NoData message="Временной ряд пуст: PostgreSQL не вернул наблюдений." />}</section>
+      <section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} />{data.topics.length ? <div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value * 2.7) + '%', background: topic.color }} /></div></button>)}</div> : <NoData message="Нет данных по темам." />}</section>
       <section className="panel"><PanelHeading title="Сигналы" action="Открыть все" onClick={() => onNavigate('/situation/alerts')} />{data.alerts.length ? <div className="alert-list">{data.alerts.map((alert) => <AlertListItem alert={alert} key={alert.id} />)}</div> : <NoData message="Нет подключённых сигналов." />}</section>
-      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="К карте регионов" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
-      <section className="panel query-panel"><div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div><h3>Найдите ответ в потоке</h3><p>Запросы доступны после подключения аналитического источника.</p><div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Источник аналитики не подключён" disabled /><button aria-label="Выполнить поиск" disabled><Icon name="arrow" size={16} /></button></div><span className="query-note">Нет неподтверждённых агрегатов</span></section>
+      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="К карте регионов" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} onDrilldown={onDrilldown} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
+      <section className="panel query-panel"><div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div><h3>Найдите ответ в потоке</h3><p>Ограниченные QueryIntent: количество, тренд, регионы, темы, всплески, прогноз.</p><div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Сколько обращений по регионам?" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitQuery() }} /><button aria-label="Выполнить поиск" onClick={() => void submitQuery()} disabled={queryLoading}><Icon name="arrow" size={16} /></button></div>{queryResult && <span className="query-note">{queryResult}</span>}</section>
     </div>
   </div>
 }
@@ -355,10 +450,11 @@ function AlertListItem({ alert }: { alert: Alert }) {
   return <div className="alert-list-item"><span className={`alert-dot alert-${alert.severity}`} /><div><strong>{alert.title}</strong><span>{alert.region} · {alert.affectedTickets} обращений</span></div><Icon name="arrow" size={14} /></div>
 }
 
-function RegionRow({ region }: { region: RegionMetric }) {
+function RegionRow({ region, onDrilldown }: { region: RegionMetric; onDrilldown?: DrilldownHandler }) {
   const change = region.change == null ? '—' : String(region.change) + '%'
   const risk = region.risk ?? 'нет данных'
-  return <div className="region-table-row"><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{change}</span><span>{risk}</span></div>
+  if (!onDrilldown) return <div className="region-table-row"><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{change}</span><span>{risk}</span></div>
+  return <button className="region-table-row drilldown-row" onClick={() => onDrilldown('region', region.id, `Регион: ${region.name}`)}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{change}</span><span>{risk}</span></button>
 }
 
 

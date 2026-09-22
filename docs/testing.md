@@ -75,6 +75,25 @@ demo ticket → preview → prediction → operator confirm/correct
 → human promote/reject → analytics → alert → forecast → export
 ```
 
+Полный stateful acceptance-контур запускается через public Nginx gateway:
+
+```bash
+PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py
+```
+
+Для acceptance-gate с проверкой перезапуска Core и восстановления решения:
+
+```bash
+PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py --restart-core
+```
+
+Он импортирует уникальный synthetic dataset и повторяет его для проверки
+idempotency, затем проверяет PostgreSQL/Qdrant preview, refetch решения после
+перезаписи, relation feedback, analytics drill-down, QueryIntent, forecast
+30/60/90, spike detector → ACK/CLOSE → SSE, PDF/XLSX, RBAC, Qdrant reindex и
+learning-cycle. В normal mode ожидается `TRAINER_NOT_CONFIGURED`; test-only
+fake trainer включается отдельно и не считается реальной ML-метрикой.
+
 ## Data/PII safety tests
 
 - bad CSV/invalid date/missing field отправляются в quarantine с причиной;
