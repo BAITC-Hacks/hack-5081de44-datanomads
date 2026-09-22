@@ -88,7 +88,7 @@ interface BackendSimilar {
 
 interface BackendAssistPreview {
   similar_tickets: BackendSimilar[]
-  response_template?: { body: string }
+  response_template?: { body: string; approved?: boolean; source?: string }
 }
 
 interface BackendTicketDetail {
@@ -105,11 +105,22 @@ interface BackendAnalytics {
   time_series: Array<{ date: string; tickets: number; resolved: number }>
 }
 
-interface BackendForecast { source?: string; status?: string; insufficient_history?: boolean; history?: Array<{ date: string; tickets: number; resolved: number }>; points: Array<{ date: string; tickets: number; resolved: number }>; model: string; expected_peaks?: string[]; backtest?: Record<string, unknown> }
+interface BackendForecast { source?: string; status?: string; insufficient_history?: boolean; history?: Array<{ date: string; tickets: number; resolved: number }>; points: Array<{ date: string; tickets: number; resolved: number }>; model_version: string; model?: string; expected_peaks?: string[]; backtest?: Record<string, unknown> }
 interface BackendAlert { id: string; severity: string; status: string; title: string; description: string; region_id: string; topic_id: string; ticket_count: number; detected_at: string }
 interface BackendAlerts { source?: string; items: BackendAlert[] }
-interface BackendLearning { source?: string; active_cycle?: { id: string; state: string; dataset_version: string; candidate_model_version: string; feedback_count: number; updated_at: string; metrics: { macro_f1: number } } }
+interface BackendLearningCycle { id: string; state: string; dataset_version: string; candidate_model_version: string; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
+interface BackendLearning { source?: string; items?: BackendLearningCycle[]; active_cycle?: BackendLearningCycle; production_model?: { id: string; status: string }; controlled_loop?: Record<string, unknown> }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
+export interface CandidateEvaluation {
+  cycle_id: string
+  state: string
+  offline_metrics: Record<string, unknown>
+  shadow_metrics: Record<string, unknown>
+  critical_regressions: unknown[]
+  sample_size: number
+  promotion_policy_version: string
+  decision: string
+}
 export interface TaxonomyOption { id: string; label: string }
 interface BackendTaxonomy {
   regions: TaxonomyOption[]
@@ -128,6 +139,26 @@ function mapPriority(value: string): Priority {
 
 function mapLanguage(value: string): 'RU' | 'KZ' {
   return value.toLowerCase() === 'kk' || value.toLowerCase() === 'kz' ? 'KZ' : 'RU'
+}
+
+function mapLearningStage(value: string): LearningCycle['stage'] {
+  switch (value.toUpperCase()) {
+    case 'TRAINING':
+    case 'TRAIN':
+      return 'TRAIN'
+    case 'EVALUATE':
+      return 'EVALUATE'
+    case 'DECISION':
+      return 'DECISION'
+    case 'PROMOTED':
+      return 'PROMOTED'
+    case 'REJECTED':
+      return 'REJECTED'
+    case 'INSUFFICIENT_FEEDBACK':
+      return 'INSUFFICIENT_FEEDBACK'
+    default:
+      return 'COLLECT'
+  }
 }
 
 function mapRelation(value: string): SimilarTicket['relation'] {
@@ -180,7 +211,9 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     createdAt: item.created_at,
     status,
     similar,
-    responseTemplate: preview?.response_template?.body ?? 'Утверждённый шаблон ответа не найден в PostgreSQL.',
+    responseTemplate: preview?.response_template?.body ?? 'Шаблон ответа не найден в PostgreSQL.',
+    responseTemplateApproved: preview?.response_template?.approved,
+    responseTemplateSource: preview?.response_template?.source,
     channel: item.source === 'mobile' ? 'Мобильное приложение' : item.source === 'call-center' ? 'Call-центр' : item.source === 'whatsapp' ? 'WhatsApp' : 'eGov',
   }
 }
@@ -205,8 +238,8 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), change: topic.change_pct, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
   const alerts: Alert[] = alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity.toLowerCase() === 'critical' ? 'critical' : alert.severity.toLowerCase() === 'high' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status.toLowerCase() === 'acknowledged' ? 'В работе' : alert.status.toLowerCase() === 'closed' ? 'Закрыт' : 'Новый' }))
   const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date.slice(5), forecast: point.tickets }))
-  const cycle = learning.active_cycle
-  const learningData: LearningCycle = cycle ? { id: cycle.id, stage: cycle.state === 'REVIEW' ? 'REVIEW' : cycle.state === 'EVALUATE' ? 'EVALUATE' : cycle.state === 'TRAINING' || cycle.state === 'TRAIN' ? 'TRAIN' : 'COLLECT', dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, updatedAt: cycle.updated_at } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', updatedAt: 'нет данных' }
+  const cycle = learning.active_cycle ?? learning.items?.[0]
+  const learningData: LearningCycle = cycle ? { id: cycle.id, stage: mapLearningStage(cycle.state), dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, updatedAt: cycle.updated_at, decisionNote: cycle.decision_note } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', updatedAt: 'нет данных' }
   const modelData: ModelStatus[] = models.items.map((model) => {
     const status = model.status.toLowerCase()
     return {
@@ -241,6 +274,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     timeSeries: analytics.time_series,
     reportSource: 'postgres',
     forecastStatus: forecast.status,
+    forecastModelVersion: forecast.model_version,
     filterOptions: {
       regions: taxonomy.regions ?? analytics.by_region.map((region) => ({ id: region.id, label: region.label })),
       topics: taxonomy.topics ?? [],
@@ -326,6 +360,34 @@ export async function acknowledgeAlert(alertId: string): Promise<Pick<BackendAle
 
 export async function closeAlert(alertId: string): Promise<Pick<BackendAlert, 'id' | 'status'>> {
   return request<Pick<BackendAlert, 'id' | 'status'>>(`/alerts/${encodeURIComponent(alertId)}/close`, { method: 'POST' })
+}
+
+export async function closeLearningCycle(cycleId: string) {
+  return request<{ job_id?: string | null; state: string; cycle: BackendLearningCycle; production_model_unchanged: boolean }>('/learning/cycle/close', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cycle_id: cycleId }),
+  })
+}
+
+export async function loadCandidateEvaluation() {
+  return request<CandidateEvaluation>('/learning/candidate/evaluation')
+}
+
+export async function promoteCandidate(note?: string) {
+  return request<BackendLearningCycle>('/learning/candidate/promote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: note?.trim() || undefined }),
+  })
+}
+
+export async function rejectCandidate(note?: string) {
+  return request<BackendLearningCycle>('/learning/candidate/reject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note: note?.trim() || undefined }),
+  })
 }
 
 export function reportUrl(format: 'pdf' | 'xlsx', filters: DashboardFilters = { range: '30d' }) {

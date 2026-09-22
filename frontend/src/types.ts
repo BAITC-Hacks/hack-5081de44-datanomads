@@ -30,6 +30,8 @@ export interface Ticket {
   status: TicketStatus
   similar: SimilarTicket[]
   responseTemplate: string
+  responseTemplateApproved?: boolean
+  responseTemplateSource?: string
   channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp'
 }
 
@@ -80,11 +82,12 @@ export interface ModelStatus {
 
 export interface LearningCycle {
   id: string
-  stage: 'COLLECT' | 'TRAIN' | 'EVALUATE' | 'REVIEW'
+  stage: 'COLLECT' | 'TRAIN' | 'EVALUATE' | 'DECISION' | 'PROMOTED' | 'REJECTED' | 'INSUFFICIENT_FEEDBACK'
   dataset: string
   feedbackCount: number
   candidate: string
   updatedAt: string
+  decisionNote?: string
 }
 
 export interface DashboardData {
@@ -110,6 +113,7 @@ export interface DashboardData {
   timeSeries: Array<{ date: string; tickets: number; resolved: number }>
   reportSource: string
   forecastStatus?: string
+  forecastModelVersion?: string
   filterOptions: {
     regions: Array<{ id: string; label: string }>
     topics: Array<{ id: string; label: string }>

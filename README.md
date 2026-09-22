@@ -95,6 +95,11 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
 - Без полного dataset нельзя честно утверждать held-out качество classifier,
   embeddings, spike detector или forecast; такие метрики должны иметь
   dataset/model/evaluation versions.
+- Seeded routing/priority mappings are `MANUAL` demo defaults, not official
+  109 rules. Seeded response templates have `approved=false` and are exposed as
+  `MANUAL_DEMO` until authoritative rules and copy are supplied.
+- Forecast responses carry their own `forecast_model_version`; the embedding
+  version is never used as forecast metadata.
 - Optional LLM отключён по умолчанию; аналитика обязана работать через
   allow-listed `QueryIntent` и parameterized SQL.
 - Compose demo — single-host среда с локальными volumes и placeholder

@@ -502,7 +502,14 @@ components:
         similar_tickets: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
         duplicate_candidates: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
         repeat_candidates: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
-        response_template: { type: object, additionalProperties: true }
+        response_template:
+          type: object
+          required: [body, language, approved, source]
+          properties:
+            body: { type: string }
+            language: { type: string, enum: [ru, kz] }
+            approved: { type: boolean, description: True only for authoritative templates. }
+            source: { type: string, enum: [AUTHORITATIVE, MANUAL_DEMO] }
         source: { type: string }
     Prediction:
       type: object
@@ -631,8 +638,10 @@ components:
         baseline_value: { type: number }
     ForecastResponse:
       type: object
+      required: [model_version]
       properties:
         source: { type: string }
+        model_version: { type: string, description: Forecast provider version; never the embedding version. }
         model: { type: string }
         horizon_days: { type: integer }
         history: { type: array, items: { $ref: '#/components/schemas/TimeSeriesPoint' } }

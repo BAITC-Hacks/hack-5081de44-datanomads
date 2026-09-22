@@ -161,7 +161,13 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
 
     status, _, preview = json_request(base_url, "POST", "/api/v1/assist/preview", body={"ticket_id": ticket_ids[0]}, timeout=timeout)
     expect(status == 200 and preview.get("source") == "postgres-ticket+ml+qdrant", f"preview failed: {status} {preview}")
-    expect(preview.get("response_template", {}).get("body"), "approved response template is missing")
+    response_template = preview.get("response_template", {})
+    expect(response_template.get("body"), "demo/manual response template is missing")
+    expect(
+        response_template.get("approved") is False
+        and response_template.get("source") == "MANUAL_DEMO",
+        f"invented response template must remain manual/demo: {response_template}",
+    )
     status, _, decision = json_request(
         base_url,
         "POST",
@@ -216,6 +222,11 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         status, _, forecast = json_request(base_url, "GET", f"/api/v1/forecast?horizon={horizon}", role="MANAGER", timeout=timeout)
         expect(status == 200 and forecast.get("horizon_days") == horizon, f"forecast {horizon} failed: {forecast}")
         expect(forecast.get("history"), f"forecast {horizon} has no PostgreSQL history")
+        expect(
+            str(forecast.get("model_version", "")).startswith("forecast-")
+            and forecast.get("model_version") != "embedder-demo-2026-09-21-001",
+            f"forecast must expose its own model_version: {forecast}",
+        )
 
     status, _, detected = json_request(base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout)
     expect(status == 200 and detected.get("items"), f"spike detector found no alert: {detected}")

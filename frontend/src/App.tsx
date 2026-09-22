@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, loadAnalyticsDrilldown, loadDashboard, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension } from './api/client'
 import type { Alert, ApiSource, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
 
@@ -106,6 +106,22 @@ function App() {
   const [drilldown, setDrilldown] = useState<DrilldownState>(null)
   const [drilldownLoading, setDrilldownLoading] = useState(false)
 
+  const refreshDashboard = useCallback(async () => {
+    setLoading(true)
+    try {
+      const result = await loadDashboard(filters)
+      setData(result.data)
+      setSource(result.source)
+      setApiError(result.error)
+    } catch (error: unknown) {
+      setData(null)
+      setSource('api')
+      setApiError(error instanceof Error ? error.message : 'API недоступен')
+    } finally {
+      setLoading(false)
+    }
+  }, [filters])
+
   useEffect(() => {
     const onHashChange = () => setRoute(routeFromHash())
     window.addEventListener('hashchange', onHashChange)
@@ -162,7 +178,7 @@ function App() {
         {source === 'api' && apiError && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
         <div className="page-wrap">
           <PageHeader {...title} route={route} onNavigate={navigate} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />
-          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onToast={showToast} filters={filters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
+          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onRefresh={refreshDashboard} onToast={showToast} filters={filters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
         </div>
       </main>
       {toast && <div role="status" aria-live="polite" className="toast"><span className="toast-check"><Icon name="check" size={15} /></span>{toast}<button aria-label="Закрыть уведомление" className="icon-button toast-close" onClick={() => setToast(null)}><Icon name="close" size={15} /></button></div>}
@@ -212,7 +228,7 @@ function PageHeader({ eyebrow, title, description, route, onNavigate, filters, o
   return <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{route === '/operator' ? <button className="button button-quiet"><Icon name="download" size={16} />Экспорт очереди</button> : <div className="period-control"><div className="period-buttons">{[['7d', '7 дней'], ['30d', '30 дней'], ['90d', '90 дней']].map(([value, label]) => <button key={value} className={`period-button ${filters.range === value ? 'active' : ''}`} onClick={() => onFiltersChange({ ...filters, range: value })}>{label}</button>)}<button className="period-button icon-button" aria-label="Текущий период" title="Период задаётся в днях"><Icon name="clock" size={15} /></button></div>{situation && filterOptions && <div className="analytics-filter-selects"><label><span>Регион</span><select value={filters.regionId ?? ''} onChange={(event) => onFiltersChange({ ...filters, regionId: event.target.value || undefined })}><option value="">Все регионы</option>{filterOptions.regions.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label><label><span>Тема</span><select value={filters.topicId ?? ''} onChange={(event) => onFiltersChange({ ...filters, topicId: event.target.value || undefined })}><option value="">Все темы</option>{filterOptions.topics.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>{filterOptions.services.length > 0 && <label><span>Служба</span><select value={filters.serviceId ?? ''} onChange={(event) => onFiltersChange({ ...filters, serviceId: event.target.value || undefined })}><option value="">Все службы</option>{filterOptions.services.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.statuses.length > 0 && <label><span>Статус</span><select value={filters.status ?? ''} onChange={(event) => onFiltersChange({ ...filters, status: event.target.value || undefined })}><option value="">Все статусы</option>{filterOptions.statuses.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.districts.length > 0 && <label><span>Район</span><select value={filters.district ?? ''} onChange={(event) => onFiltersChange({ ...filters, district: event.target.value || undefined })}><option value="">Все районы</option>{filterOptions.districts.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.channels.length > 0 && <label><span>Канал</span><select value={filters.channel ?? ''} onChange={(event) => onFiltersChange({ ...filters, channel: event.target.value || undefined })}><option value="">Все каналы</option>{filterOptions.channels.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}</div>}</div>}</div>
 }
 
-function RouteContent({ route, data, onDataChange, onToast, filters, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onToast: (message: string) => void; filters: DashboardFilters; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
+function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onRefresh: () => Promise<void>; onToast: (message: string) => void; filters: DashboardFilters; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
   let content: ReactElement
   switch (route) {
     case '/operator': content = <OperatorPage tickets={data.tickets} overview={data.overview} taxonomy={data.filterOptions} onDataChange={(tickets) => onDataChange({ ...data, tickets })} onToast={onToast} />; break
@@ -221,9 +237,9 @@ function RouteContent({ route, data, onDataChange, onToast, filters, onDrilldown
     case '/situation/topics': content = <CleanTopicsPage topics={data.topics} onDrilldown={onDrilldown} />; break
     case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
     case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onToast={onToast} onDrilldown={onDrilldown} />; break
-    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} status={data.forecastStatus} />; break
+    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} status={data.forecastStatus} modelVersion={data.forecastModelVersion} />; break
     case '/situation/reports': content = <CleanReportsPage reportSource={data.reportSource} filters={filters} />; break
-    case '/situation/learning': content = <CleanLearningPage learning={data.learning} />; break
+    case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
     case '/situation/models': content = <CleanModelsPage models={data.models} />; break
   }
   return <>{content}{route !== '/operator' && <AnalyticsDrilldownPanel state={drilldown} loading={drilldownLoading} />}</>
@@ -325,7 +341,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
       <div className="original-text-block"><div className="field-label">Оригинальный текст <span className="language-chip">{ticket.language}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{ticket.channel} · {ticket.createdAt} · {ticket.region}</div></div>
       <div className="detail-section"><div className="field-label">Модель предложила</div><div className="prediction-row"><div><div className="prediction-topic">{ticket.topic}</div><div className="confidence-copy">{confidenceLabel(ticket.confidence)} уверенность · модель {ticket.modelVersion ?? 'deterministic-classifier'}</div></div><Confidence value={ticket.confidence} /></div><div className="alternatives"><span className="field-label">Альтернативы</span>{ticket.alternatives.map((alternative) => <div className="alternative-row" key={alternative.topic}><span>{alternative.topic}</span><span>{formatPercent(alternative.confidence)}</span></div>)}</div></div>
       <div className="detail-section"><div className="field-label">Маршрутизация</div><div className="routing-grid"><div className="routing-field"><span>Рекомендуемая служба</span><strong>{ticket.service}</strong></div><div className="routing-field"><span>Приоритет</span><PriorityBadge priority={ticket.priority} /></div></div>{ticket.routingReason && <p className="panel-note">Причина: {ticket.routingReason}</p>}</div>
-      <div className="detail-section"><div className="field-label">Рекомендуемый ответ</div><div className={`response-template ${templateOpen ? 'response-template-open' : ''}`}><p>{ticket.responseTemplate}</p><button className="text-button" onClick={() => setTemplateOpen((value) => !value)}><Icon name="external" size={14} />{templateOpen ? 'Свернуть шаблон' : 'Открыть шаблон'}</button></div></div>
+      <div className="detail-section"><div className="field-label">Рекомендуемый ответ <span className="language-chip">{ticket.responseTemplateApproved ? 'AUTHORITATIVE' : 'MANUAL DEMO'}</span></div><div className={`response-template ${templateOpen ? 'response-template-open' : ''}`}><p>{ticket.responseTemplate}</p><button className="text-button" onClick={() => setTemplateOpen((value) => !value)}><Icon name="external" size={14} />{templateOpen ? 'Свернуть шаблон' : 'Открыть шаблон'}</button></div></div>
       <div className="detail-section"><div className="section-inline-heading"><div className="field-label">Похожие обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span><span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>)}</div></div>
       {correctionOpen && <div className="correction-panel"><div className="correction-heading"><strong>Исправить решение</strong><button className="icon-button" aria-label="Закрыть форму исправления" onClick={() => setCorrectionOpen(false)}><Icon name="close" size={15} /></button></div><label>Тема<select value={topic} onChange={(event) => setTopic(event.target.value)}>{topicOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая тема">Другая тема</option></select></label><label>Служба<select value={service} onChange={(event) => setService(event.target.value)}>{serviceOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая служба">Другая служба</option></select></label><label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}><option>Высокий</option><option>Средний</option><option>Низкий</option></select></label><button className="button button-primary full-width" onClick={() => onDecision(ticket.id, { status: 'corrected', topic, service, priority })}><Icon name="check" size={16} />Сохранить исправление</button></div>}
     </div>
@@ -373,9 +389,9 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
   return <div className="analytics-page"><section className="panel"><PanelHeading title="Оповещения" /><div className="alerts-table">{items.map((alert) => <div className="alert-row" key={alert.id}><button className="alert-drilldown" onClick={() => onDrilldown('alert', alert.id, `Оповещение: ${alert.title}`)}><span className={"alert-dot alert-" + alert.severity} /><span className="alert-row-main"><strong>{alert.title}</strong><span>{alert.description}</span><small>{alert.detectedAt} · {alert.region}</small></span><span className="alert-count">{alert.affectedTickets}</span></button><span className="alert-actions">{alert.status === 'Новый' && <button className="text-button" onClick={() => update(alert, 'ack')}>Принять</button>}{alert.status !== 'Закрыт' && <button className="text-button" onClick={() => update(alert, 'close')}>Закрыть</button>}</span></div>)}</div></section></div>
 }
 
-function CleanForecastPage({ forecast, status }: { forecast: ForecastPoint[]; status?: string }) {
+function CleanForecastPage({ forecast, status, modelVersion }: { forecast: ForecastPoint[]; status?: string; modelVersion?: string }) {
   if (!forecast.length) return <div className="analytics-page"><NoData message="Прогноз пуст: недостаточно истории в PostgreSQL." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Источник: PostgreSQL → ML baseline · состояние {status ?? 'unknown'}</p><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Источник: PostgreSQL → ML baseline · состояние {status ?? 'unknown'} · версия {modelVersion ?? 'не указана'}</p><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
 }
 
 function CleanReportsPage({ reportSource, filters }: { reportSource: string; filters: DashboardFilters }) {
@@ -383,9 +399,83 @@ function CleanReportsPage({ reportSource, filters }: { reportSource: string; fil
   return <div className="analytics-page"><section className="panel"><PanelHeading title="Отчёты" /><p className="panel-note">Один ReportSlice из {reportSource}; применены фильтры {filterSummary}.</p><div className="report-actions"><a className="button button-primary" href={reportUrl('pdf', filters)}>Скачать PDF</a><a className="button button-secondary" href={reportUrl('xlsx', filters)}>Скачать XLSX</a></div></section></div>
 }
 
-function CleanLearningPage({ learning }: { learning: LearningCycle }) {
+function CleanLearningPage({ learning, onRefresh, onToast }: { learning: LearningCycle; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
+  const [evaluation, setEvaluation] = useState<Awaited<ReturnType<typeof loadCandidateEvaluation>> | null>(null)
+  const [evaluationError, setEvaluationError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'close' | 'evaluation' | 'promote' | 'reject' | null>(null)
+  const [note, setNote] = useState('')
+
+  useEffect(() => {
+    let active = true
+    setEvaluation(null)
+    setEvaluationError(null)
+    if (!['EVALUATE', 'DECISION'].includes(learning.stage) || learning.id === 'нет данных') return () => { active = false }
+    void loadCandidateEvaluation().then((result) => {
+      if (active) setEvaluation(result)
+    }).catch((error: unknown) => {
+      if (active) setEvaluationError(error instanceof Error ? error.message : 'Оценка пока недоступна')
+    })
+    return () => { active = false }
+  }, [learning.id, learning.stage, learning.updatedAt])
+
   if (learning.id === 'нет данных') return <div className="analytics-page"><NoData message="Цикл обучения не предоставлен API." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title={'Цикл ' + learning.id} /><div className="dataset-stat"><span>Состояние</span><strong>{learning.stage}</strong></div><div className="dataset-stat"><span>Обратная связь</span><strong>{learning.feedbackCount}</strong></div><div className="dataset-stat"><span>Датасет</span><strong>{learning.dataset}</strong></div><div className="dataset-stat"><span>Кандидат</span><strong>{learning.candidate}</strong></div></section></div>
+
+  const runAction = async (action: 'close' | 'evaluation' | 'promote' | 'reject') => {
+    setBusy(action)
+    try {
+      if (action === 'close') {
+        await closeLearningCycle(learning.id)
+        onToast('Сбор обратной связи закрыт; background job поставлена в очередь')
+      } else if (action === 'evaluation') {
+        setEvaluation(await loadCandidateEvaluation())
+        onToast('Оценка candidate перечитана из backend')
+      } else if (action === 'promote' || action === 'reject') {
+        if (!window.confirm(action === 'promote' ? 'Продвинуть candidate в production?' : 'Отклонить candidate?')) return
+        const result = action === 'promote' ? await promoteCandidate(note) : await rejectCandidate(note)
+        onToast(result.state === 'PROMOTED' ? 'Candidate продвинут в production' : 'Candidate отклонён; production не изменён')
+        setNote('')
+      }
+      await onRefresh()
+    } catch (error) {
+      onToast(`Не удалось выполнить действие: ${error instanceof Error ? error.message : 'ошибка API'}`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const offlineStatus = evaluation?.offline_metrics?.status
+  const readyToReview = evaluation?.decision === 'READY_TO_REVIEW'
+  return <div className="analytics-page">
+    <section className="panel">
+      <PanelHeading title={'Цикл ' + learning.id} />
+      <div className="dataset-stat"><span>Состояние</span><strong>{learning.stage}</strong></div>
+      <div className="dataset-stat"><span>Обратная связь</span><strong>{learning.feedbackCount}</strong></div>
+      <div className="dataset-stat"><span>Датасет</span><strong>{learning.dataset}</strong></div>
+      <div className="dataset-stat"><span>Кандидат</span><strong>{learning.candidate}</strong></div>
+      {learning.decisionNote && <p className="panel-note learning-decision-note">Решение: {learning.decisionNote}</p>}
+      <div className="learning-actions" aria-label="Действия reviewer">
+        {learning.stage === 'COLLECT' && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть цикл'}</button>}
+        {['EVALUATE', 'DECISION'].includes(learning.stage) && <button className="button button-secondary" disabled={busy !== null} onClick={() => void runAction('evaluation')}>{busy === 'evaluation' ? 'Читаем…' : 'Показать evaluation'}</button>}
+        {['EVALUATE', 'DECISION'].includes(learning.stage) && <>
+          <input className="learning-note" aria-label="Комментарий reviewer" placeholder="Комментарий к решению (необязательно)" value={note} onChange={(event) => setNote(event.target.value)} disabled={busy !== null} />
+          <button className="button button-primary" disabled={busy !== null || !readyToReview} onClick={() => void runAction('promote')}>{busy === 'promote' ? 'Продвигаем…' : 'Promote'}</button>
+          <button className="button button-quiet" disabled={busy !== null} onClick={() => void runAction('reject')}>{busy === 'reject' ? 'Отклоняем…' : 'Reject'}</button>
+        </>}
+      </div>
+    </section>
+    {['EVALUATE', 'DECISION'].includes(learning.stage) && <section className="panel learning-evaluation">
+      <PanelHeading title="Evaluation candidate" />
+      {evaluationError && <p className="panel-note">Оценка пока недоступна: {evaluationError}. После завершения background job нажмите «Показать evaluation».</p>}
+      {!evaluation && !evaluationError && <p className="panel-note">Загружаем evaluation из backend…</p>}
+      {evaluation && <>
+        <div className="dataset-stat"><span>Решение policy</span><strong>{evaluation.decision}</strong></div>
+        <div className="dataset-stat"><span>Статус evidence</span><strong>{String(offlineStatus ?? 'нет данных')}</strong></div>
+        <div className="dataset-stat"><span>Sample size</span><strong>{evaluation.sample_size}</strong></div>
+        <div className="dataset-stat"><span>Promotion policy</span><strong>{evaluation.promotion_policy_version}</strong></div>
+        <pre className="learning-evaluation-json">{JSON.stringify({ offline_metrics: evaluation.offline_metrics, shadow_metrics: evaluation.shadow_metrics, critical_regressions: evaluation.critical_regressions }, null, 2)}</pre>
+      </>}
+    </section>}
+  </div>
 }
 
 function CleanModelsPage({ models }: { models: ModelStatus[] }) {

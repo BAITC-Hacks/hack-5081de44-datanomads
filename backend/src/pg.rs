@@ -19,10 +19,12 @@ use reqwest::{Client, StatusCode as HttpStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row};
+use std::env;
 
 const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
+const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-seasonal-naive-2026-09-21-001";
 
 pub fn default_qdrant_collection(embedder_version: &str, dimension: usize) -> String {
     if embedder_version == DEFAULT_EMBEDDER_VERSION && dimension == DEFAULT_EMBEDDING_DIMENSION {
@@ -58,6 +60,7 @@ pub struct PgRepository {
     pub qdrant_collection: String,
     pub embedding_dimension: usize,
     pub embedder_version: String,
+    pub forecast_model_version: String,
     client: Client,
 }
 
@@ -240,6 +243,8 @@ impl PgRepository {
             qdrant_collection: qdrant_collection.into(),
             embedding_dimension,
             embedder_version: embedder_version.into(),
+            forecast_model_version: env::var("FORECAST_MODEL_VERSION")
+                .unwrap_or_else(|_| DEFAULT_FORECAST_MODEL_VERSION.to_owned()),
             client: Client::builder()
                 .build()
                 .map_err(|error| format!("build HTTP client: {error}"))?,
@@ -282,6 +287,7 @@ impl PgRepository {
             "collection": self.qdrant_collection,
             "embedding_dimension": self.embedding_dimension,
             "embedder_version": self.embedder_version,
+            "forecast_model_version": self.forecast_model_version,
         }))
     }
 
@@ -565,14 +571,14 @@ impl PgRepository {
                 (
                     "service_other".to_owned(),
                     "Другая служба".to_owned(),
-                    "No official or mapped service rule".to_owned(),
+                    "No authoritative or mapped service rule".to_owned(),
                 )
             }
         } else {
             (
                 "service_other".to_owned(),
                 "Другая служба".to_owned(),
-                "No official or mapped service rule".to_owned(),
+                "No authoritative or mapped service rule".to_owned(),
             )
         };
 
@@ -617,15 +623,16 @@ impl PgRepository {
         service_name: &str,
     ) -> Result<ResponseTemplate, String> {
         let row = sqlx::query(
-            "SELECT rt.id, rt.body, rt.language, COALESCE(tp.name_ru, tp.name_kk, tp.id) AS topic_label FROM response_templates rt LEFT JOIN topics tp ON tp.id = rt.topic_id LEFT JOIN services s ON s.id = rt.service_id WHERE rt.approved AND upper(rt.language) = upper($1) AND rt.topic_id = $2 ORDER BY CASE WHEN lower(COALESCE(s.name_ru, '')) = lower($3) THEN 0 ELSE 1 END, rt.version DESC, rt.id DESC LIMIT 1",
+            "SELECT rt.id, rt.body, rt.language, rt.approved, COALESCE(tp.name_ru, tp.name_kk, tp.id) AS topic_label FROM response_templates rt LEFT JOIN topics tp ON tp.id = rt.topic_id LEFT JOIN services s ON s.id = rt.service_id WHERE upper(rt.language) = upper($1) AND rt.topic_id = $2 ORDER BY CASE WHEN rt.approved THEN 0 ELSE 1 END, CASE WHEN lower(COALESCE(s.name_ru, '')) = lower($3) THEN 0 ELSE 1 END, rt.version DESC, rt.id DESC LIMIT 1",
         )
         .bind(normalize_language(language))
         .bind(topic_id)
         .bind(service_name)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|error| format!("fetch approved response template: {error}"))?
-        .ok_or_else(|| format!("approved response template not found for {language}/{topic_id}"))?;
+        .map_err(|error| format!("fetch response template: {error}"))?
+        .ok_or_else(|| format!("response template not found for {language}/{topic_id}"))?;
+        let approved = row.try_get::<bool, _>("approved").unwrap_or(false);
         Ok(ResponseTemplate {
             id: row
                 .try_get::<i64, _>("id")
@@ -643,6 +650,12 @@ impl PgRepository {
                 .try_get::<String, _>("language")
                 .map_err(|error| format!("template language: {error}"))?
                 .to_ascii_lowercase(),
+            approved,
+            source: if approved {
+                "AUTHORITATIVE".to_owned()
+            } else {
+                "MANUAL_DEMO".to_owned()
+            },
         })
     }
 
@@ -1422,6 +1435,7 @@ impl PgRepository {
         if values.is_empty() {
             return Ok(ForecastResponse {
                 source: "postgres".to_owned(),
+                model_version: self.forecast_model_version.clone(),
                 model: "seasonal-naive-baseline".to_owned(),
                 status: "INSUFFICIENT_HISTORY".to_owned(),
                 insufficient_history: true,
@@ -1439,7 +1453,7 @@ impl PgRepository {
                 "values": values,
                 "horizon": horizon_days,
                 "season_length": 7,
-                "model_version": &self.embedder_version,
+                "model_version": &self.forecast_model_version,
             }))
             .send()
             .await
@@ -1500,6 +1514,7 @@ impl PgRepository {
             .collect::<Vec<_>>();
         Ok(ForecastResponse {
             source: "postgres+ml".to_owned(),
+            model_version: model.clone(),
             model,
             status,
             insufficient_history,
@@ -2948,6 +2963,8 @@ fn response_template_for(language: &str, topic: &str) -> ResponseTemplate {
             "Обращение зарегистрировано и направлено в ответственную службу.".to_owned()
         },
         language: language.to_ascii_lowercase(),
+        approved: false,
+        source: "MANUAL_DEMO".to_owned(),
     }
 }
 

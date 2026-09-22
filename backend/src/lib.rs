@@ -273,6 +273,8 @@ pub struct ResponseTemplate {
     pub title: String,
     pub body: String,
     pub language: String,
+    pub approved: bool,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -734,6 +736,8 @@ fn response_template(language: &str, topic_id: &str) -> ResponseTemplate {
         title,
         body: body.to_owned(),
         language: language.to_owned(),
+        approved: false,
+        source: "MANUAL_DEMO".to_owned(),
     }
 }
 
@@ -3126,6 +3130,7 @@ fn metric_bucket(id: String, label: String, tickets: Vec<&Ticket>, store: &Store
 #[derive(Clone, Debug, Serialize)]
 pub struct ForecastResponse {
     pub source: String,
+    pub model_version: String,
     pub model: String,
     pub status: String,
     pub insufficient_history: bool,
@@ -3186,6 +3191,7 @@ async fn forecast(
         .collect();
     Ok(Json(ForecastResponse {
         source: "deterministic-demo".to_owned(),
+        model_version: "forecast-seasonal-naive-2026-09-21-001".to_owned(),
         model: "seasonal-naive-demo".to_owned(),
         status: "OK".to_owned(),
         insufficient_history: false,
