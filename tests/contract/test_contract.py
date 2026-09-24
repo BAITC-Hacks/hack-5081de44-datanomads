@@ -70,6 +70,16 @@ class ContractArtifactTests(unittest.TestCase):
             self.skipTest("OpenAPI artifact is supplied by the integration build")
         self.assert_checks_pass(self.smoke.check_openapi_file(openapi_path, self.manifest))
 
+    def test_core_openapi_does_not_claim_internal_ml_routes(self):
+        umbrella = json.loads((ROOT / "docs/openapi/openapi.json").read_text())
+        core = dict(umbrella)
+        core["paths"] = {
+            path: operations
+            for path, operations in umbrella["paths"].items()
+            if not path.startswith("/internal/")
+        }
+        self.assert_checks_pass(self.smoke.check_openapi_document(core, self.manifest, core_only=True))
+
 
 if __name__ == "__main__":
     unittest.main()

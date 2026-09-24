@@ -323,7 +323,9 @@ def operation_text(path: str, method: str, operation: Mapping[str, Any]) -> str:
     return " ".join(parts).lower()
 
 
-def check_openapi_document(document: Mapping[str, Any], manifest: Mapping[str, Any]) -> list[Check]:
+def check_openapi_document(
+    document: Mapping[str, Any], manifest: Mapping[str, Any], *, core_only: bool = False
+) -> list[Check]:
     checks: list[Check] = []
     paths = document.get("paths")
     if not isinstance(paths, dict):
@@ -349,21 +351,31 @@ def check_openapi_document(document: Mapping[str, Any], manifest: Mapping[str, A
                 str(required.get("description", "required operation")),
             )
         )
-    for required in manifest["api"]["internal_exact_operations"]:
-        path = normalize_openapi_path(str(required["path"]))
-        method = str(required["method"]).lower()
-        operation = normalized_paths.get(path)
-        ok = isinstance(operation, dict) and isinstance(operation.get(method), dict)
-        checks.append(Check(f"OpenAPI {method.upper()} {path}", ok, "internal ML operation"))
+    if core_only:
+        checks.append(
+            Check(
+                "Core OpenAPI excludes ML routes",
+                not any(path.startswith("/internal/") for path in normalized_paths),
+                "ML routes belong to the separate internal service",
+            )
+        )
+    else:
+        for required in manifest["api"]["internal_exact_operations"]:
+            path = normalize_openapi_path(str(required["path"]))
+            method = str(required["method"]).lower()
+            operation = normalized_paths.get(path)
+            ok = isinstance(operation, dict) and isinstance(operation.get(method), dict)
+            checks.append(Check(f"OpenAPI {method.upper()} {path}", ok, "internal ML operation"))
 
     for prefix in manifest["api"]["public_prefixes"]:
         canonical = normalize_openapi_path(str(prefix)).rstrip("/")
         ok = any(path == canonical or path.startswith(canonical + "/") for path in normalized_paths)
         checks.append(Check(f"OpenAPI public group {canonical}", ok, "application API group"))
-    for prefix in manifest["api"]["internal_prefixes"]:
-        canonical = normalize_openapi_path(str(prefix)).rstrip("/")
-        ok = any(path == canonical or path.startswith(canonical + "/") for path in normalized_paths)
-        checks.append(Check(f"OpenAPI internal group {canonical}", ok, "ML service group"))
+    if not core_only:
+        for prefix in manifest["api"]["internal_prefixes"]:
+            canonical = normalize_openapi_path(str(prefix)).rstrip("/")
+            ok = any(path == canonical or path.startswith(canonical + "/") for path in normalized_paths)
+            checks.append(Check(f"OpenAPI internal group {canonical}", ok, "ML service group"))
 
     searchable_operations = [
         operation_text(path, method, operation)
@@ -776,7 +788,7 @@ def run(args: argparse.Namespace) -> int:
             checks.append(Check("live OpenAPI document", False, "none of the candidate endpoints returned OpenAPI JSON"))
         else:
             checks.append(Check("live OpenAPI document", True, openapi_route))
-            checks.extend(check_openapi_document(live_openapi, manifest))
+            checks.extend(check_openapi_document(live_openapi, manifest, core_only=True))
         checks.extend(check_live_roles(args.base_url, manifest, args.timeout))
         checks.extend(check_learning_safety(args.base_url, args.timeout, args.learning_cycle_id))
 
