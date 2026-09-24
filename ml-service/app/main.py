@@ -189,7 +189,6 @@ async def train_for_model(model_type: str, request: TrainingRequest) -> Training
 
 
 @router.get("/training/jobs/{job_id}", response_model=TrainingResponse, tags=["training"])
-@router.get("/training/{job_id}", response_model=TrainingResponse, tags=["training"])
 async def training_job(job_id: str) -> TrainingResponse:
     result = trainer.get(job_id)
     if result is None:
@@ -208,7 +207,6 @@ async def evaluate_for_model(model_type: str, request: EvaluationRequest) -> Eva
 
 
 @router.get("/evaluation/jobs/{evaluation_id}", response_model=EvaluationResponse, tags=["evaluation"])
-@router.get("/evaluation/{evaluation_id}", response_model=EvaluationResponse, tags=["evaluation"])
 async def evaluation_job(evaluation_id: str) -> EvaluationResponse:
     result = evaluator.get(evaluation_id)
     if result is None:

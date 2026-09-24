@@ -115,7 +115,7 @@ def test_training_evaluation_and_manifest(monkeypatch) -> None:
     assert training.json()["state"] == "TRAINER_NOT_CONFIGURED"
     assert training.json()["candidate_model_version"] is None
     job_id = training.json()["job_id"]
-    assert client.get(f"/internal/v1/training/{job_id}").status_code == 200
+    assert client.get(f"/internal/v1/training/jobs/{job_id}").status_code == 200
 
     monkeypatch.setenv("PULSE_TEST_FAKE_TRAINER", "true")
     fake_training = client.post(
@@ -131,6 +131,7 @@ def test_training_evaluation_and_manifest(monkeypatch) -> None:
     )
     assert evaluation.status_code == 200
     assert evaluation.json()["metrics"]["macro_f1"] == 1.0
+    assert client.get(f"/internal/v1/evaluation/jobs/{evaluation.json()['evaluation_id']}").status_code == 200
 
     manifest = client.get("/internal/v1/models")
     assert manifest.status_code == 200
