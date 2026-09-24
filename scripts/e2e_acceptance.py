@@ -168,6 +168,15 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     changed_payload["tickets"][0]["original_text"] = "Изменённый текст с прежней версией набора"
     status, _, conflict = json_request(base_url, "POST", "/api/v1/import", body=changed_payload, timeout=timeout)
     expect(status == 409, f"dataset version accepted different content: {status} {conflict}")
+    changed_payload["dataset_version"] = f"{dataset}-changed-ticket"
+    changed_payload["manifest_uri"] = f"memory://{dataset}-changed-ticket/manifest.json"
+    status, _, conflict = json_request(base_url, "POST", "/api/v1/import", body=changed_payload, timeout=timeout)
+    expect(status == 409, f"new dataset silently linked changed source ticket: {status} {conflict}")
+    next_version = json.loads(json.dumps(import_payload))
+    next_version["dataset_version"] = f"{dataset}-same-ticket"
+    next_version["manifest_uri"] = f"memory://{dataset}-same-ticket/manifest.json"
+    status, _, linked = json_request(base_url, "POST", "/api/v1/import", body=next_version, timeout=timeout)
+    expect(status == 201 and linked.get("duplicate_rows") == 3, f"new dataset could not link unchanged tickets: {status} {linked}")
 
     status, _, listed = json_request(base_url, "GET", "/api/v1/tickets?limit=100", timeout=timeout)
     expect(status == 200, f"ticket list failed: {status} {listed}")

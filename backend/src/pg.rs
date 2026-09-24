@@ -950,7 +950,7 @@ impl PgRepository {
             .bind(json_text(item, "service_raw"))
             .bind(&routing.service_id)
             .bind(&routing.priority)
-            .bind(status)
+            .bind(&status)
             .bind(json_text(item, "district"))
             .bind(json_text(item, "address"))
             .bind(json_text(item, "object"))
@@ -1004,15 +1004,26 @@ impl PgRepository {
                 .map_err(|error| format!("insert imported prediction {external_id}: {error}"))?;
                 id
             } else {
-                duplicate_rows += 1;
-                sqlx::query_scalar(
-                    "SELECT id FROM tickets WHERE source_system = $1 AND external_ticket_id = $2",
+                let existing = sqlx::query(
+                    "SELECT id, original_text, region_id, created_at, language, status FROM tickets WHERE source_system = $1 AND external_ticket_id = $2 FOR UPDATE",
                 )
                 .bind(&source_system)
                 .bind(&external_id)
                 .fetch_one(&mut *tx)
                 .await
-                .map_err(|error| format!("find duplicate imported ticket {external_id}: {error}"))?
+                .map_err(|error| format!("find duplicate imported ticket {external_id}: {error}"))?;
+                if existing.get::<String, _>("original_text") != text
+                    || existing.get::<String, _>("region_id") != region_id
+                    || existing.get::<DateTime<Utc>, _>("created_at") != created_at
+                    || existing.get::<String, _>("language") != language
+                    || existing.get::<String, _>("status") != status
+                {
+                    return Err(ImportError::Conflict(
+                        "source ticket already exists with different canonical fields".to_owned(),
+                    ));
+                }
+                duplicate_rows += 1;
+                existing.get::<i64, _>("id")
             };
             sqlx::query(
                 "INSERT INTO dataset_ticket_links (dataset_version, ticket_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",

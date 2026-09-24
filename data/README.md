@@ -74,8 +74,8 @@ quality report with coverage, duplicates, dates and distributions.
 
 ## PostgreSQL
 
-Apply `migrations/001_data_foundation.sql`, `migrations/002_seed_data_taxonomy.sql`
-and `migrations/003_pulse_state.sql`. PostgreSQL remains source of truth for
+The Core migration runner applies all numbered files in `migrations/` in order.
+PostgreSQL remains source of truth for
 normalized tickets, predictions, operator decisions and controlled-learning
-state. Qdrant payloads should contain only `external_ticket_id`, `region_id`,
+state. Qdrant payloads contain only `ticket_id`, `region_id`,
 `topic_id` and `created_at`.
