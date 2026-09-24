@@ -46,6 +46,9 @@ npm run build --prefix frontend
 Проверяются реальные routes Operator Workspace/Situation Center, loading,
 empty/error states, keyboard navigation, mobile layout и отсутствие прямого
 вызова ML service.
+Временной ряд и прогноз показывают графики ECharts из Core API; точные значения
+остаются доступны в списке дат и таблице прогноза. При браузерной проверке
+проверяйте обе страницы с demo-данными и ширину экрана 390 px.
 
 ### ML
 

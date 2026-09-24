@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState, type ReactElement } from 're
 import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
+import { DataChart } from './components/DataChart'
+import type { EChartsOption } from 'echarts'
 
 type Route =
   | '/operator'
@@ -380,9 +382,28 @@ function CleanTopicsPage({ topics, onDrilldown }: { topics: TopicMetric[]; onDri
   return <div className="analytics-page"><section className="panel"><PanelHeading title="Распределение по темам" /><div className="topic-bars">{topics.map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value) + '%', background: topic.color }} /></div></button>)}</div></section></div>
 }
 
+function chartBaseOption(dates: string[]): EChartsOption {
+  return {
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    grid: { left: 42, right: 16, top: 42, bottom: 34 },
+    xAxis: { type: 'category', data: dates, boundaryGap: false, axisLabel: { color: '#899c95', formatter: (date: string) => date.slice(5) }, axisLine: { lineStyle: { color: '#40514b' } } },
+    yAxis: { type: 'value', min: 0, axisLabel: { color: '#899c95' }, splitLine: { lineStyle: { color: 'rgba(214,236,225,.1)' } } },
+  }
+}
+
 function CleanTimeSeriesPage({ timeSeries, onDrilldown }: { timeSeries: DashboardData['timeSeries']; onDrilldown: DrilldownHandler }) {
   if (!timeSeries.length) return <div className="analytics-page"><NoData message="За выбранный период нет обращений." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Временная динамика" /><div className="region-table region-table-full"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля закрытия</span></div>{timeSeries.map((point) => <button className="region-table-row region-table-row-full drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div></section></div>
+  const dates = timeSeries.map((point) => point.date)
+  const option: EChartsOption = {
+    ...chartBaseOption(dates),
+    legend: { data: ['Обращения', 'Закрыто'], top: 0, textStyle: { color: '#a9bbb2' } },
+    series: [
+      { name: 'Обращения', type: 'line' as const, data: timeSeries.map((point) => point.tickets), smooth: false, showSymbol: false, lineStyle: { width: 2 }, itemStyle: { color: '#8cf0c8' } },
+      { name: 'Закрыто', type: 'line' as const, data: timeSeries.map((point) => point.resolved), smooth: false, showSymbol: false, lineStyle: { width: 2 }, itemStyle: { color: '#a7d9ff' } },
+    ],
+  }
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Временная динамика" /><DataChart option={option} label="Обращения и закрытые обращения по дням" /><div className="region-table region-table-full"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля закрытия</span></div>{timeSeries.map((point) => <button className="region-table-row region-table-row-full drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div></section></div>
 }
 
 function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; onToast: (message: string) => void; onDrilldown: DrilldownHandler }) {
@@ -404,7 +425,11 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
 
 function CleanForecastPage({ forecast, status, modelVersion }: { forecast: ForecastPoint[]; status?: string; modelVersion?: string }) {
   if (!forecast.length) return <div className="analytics-page"><NoData message="Для прогноза пока недостаточно истории обращений." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Расчёт по истории обращений · состояние {status ?? 'unknown'} · версия {modelVersion ?? 'не указана'}</p><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
+  const option: EChartsOption = {
+    ...chartBaseOption(forecast.map((point) => point.label)),
+    series: [{ name: 'Прогноз обращений', type: 'line' as const, data: forecast.map((point) => point.forecast ?? null), showSymbol: false, lineStyle: { width: 2 }, areaStyle: { color: 'rgba(167, 217, 255, .12)' }, itemStyle: { color: '#a7d9ff' } }],
+  }
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Расчёт по истории обращений · состояние {status ?? 'unknown'} · версия {modelVersion ?? 'не указана'}</p><DataChart option={option} label="Прогноз количества обращений по дням" /><details className="chart-values"><summary>Показать значения по дням</summary><table><thead><tr><th>Дата</th><th>Обращения</th></tr></thead><tbody>{forecast.map((point) => <tr key={point.label}><td>{point.label}</td><td>{point.forecast ?? '—'}</td></tr>)}</tbody></table></details></section></div>
 }
 
 function CleanReportsPage({ filters }: { filters: DashboardFilters }) {
