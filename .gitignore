@@ -24,3 +24,4 @@ data/quarantine/*.jsonl
 
 # Tool metadata
 .serena/
+project-context.md
