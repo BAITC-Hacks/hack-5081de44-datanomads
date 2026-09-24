@@ -86,6 +86,9 @@ Production model продолжает обслуживать запросы во
   доступны.
 - Core API пишет structured JSON с `request_id`, `trace_id`, `service`,
   `endpoint`, `latency_ms`, `model_version`, `status`, `error_code`.
+- `/api/v1/events` держит SSE-соединение открытым: сначала отправляет
+  `alerts.snapshot`, после изменения alerts — `alerts.changed`; клиент
+  повторно загружает данные при `alerts.resync`.
 - В приложенческий лог по умолчанию не попадают полный текст обращения, ИИН,
   телефон, имя, полный адрес и вложения.
 - PostgreSQL-backed jobs используют lease/attempt и `FOR UPDATE SKIP LOCKED`;

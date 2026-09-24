@@ -74,6 +74,18 @@ def expect(condition: bool, message: str) -> None:
         raise AcceptanceError(message)
 
 
+def read_sse_event(response: Any) -> bytes:
+    lines = []
+    while line := response.readline():
+        if line in (b"\n", b"\r\n"):
+            if lines:
+                return b"".join(lines)
+            continue
+        if not line.startswith(b":"):
+            lines.append(line)
+    raise AcceptanceError("SSE stream closed before the next event")
+
+
 def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, Any]:
     suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     source = f"e2e_acceptance_{suffix}"
@@ -231,12 +243,20 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     status, _, detected = json_request(base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout)
     expect(status == 200 and detected.get("items"), f"spike detector found no alert: {detected}")
     alert_id = str(detected["items"][0]["id"])
-    status, _, acknowledged = json_request(base_url, "POST", f"/api/v1/alerts/{alert_id}/ack", role="MANAGER", timeout=timeout)
-    expect(status == 200 and acknowledged.get("status") == "ACKNOWLEDGED", f"alert ack failed: {acknowledged}")
+    event_request = Request(
+        base_url.rstrip("/") + "/api/v1/events",
+        headers={"Accept": "text/event-stream", "X-Pulse-Role": "MANAGER", "X-User-Id": "e2e-acceptance"},
+    )
+    with urlopen(event_request, timeout=timeout) as event_response:
+        expect(event_response.status == 200 and "text/event-stream" in event_response.headers.get("Content-Type", ""), "SSE endpoint did not return an event stream")
+        snapshot = read_sse_event(event_response)
+        expect(b"event: alerts.snapshot" in snapshot, f"SSE snapshot missing: {snapshot[:160]!r}")
+        status, _, acknowledged = json_request(base_url, "POST", f"/api/v1/alerts/{alert_id}/ack", role="MANAGER", timeout=timeout)
+        expect(status == 200 and acknowledged.get("status") == "ACKNOWLEDGED", f"alert ack failed: {acknowledged}")
+        changed = read_sse_event(event_response)
+        expect(b"event: alerts.changed" in changed, f"SSE alert update missing: {changed[:160]!r}")
     status, _, closed = json_request(base_url, "POST", f"/api/v1/alerts/{alert_id}/close", role="MANAGER", timeout=timeout)
     expect(status == 200 and closed.get("status") == "CLOSED", f"alert close failed: {closed}")
-    status, event_headers, event_body = request(base_url, "GET", "/api/v1/events", role="MANAGER", timeout=timeout)
-    expect(status == 200 and "text/event-stream" in event_headers.get("Content-Type", "") and b"event:" in event_body, "SSE endpoint is not an event stream")
 
     for report_path, magic in (("/api/v1/analytics/export.pdf", b"%PDF-1.4"), ("/api/v1/analytics/export.xlsx", b"PK\x03\x04")):
         status, _, report = request(base_url, "GET", report_path, role="MANAGER", timeout=timeout)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension } from './api/client'
 import type { Alert, ApiSource, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
 
@@ -146,6 +146,21 @@ function App() {
     })
     return () => { active = false }
   }, [filters])
+
+  useEffect(() => {
+    if (!route.startsWith('/situation') || source !== 'api') return
+    let active = true
+    const unsubscribe = subscribeToAlertChanges(() => {
+      loadDashboard(filters).then((result) => {
+        if (!active) return
+        setData(result.data)
+        setApiError(result.error)
+      }).catch((error: unknown) => {
+        if (active) setApiError(error instanceof Error ? error.message : 'Не удалось обновить оповещения')
+      })
+    })
+    return () => { active = false; unsubscribe() }
+  }, [route, source, filters])
 
   const openDrilldown = useCallback(async (dimension: DrilldownDimension, value: string | undefined, label: string) => {
     setDrilldownLoading(true)

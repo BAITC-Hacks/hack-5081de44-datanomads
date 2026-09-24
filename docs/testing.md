@@ -66,6 +66,8 @@ OpenAPI-файлы в `docs/openapi/` валидируются YAML/OpenAPI pars
 `scripts/smoke` проверяет `/healthz`, `/readyz`, overview и
 `POST /api/v1/assist/preview` через Nginx, то есть проходит тот же public
 gateway, что и браузер. Для CI base URL задаётся `PULSE_BASE_URL`.
+Stateful E2E дополнительно держит `/api/v1/events` открытым и проверяет
+`alerts.snapshot` и `alerts.changed` после подтверждения оповещения.
 
 Минимальный E2E:
 

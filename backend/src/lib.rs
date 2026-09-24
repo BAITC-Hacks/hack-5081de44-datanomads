@@ -11,7 +11,10 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{delete, get, post, put},
     Json, Router,
 };
@@ -20,11 +23,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     env,
     sync::{Arc, RwLock},
-    time::Instant,
+    time::{Duration as StdDuration, Instant},
 };
 use thiserror::Error;
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -98,19 +104,23 @@ pub struct AppState {
     store: Arc<RwLock<Store>>,
     pub config: Config,
     repository: Option<Arc<PgRepository>>,
+    alert_events: broadcast::Sender<String>,
 }
 
 impl AppState {
     pub fn demo() -> Self {
+        let (alert_events, _) = broadcast::channel(128);
         Self {
             store: Arc::new(RwLock::new(Store::demo())),
             config: Config::default(),
             repository: None,
+            alert_events,
         }
     }
 
     pub fn from_env() -> Self {
         let config = Config::from_env();
+        let (alert_events, _) = broadcast::channel(128);
         let repository = if config.storage.eq_ignore_ascii_case("postgres") {
             let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
                 "postgres://pulse:pulse_demo_only@127.0.0.1:5432/pulse".to_owned()
@@ -149,6 +159,7 @@ impl AppState {
             store: Arc::new(RwLock::new(Store::demo())),
             config,
             repository,
+            alert_events,
         }
     }
 
@@ -161,6 +172,15 @@ impl AppState {
 
     fn repository(&self) -> Option<Arc<PgRepository>> {
         self.repository.clone()
+    }
+
+    fn publish_alerts_changed(&self) {
+        // A missing subscriber is normal; the next subscriber receives a fresh snapshot.
+        if self.alert_events.receiver_count() > 0 {
+            let _ = self
+                .alert_events
+                .send(r#"{"type":"alerts.changed"}"#.to_owned());
+        }
     }
 
     fn read_store(&self) -> Result<std::sync::RwLockReadGuard<'_, Store>, ApiError> {
@@ -3062,7 +3082,8 @@ async fn reports(
 
 async fn events(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
-    if let Some(repository) = state.repository() {
+    let receiver = state.alert_events.subscribe();
+    let (source, alerts) = if let Some(repository) = state.repository() {
         let alerts = repository
             .list_alerts(&AlertQuery {
                 status: None,
@@ -3071,35 +3092,30 @@ async fn events(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
             })
             .await
             .map_err(ApiError::Internal)?;
-        let payload = serde_json::to_string(&json!({
-            "type": "alerts.snapshot",
-            "source": "postgres",
-            "alerts": alerts,
-        }))
-        .map_err(|error| ApiError::Internal(format!("serialize events: {error}")))?;
-        let mut response = Response::new(Body::from(format!(
-            "event: alerts\ndata: {payload}\n\nevent: pulse\ndata: {{\"type\":\"heartbeat\",\"source\":\"postgres\"}}\n\n"
-        )));
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/event-stream"),
-        );
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-        return Ok(response);
-    }
-    let mut response = Response::new(Body::from(
-        "event: pulse\ndata: {\"type\":\"heartbeat\",\"source\":\"deterministic-demo\"}\n\n",
-    ));
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream"),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    Ok(response)
+        ("postgres", alerts)
+    } else {
+        let store = state.read_store()?;
+        (
+            "deterministic-demo",
+            store.alerts.values().cloned().collect(),
+        )
+    };
+    let snapshot = Event::default()
+        .event("alerts.snapshot")
+        .data(json!({"type": "alerts.snapshot", "source": source, "alerts": alerts}).to_string());
+    let updates = BroadcastStream::new(receiver).map(|result| {
+        let event = match result {
+            Ok(payload) => Event::default().event("alerts.changed").data(payload),
+            Err(_) => Event::default()
+                .event("alerts.resync")
+                .data(r#"{"type":"alerts.resync"}"#),
+        };
+        Ok::<Event, Infallible>(event)
+    });
+    let stream = tokio_stream::once(Ok::<Event, Infallible>(snapshot)).chain(updates);
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)))
+        .into_response())
 }
 
 fn metric_bucket(id: String, label: String, tickets: Vec<&Ticket>, store: &Store) -> MetricBucket {
@@ -3315,6 +3331,7 @@ async fn ack_alert(
             )
             .await
             .map_err(ApiError::Internal)?;
+        state.publish_alerts_changed();
         return Ok(Json(response));
     }
     let mut store = state.write_store()?;
@@ -3325,6 +3342,7 @@ async fn ack_alert(
     alert.status = "acknowledged".to_owned();
     alert.acknowledged_by = Some(actor.user_id);
     alert.acknowledged_at = Some(DEMO_TIMESTAMP.to_owned());
+    state.publish_alerts_changed();
     Ok(Json(alert.clone()))
 }
 
@@ -3357,6 +3375,7 @@ async fn close_alert(
             )
             .await
             .map_err(ApiError::Internal)?;
+        state.publish_alerts_changed();
         return Ok(Json(response));
     }
     let mut store = state.write_store()?;
@@ -3367,6 +3386,7 @@ async fn close_alert(
     alert.status = "closed".to_owned();
     alert.closed_by = Some(actor.user_id);
     alert.closed_at = Some(Utc::now().to_rfc3339());
+    state.publish_alerts_changed();
     Ok(Json(alert.clone()))
 }
 
@@ -3381,6 +3401,9 @@ async fn detect_alerts(
             .await
             .map_err(ApiError::Internal)?;
         let total = items.len();
+        if total > 0 {
+            state.publish_alerts_changed();
+        }
         return Ok(Json(AlertListResponse { items, total }));
     }
     let store = state.read_store()?;

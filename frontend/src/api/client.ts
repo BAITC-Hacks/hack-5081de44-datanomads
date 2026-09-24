@@ -299,6 +299,13 @@ export async function loadDashboard(filters: DashboardFilters = { range: '7d' })
   }
 }
 
+export function subscribeToAlertChanges(onChange: () => void): () => void {
+  const events = new EventSource(`${API_BASE}/events`, { withCredentials: true })
+  events.addEventListener('alerts.changed', onChange)
+  events.addEventListener('alerts.resync', onChange)
+  return () => events.close()
+}
+
 export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
   try {
     const response = await request<{ items: BackendTicket[] }>('/tickets?limit=50')
