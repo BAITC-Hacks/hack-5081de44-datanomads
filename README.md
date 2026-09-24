@@ -100,6 +100,9 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
 - Без полного dataset нельзя честно утверждать held-out качество classifier,
   embeddings, spike detector или forecast; такие метрики должны иметь
   dataset/model/evaluation versions.
+- Подключение pretrained `multilingual-e5-base` и дообучение classifier/embedder
+  отложены по решению проекта. Demo retrieval использует deterministic
+  embeddings; качество поиска на реальных обращениях пока не подтверждено.
 - Seeded routing/priority mappings are `MANUAL` demo defaults, not official
   109 rules. Seeded response templates have `approved=false` and are exposed as
   `MANUAL_DEMO` until authoritative rules and copy are supplied.

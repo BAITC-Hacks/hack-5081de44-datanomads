@@ -65,11 +65,11 @@ forecast_model=forecast-seasonal-naive-2026-09-21-001
   deployment's external identity contract; the acceptance stack uses its
   documented demo auth mode.
 
-Real classifier/embedder training is **NOT implemented yet**. XLM-R/E5
-fine-tuning, real model artifacts and held-out ML metrics remain explicitly
-outside this closure. The deterministic classifier/embedder and Seasonal Naive
-forecast are baselines only; the test-only fake trainer is never enabled in
-normal Compose mode.
+Real classifier/embedder training is **NOT implemented yet**. Pretrained E5
+integration and XLM-R/E5 fine-tuning are deferred by project decision, along
+with real model artifacts and held-out ML metrics. The deterministic
+classifier/embedder and Seasonal Naive forecast are baselines only; the
+test-only fake trainer is never enabled in normal Compose mode.
 
 ## Дополнительная проверка 2026-09-24
 
@@ -110,5 +110,6 @@ Core OpenAPI покрывает все 50 операций Axum, ML YAML сов�
 
 Оставшиеся внешние зависимости: реальные 109 dataset и source update contract,
 официальные routing/priority rules и утверждённые response templates,
-production identity gateway. Дообученный classifier/embedder и его held-out
-метрики отложены отдельно; обычный runtime не выдаёт фиктивный candidate.
+production identity gateway. Подключение pretrained E5, дообученный
+classifier/embedder и его held-out метрики отложены отдельно; обычный runtime
+не выдаёт фиктивный candidate.
