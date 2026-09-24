@@ -4116,7 +4116,7 @@ async fn openapi() -> Json<Value> {
             "description": "P0 operator workflow and situation center API. Compose uses PostgreSQL/Qdrant/ML baseline; deterministic memory responses are test-only."
         },
         "servers": [{ "url": "/" }],
-        "security": [{ "PulseRole": [] }],
+        "security": [{ "PulseRole": [] }, {}],
         "components": {
             "securitySchemes": {
                 "PulseRole": {
@@ -4130,14 +4130,21 @@ async fn openapi() -> Json<Value> {
         "paths": {
             "/healthz": { "get": { "summary": "Liveness" } },
             "/readyz": { "get": { "summary": "Readiness" } },
+            "/api/v1/openapi.json": { "get": { "summary": "Core OpenAPI route index" } },
+            "/api/v1/docs": { "get": { "summary": "Core OpenAPI route index" } },
             "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
             "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
+            "/api/v1/tickets/{ticket_id}/prediction": { "get": { "summary": "Get current ticket prediction" } },
             "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
             "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
             "/api/v1/import": { "post": { "summary": "Import validated tickets into PostgreSQL and Qdrant" } },
             "/api/v1/assist/preview": { "post": { "summary": "Preview prediction and related tickets" } },
             "/api/v1/assist/{ticket_id}/confirm": { "post": { "summary": "Confirm prediction" } },
             "/api/v1/assist/{ticket_id}/correct": { "post": { "summary": "Correct prediction" } },
+            "/api/v1/assist/confirm": { "post": { "summary": "Confirm prediction using ticket_id in body" } },
+            "/api/v1/assist/correct": { "post": { "summary": "Correct prediction using ticket_id in body" } },
+            "/api/v1/assist/confirm/{ticket_id}": { "post": { "summary": "Confirm prediction alias" } },
+            "/api/v1/assist/correct/{ticket_id}": { "post": { "summary": "Correct prediction alias" } },
             "/api/v1/analytics": { "get": { "summary": "Situation center analytics" } },
             "/api/v1/analytics/overview": { "get": { "summary": "Situation center overview" } },
             "/api/v1/analytics/drilldown": { "get": { "summary": "Drill analytics metrics down to source tickets" } },
@@ -4153,8 +4160,13 @@ async fn openapi() -> Json<Value> {
             "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist spike alerts" } },
             "/api/v1/alerts/{alert_id}": { "get": { "summary": "Get alert detail and linked tickets" } },
             "/api/v1/alerts/{alert_id}/ack": { "post": { "summary": "Acknowledge alert" } },
+            "/api/v1/alerts/{alert_id}/acknowledge": { "post": { "summary": "Acknowledge alert alias" } },
             "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },
             "/api/v1/learning": { "get": { "summary": "Learning loop status" }, "post": { "summary": "Start candidate cycle" } },
+            "/api/v1/learning/{cycle_id}": { "get": { "summary": "Get learning cycle" } },
+            "/api/v1/learning/{cycle_id}/feedback": { "post": { "summary": "Add validated learning feedback" } },
+            "/api/v1/learning/{cycle_id}/promote": { "post": { "summary": "Promote candidate after human review" } },
+            "/api/v1/learning/{cycle_id}/reject": { "post": { "summary": "Reject candidate after human review" } },
             "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
             "/api/v1/learning/cycle/close": { "post": { "summary": "Close collect and train candidate" } },
             "/api/v1/learning/candidate/evaluation": { "get": { "summary": "Evaluate candidate" } },
@@ -4162,12 +4174,8 @@ async fn openapi() -> Json<Value> {
             "/api/v1/learning/candidate/reject": { "post": { "summary": "Reject candidate" } },
             "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Collect relation feedback" } },
             "/api/v1/models": { "get": { "summary": "List model versions" } },
-            "/internal/v1/classify": { "post": { "summary": "Internal classifier contract; not public" } },
-            "/internal/v1/embed": { "post": { "summary": "Internal embedding contract; not public" } },
-            "/internal/v1/forecast": { "post": { "summary": "Internal forecast contract; not public" } },
-            "/internal/v1/anomaly": { "post": { "summary": "Internal anomaly contract; not public" } },
-            "/internal/v1/training/classifier": { "post": { "summary": "Internal offline training contract" } },
-            "/internal/v1/evaluation/classifier": { "post": { "summary": "Internal evaluation contract" } }
+            "/api/v1/models/{model_id}": { "get": { "summary": "Get model version" } },
+            "/api/v1/models/{model_id}/promote": { "post": { "summary": "Promote model version after human review" } }
         }
     }))
 }
@@ -4279,6 +4287,9 @@ mod tests {
         let value = body_json(response).await;
         assert_eq!(value["openapi"], "3.1.0");
         assert!(value["paths"]["/api/v1/assist/preview"].is_object());
+        assert!(value["paths"]["/api/v1/learning/{cycle_id}/feedback"].is_object());
+        assert!(value["paths"]["/api/v1/models/{model_id}/promote"].is_object());
+        assert!(value["paths"]["/internal/v1/classify"].is_null());
     }
 
     #[tokio::test]

@@ -5,7 +5,8 @@ info:
   description: >-
     Public application contract. Core API validates access and orchestrates
     PostgreSQL, Qdrant and the internal ML service. It never represents a
-    write to the official 109 system.
+    write to the official 109 system. Demo mode accepts an optional x-pulse-role
+    selector; non-demo mode requires identity headers from a trusted gateway.
 servers:
   - url: http://localhost:8080
     description: Local Nginx gateway
@@ -47,7 +48,7 @@ paths:
       tags: [import]
       summary: Import a validated and minimized dataset into PostgreSQL and Qdrant
       description: Dataset versions are immutable. Quarantine row contents are redacted in PostgreSQL.
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
         content:
@@ -67,7 +68,7 @@ paths:
     post:
       tags: [assist]
       summary: Build an operator assist preview
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
         content:
@@ -82,11 +83,11 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/DependencyUnavailable' }
-  /api/v1/tickets/{external_ticket_id}/pulse-state:
+  /api/v1/tickets/{ticket_id}/pulse-state:
     put:
       tags: [tickets]
       summary: Store a human-confirmed Pulse decision
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/TicketId'
       requestBody:
@@ -103,11 +104,11 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-  /api/v1/tickets/{external_ticket_id}/relation-feedback:
+  /api/v1/tickets/{ticket_id}/relation-feedback:
     post:
       tags: [tickets]
       summary: Confirm or reject duplicate/repeat relation candidates
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/TicketId'
       requestBody:
@@ -127,7 +128,7 @@ paths:
     get:
       tags: [analytics]
       summary: Situation Center overview
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/RegionIdQuery'
         - name: topic_id
@@ -158,7 +159,7 @@ paths:
     get:
       tags: [analytics]
       summary: Filtered PostgreSQL-backed Situation Center slice
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/RegionIdQuery'
         - name: topic_id
@@ -190,7 +191,7 @@ paths:
     get:
       tags: [analytics]
       summary: Current taxonomy and available ticket filter values
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Regions, topics, services, statuses, districts and channels
@@ -203,7 +204,7 @@ paths:
       tags: [analytics]
       summary: Drill an analytics metric down to source tickets
       description: Returns the PostgreSQL ticket rows behind a region, topic, date, alert or overview metric.
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       parameters:
         - name: dimension
           in: query
@@ -250,7 +251,7 @@ paths:
       tags: [analytics]
       summary: Execute a validated QueryIntent
       description: LLM, if used, produces intent only; Core API validates allow-listed parameters and executes parameterized queries.
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
         content:
@@ -268,7 +269,7 @@ paths:
     get:
       tags: [alerts]
       summary: List active alerts
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Alert list
@@ -282,7 +283,7 @@ paths:
     get:
       tags: [analytics]
       summary: Server-sent updates
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Long-lived SSE stream. Starts with alerts.snapshot, then emits alerts.changed after alert updates and alerts.resync if events were missed; keep-alive comments are sent while idle.
@@ -294,7 +295,7 @@ paths:
     get:
       tags: [forecast]
       summary: Forecast 30, 60 and 90 days
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       parameters:
         - name: horizon
           in: query
@@ -326,7 +327,7 @@ paths:
     get:
       tags: [analytics]
       summary: Export current analytics slice as PDF
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: PDF report
@@ -336,7 +337,7 @@ paths:
     get:
       tags: [analytics]
       summary: Export current analytics slice as XLSX
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: XLSX report
@@ -346,7 +347,7 @@ paths:
     get:
       tags: [analytics]
       summary: List generated report slices
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Ready report downloads
@@ -363,7 +364,7 @@ paths:
     get:
       tags: [learning]
       summary: Get current controlled learning cycle
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Learning cycle state
@@ -375,7 +376,7 @@ paths:
     post:
       tags: [learning]
       summary: Close COLLECT and queue candidate training
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       requestBody:
         required: false
         content:
@@ -396,7 +397,7 @@ paths:
     get:
       tags: [learning]
       summary: Read candidate evaluation
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Offline and shadow metrics
@@ -408,7 +409,7 @@ paths:
     post:
       tags: [learning]
       summary: Human approval of a candidate
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
         content:
@@ -426,7 +427,7 @@ paths:
     post:
       tags: [learning]
       summary: Human rejection of a candidate
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
         content:
@@ -443,7 +444,7 @@ paths:
     get:
       tags: [models]
       summary: List model versions and statuses
-      security: [{ bearerAuth: [] }]
+      security: [{ pulseRole: [] }, {}]
       responses:
         '200':
           description: Model registry entries
@@ -453,15 +454,336 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/ModelVersion' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/openapi.json:
+    get:
+      tags: [system]
+      summary: Read the Core API route index
+      responses:
+        '200': { description: Request completed }
+  /api/v1/docs:
+    get:
+      tags: [system]
+      summary: Read the Core API route index
+      responses:
+        '200': { description: Request completed }
+  /api/v1/tickets:
+    get:
+      tags: [tickets]
+      summary: List permitted tickets
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [tickets]
+      summary: Create a normalized ticket with a separate prediction
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '201': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tickets/{ticket_id}:
+    get:
+      tags: [tickets]
+      summary: Get a ticket with prediction and latest operator decision
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tickets/{ticket_id}/prediction:
+    get:
+      tags: [tickets]
+      summary: Get the latest AI prediction
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tickets/{ticket_id}/vector:
+    delete:
+      tags: [tickets]
+      summary: Delete a ticket vector from Qdrant
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/assist/{ticket_id}/confirm:
+    post:
+      tags: [assist]
+      summary: Confirm the prediction for a ticket
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/assist/{ticket_id}/correct:
+    post:
+      tags: [assist]
+      summary: Correct the prediction for a ticket
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/assist/confirm:
+    post:
+      tags: [assist]
+      summary: Confirm a ticket prediction using ticket_id in the body
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/assist/correct:
+    post:
+      tags: [assist]
+      summary: Correct a ticket prediction using ticket_id in the body
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/assist/confirm/{ticket_id}:
+    post:
+      tags: [assist]
+      summary: Alias for confirming a ticket prediction
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/assist/correct/{ticket_id}:
+    post:
+      tags: [assist]
+      summary: Alias for correcting a ticket prediction
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/retrieval/reindex:
+    post:
+      tags: [tickets]
+      summary: Queue a PostgreSQL-backed Qdrant reindex
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '202': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/alerts/detect:
+    post:
+      tags: [alerts]
+      summary: Detect and persist spike alerts
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/alerts/{alert_id}:
+    get:
+      tags: [alerts]
+      summary: Get alert details and linked tickets
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/alerts/{alert_id}/ack:
+    post:
+      tags: [alerts]
+      summary: Acknowledge an alert
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/alerts/{alert_id}/acknowledge:
+    post:
+      tags: [alerts]
+      summary: Alias for acknowledging an alert
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/alerts/{alert_id}/close:
+    post:
+      tags: [alerts]
+      summary: Close an alert
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/learning:
+    get:
+      tags: [learning]
+      summary: List learning cycles
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [learning]
+      summary: Create a controlled learning cycle
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/learning/{cycle_id}:
+    get:
+      tags: [learning]
+      summary: Get a learning cycle
+      parameters:
+        - name: cycle_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/learning/{cycle_id}/feedback:
+    post:
+      tags: [learning]
+      summary: Add validated feedback to a learning cycle
+      parameters:
+        - name: cycle_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/learning/{cycle_id}/promote:
+    post:
+      tags: [learning]
+      summary: Promote a candidate after human review
+      parameters:
+        - name: cycle_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/learning/{cycle_id}/reject:
+    post:
+      tags: [learning]
+      summary: Reject a candidate after human review
+      parameters:
+        - name: cycle_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/models/{model_id}:
+    get:
+      tags: [models]
+      summary: Get a model version
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/models/{model_id}/promote:
+    post:
+      tags: [models]
+      summary: Promote a model version after human review
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200': { description: Request completed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 components:
   securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+    pulseRole:
+      type: apiKey
+      in: header
+      name: x-pulse-role
+      description: Demo role selector. Production identity comes from a trusted gateway.
   parameters:
     TicketId:
-      name: external_ticket_id
+      name: ticket_id
       in: path
       required: true
       schema: { type: string, minLength: 1 }
