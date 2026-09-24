@@ -11,6 +11,7 @@ servers:
     description: Local Nginx gateway
 tags:
   - name: system
+  - name: import
   - name: assist
   - name: tickets
   - name: analytics
@@ -41,6 +42,27 @@ paths:
               schema: { $ref: '#/components/schemas/HealthResponse' }
         '503':
           description: Dependency is unavailable
+  /api/v1/import:
+    post:
+      tags: [import]
+      summary: Import a validated and minimized dataset into PostgreSQL and Qdrant
+      description: Dataset versions are immutable. Quarantine row contents are redacted in PostgreSQL.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportRequest' }
+      responses:
+        '201':
+          description: Import committed; repeated identical imports report duplicates
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/assist/preview:
     post:
       tags: [assist]
@@ -466,7 +488,7 @@ components:
       description: Role is not allowed
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     Conflict:
-      description: State transition is not allowed
+      description: State transition or dataset version conflict
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     DependencyUnavailable:
       description: ML/Qdrant dependency unavailable
@@ -474,17 +496,45 @@ components:
   schemas:
     ErrorResponse:
       type: object
-      required: [error_code, message, request_id]
+      required: [error]
       properties:
-        error_code: { type: string }
-        message: { type: string }
-        request_id: { type: string }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
     HealthResponse:
       type: object
       required: [status]
       properties:
         status: { type: string, enum: [ok, ready, degraded] }
         dependencies: { type: object, additionalProperties: { type: string } }
+    ImportRequest:
+      type: object
+      required: [source_system]
+      properties:
+        source_system: { type: string, minLength: 1 }
+        source_uri: { type: string }
+        dataset_version: { type: string }
+        manifest_uri: { type: string }
+        manifest_sha256: { type: string }
+        is_synthetic: { type: boolean }
+        tickets: { type: array, items: { type: object, additionalProperties: true } }
+        quarantine: { type: array, items: { type: object, additionalProperties: true } }
+    ImportResponse:
+      type: object
+      required: [import_run_id, source_system, dataset_version, total_rows, imported_rows, duplicate_rows, quarantined_rows, indexed_rows, source]
+      properties:
+        import_run_id: { type: string }
+        source_system: { type: string }
+        dataset_version: { type: string }
+        total_rows: { type: integer }
+        imported_rows: { type: integer }
+        duplicate_rows: { type: integer }
+        quarantined_rows: { type: integer }
+        indexed_rows: { type: integer }
+        source: { type: string }
     AssistPreviewRequest:
       type: object
       required: [external_ticket_id, text, region_id]

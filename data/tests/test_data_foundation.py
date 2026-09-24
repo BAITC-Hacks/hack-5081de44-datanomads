@@ -52,6 +52,22 @@ class UnifiedTicketTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertNotIn("Иван Иванов", result.ticket.original_text)
 
+    def test_quarantine_omits_sensitive_values_from_detail_and_snapshot(self) -> None:
+        result = normalize_row(
+            {
+                "external_ticket_id": "bad-date-1",
+                "region_id": "Акмолинская область",
+                "created_at": "+7 777 123-45-67",
+                "original_text": "ФИО: Иван Иванов, нет воды",
+            },
+            source_system="ikomek109",
+        )
+        self.assertIsNotNone(result.quarantine)
+        encoded = json.dumps(result.quarantine.to_dict(), ensure_ascii=False)
+        self.assertNotIn("+7 777 123-45-67", encoded)
+        self.assertNotIn("Иван Иванов", encoded)
+        self.assertEqual(result.quarantine.reason, "INVALID_DATE")
+
 
 class ImporterTests(unittest.TestCase):
     def test_source_specific_aliases_and_bad_rows(self) -> None:

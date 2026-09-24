@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from data.normalization.pii import minimize_mapping
+from data.normalization.pii import minimize_mapping, minimize_text
 
 
 QUARANTINE_REASONS = {
@@ -38,11 +38,12 @@ class QuarantineRecord:
 
     def to_dict(self) -> Mapping[str, Any]:
         safe_row, pii_report = minimize_mapping(self.row)
+        safe_detail, _ = minimize_text(self.detail)
         return {
             "source_system": self.source_system,
             "row_number": self.row_number,
             "reason": self.reason,
-            "detail": self.detail,
+            "detail": safe_detail,
             "field": self.field,
             "row": safe_row,
             "pii_categories": list(pii_report.categories),

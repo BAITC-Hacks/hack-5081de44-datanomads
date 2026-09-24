@@ -1419,7 +1419,11 @@ async fn import_tickets(
     let response = repository
         .import_tickets(&request, &request_id_from_headers(&headers))
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(|error| match error {
+            pg::ImportError::Invalid(message) => ApiError::BadRequest(message),
+            pg::ImportError::Conflict(message) => ApiError::Conflict(message),
+            pg::ImportError::Internal(message) => ApiError::Internal(message),
+        })?;
     repository
         .audit(
             &actor.user_id,

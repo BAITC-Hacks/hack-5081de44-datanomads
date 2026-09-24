@@ -45,7 +45,7 @@ def _parse_datetime(value: Any, field: str) -> datetime:
         except ValueError as exc:
             # Do not guess ambiguous day/month values.  They belong in the
             # quarantine so a source-specific parser can be configured later.
-            raise SchemaValidationError("INVALID_DATE", f"invalid {field}: {text}", field) from exc
+            raise SchemaValidationError("INVALID_DATE", f"invalid {field}", field) from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
@@ -117,7 +117,7 @@ def normalize_row(
     try:
         region_id = canonical_region_id(row.get("region_id"))
         if not region_id:
-            raise SchemaValidationError("INVALID_VALUE", f"unknown region: {row.get('region_id')}", "region_id")
+            raise SchemaValidationError("INVALID_VALUE", "unknown region", "region_id")
         created_at = _parse_datetime(row.get("created_at"), "created_at")
         closed_at = _parse_datetime(row.get("closed_at"), "closed_at") if row.get("closed_at") else None
         deadline_at = _parse_datetime(row.get("deadline_at"), "deadline_at") if row.get("deadline_at") else None
@@ -194,7 +194,7 @@ def normalize_row(
             canonical_source,
             row_number,
             row,
-            SchemaValidationError("INVALID_VALUE", str(error)),
+            SchemaValidationError("INVALID_VALUE", "invalid source value"),
         )
 
 

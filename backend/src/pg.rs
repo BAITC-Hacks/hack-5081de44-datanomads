@@ -18,6 +18,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row};
 use std::env;
 
@@ -25,6 +26,19 @@ const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
+
+#[derive(Debug)]
+pub enum ImportError {
+    Invalid(String),
+    Conflict(String),
+    Internal(String),
+}
+
+impl From<String> for ImportError {
+    fn from(message: String) -> Self {
+        Self::Internal(message)
+    }
+}
 
 pub fn default_qdrant_collection(embedder_version: &str, dimension: usize) -> String {
     if embedder_version == DEFAULT_EMBEDDER_VERSION && dimension == DEFAULT_EMBEDDING_DIMENSION {
@@ -774,9 +788,9 @@ impl PgRepository {
         &self,
         request: &ImportRequest,
         request_id: &str,
-    ) -> Result<ImportResponse, String> {
+    ) -> Result<ImportResponse, ImportError> {
         if request.source_system.trim().is_empty() {
-            return Err("source_system is required".to_owned());
+            return Err(ImportError::Invalid("source_system is required".to_owned()));
         }
         let source_system = request.source_system.trim().to_owned();
         let dataset_version = request.dataset_version.clone().unwrap_or_else(|| {
@@ -791,11 +805,83 @@ impl PgRepository {
             .manifest_sha256
             .clone()
             .unwrap_or_else(|| "runtime-unhashed".to_owned());
+        let content = serde_json::to_vec(&json!({
+            "source_system": source_system,
+            "tickets": request.tickets,
+            "quarantine": request.quarantine,
+        }))
+        .map_err(|error| format!("serialize dataset content: {error}"))?;
+        let content_sha256 = format!("sha256:{:x}", Sha256::digest(&content));
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|error| format!("begin import transaction: {error}"))?;
+        sqlx::query(
+            "INSERT INTO dataset_versions (dataset_version, schema_version, manifest_uri, manifest_sha256, content_sha256, is_synthetic, record_count, quarantine_record_count) VALUES ($1, 'unified-ticket.v1', $2, $3, $4, $5, $6, $7) ON CONFLICT (dataset_version) DO NOTHING",
+        )
+        .bind(&dataset_version)
+        .bind(&manifest_uri)
+        .bind(&manifest_sha256)
+        .bind(&content_sha256)
+        .bind(request.is_synthetic.unwrap_or(false))
+        .bind(request.tickets.len() as i32)
+        .bind(request.quarantine.len() as i32)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("register dataset version: {error}"))?;
+        let registered = sqlx::query(
+            "SELECT schema_version, manifest_uri, manifest_sha256, content_sha256, is_synthetic, record_count, quarantine_record_count FROM dataset_versions WHERE dataset_version = $1 FOR UPDATE",
+        )
+        .bind(&dataset_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("read dataset version: {error}"))?;
+        let registered_content = registered
+            .try_get::<Option<String>, _>("content_sha256")
+            .map_err(|error| format!("read dataset checksum: {error}"))?;
+        let registered_schema: String = registered
+            .try_get("schema_version")
+            .map_err(|error| format!("read dataset schema: {error}"))?;
+        let registered_uri: String = registered
+            .try_get("manifest_uri")
+            .map_err(|error| format!("read dataset manifest URI: {error}"))?;
+        let registered_manifest_sha256: String = registered
+            .try_get("manifest_sha256")
+            .map_err(|error| format!("read dataset manifest checksum: {error}"))?;
+        let registered_synthetic: bool = registered
+            .try_get("is_synthetic")
+            .map_err(|error| format!("read dataset type: {error}"))?;
+        let registered_count: i32 = registered
+            .try_get("record_count")
+            .map_err(|error| format!("read dataset record count: {error}"))?;
+        let registered_quarantine_count: i32 = registered
+            .try_get("quarantine_record_count")
+            .map_err(|error| format!("read dataset quarantine count: {error}"))?;
+        if registered_schema != "unified-ticket.v1"
+            || registered_uri != manifest_uri
+            || registered_manifest_sha256 != manifest_sha256
+            || registered_synthetic != request.is_synthetic.unwrap_or(false)
+            || registered_count != request.tickets.len() as i32
+            || registered_quarantine_count != request.quarantine.len() as i32
+            || registered_content
+                .as_deref()
+                .is_some_and(|value| value != content_sha256.as_str())
+        {
+            return Err(ImportError::Conflict(
+                "dataset_version already has different content or manifest".to_owned(),
+            ));
+        }
+        if registered_content.is_none() {
+            sqlx::query(
+                "UPDATE dataset_versions SET content_sha256 = $2 WHERE dataset_version = $1",
+            )
+            .bind(&dataset_version)
+            .bind(&content_sha256)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("backfill dataset checksum: {error}"))?;
+        }
         let import_run_id: i64 = sqlx::query_scalar(
             "INSERT INTO data_import_runs (source_system, source_uri, dataset_version, status, total_rows, valid_rows, quarantined_rows) VALUES ($1, $2, $3, 'RUNNING', $4, 0, $5) RETURNING id",
         )
@@ -807,19 +893,6 @@ impl PgRepository {
         .fetch_one(&mut *tx)
         .await
         .map_err(|error| format!("create import run: {error}"))?;
-        sqlx::query(
-            "INSERT INTO dataset_versions (dataset_version, schema_version, manifest_uri, manifest_sha256, is_synthetic, record_count, quarantine_record_count) VALUES ($1, 'unified-ticket.v1', $2, $3, $4, $5, $6) ON CONFLICT (dataset_version) DO UPDATE SET manifest_uri = EXCLUDED.manifest_uri, manifest_sha256 = EXCLUDED.manifest_sha256, record_count = EXCLUDED.record_count, quarantine_record_count = EXCLUDED.quarantine_record_count",
-        )
-        .bind(&dataset_version)
-        .bind(&manifest_uri)
-        .bind(&manifest_sha256)
-        .bind(request.is_synthetic.unwrap_or(false))
-        .bind(request.tickets.len() as i32)
-        .bind(request.quarantine.len() as i32)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("upsert dataset version: {error}"))?;
-
         let mut imported_rows = 0usize;
         let mut duplicate_rows = 0usize;
         let mut index_queue: Vec<(i64, String, String, String, String)> = Vec::new();
@@ -941,6 +1014,14 @@ impl PgRepository {
                 .await
                 .map_err(|error| format!("find duplicate imported ticket {external_id}: {error}"))?
             };
+            sqlx::query(
+                "INSERT INTO dataset_ticket_links (dataset_version, ticket_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(&dataset_version)
+            .bind(ticket_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("link imported ticket to dataset: {error}"))?;
             if is_new_ticket {
                 index_queue.push((
                     ticket_id,
@@ -952,16 +1033,39 @@ impl PgRepository {
             }
         }
         for (row_number, item) in request.quarantine.iter().enumerate() {
+            let reason = json_text(item, "reason").unwrap_or_else(|| "UNKNOWN_SCHEMA".to_owned());
+            let field = json_text(item, "field").filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "external_ticket_id"
+                        | "source_system"
+                        | "region_id"
+                        | "created_at"
+                        | "original_text"
+                        | "language"
+                        | "topic_raw"
+                        | "topic_id"
+                        | "service_raw"
+                        | "service_id"
+                        | "priority"
+                        | "status"
+                        | "district"
+                        | "address"
+                        | "channel"
+                        | "closed_at"
+                        | "deadline_at"
+                )
+            });
             sqlx::query(
                 "INSERT INTO quarantine_rows (import_run_id, source_system, row_number, reason, field, detail, row_snapshot) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(import_run_id)
             .bind(&source_system)
             .bind(item.get("row_number").and_then(Value::as_i64).unwrap_or((row_number + 1) as i64) as i32)
-            .bind(json_text(item, "reason").unwrap_or_else(|| "UNKNOWN_SCHEMA".to_owned()))
-            .bind(json_text(item, "field"))
-            .bind(json_text(item, "detail").unwrap_or_else(|| "quarantined by importer".to_owned()))
-            .bind(item.get("row").cloned().unwrap_or_else(|| item.clone()))
+            .bind(&reason)
+            .bind(field)
+            .bind(&reason)
+            .bind(json!({"content_redacted": true}))
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("insert quarantine row: {error}"))?;

@@ -70,3 +70,19 @@ fine-tuning, real model artifacts and held-out ML metrics remain explicitly
 outside this closure. The deterministic classifier/embedder and Seasonal Naive
 forecast are baselines only; the test-only fake trainer is never enabled in
 normal Compose mode.
+
+## Дополнительная проверка 2026-09-24
+
+На отдельном `pulse109-freshcheck` stack команда
+`docker compose --profile demo up --build -d` автоматически импортировала 160
+synthetic tickets; повторный seed вернул 160 duplicates и 0 новых записей.
+Forecast использовал 267 дней истории и 38 rolling backtest окон с версией
+`forecast-statsforecast-seasonal-naive-2026-09-24-001`.
+
+После миграции 008 на сохранённых volumes прошли `scripts/smoke` и
+`scripts/e2e_acceptance.py`. E2E проверил `409` при изменении содержимого уже
+зарегистрированной версии. Read-only SQL показал 160 связей demo dataset с
+обращениями и quarantine snapshot `{"content_redacted": true}`. Дополнительно
+прошли 10 Rust unit + 3 API tests, 15 data/contract tests, 6 ML tests, обе
+OpenAPI YAML схемы успешно разобраны parser-ом. Тестовые контейнеры остановлены;
+volumes оставлены без удаления.

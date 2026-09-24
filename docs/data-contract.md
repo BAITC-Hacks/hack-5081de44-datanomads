@@ -15,6 +15,10 @@ source file → source-specific parser → schema validation → normalization
 
 Ошибочные строки не удаляются молча: они помещаются в `data/quarantine/` с
 причиной и ссылкой на исходный файл/строку.
+В PostgreSQL `quarantine_rows` хранит код причины, разрешённое имя поля и
+маркер redaction. Переданный через API произвольный текст ошибки и содержимое
+строки туда не копируются. PII-safe snapshot доступен в локальном JSONL
+importer-а для разбора источника.
 
 ## UnifiedTicket
 
@@ -87,6 +91,12 @@ updated_in_pulse_at
 - распределение языков, тем, статусов и priority;
 - наличие текста, исполнителя, решения и времени закрытия;
 - PII scan и возможность собрать duplicate/repeat gold set.
+
+`dataset_versions.content_sha256` фиксирует нормализованное содержимое импорта.
+Повторная отправка той же версии с другим содержимым или manifest отклоняется
+с `409`; `dataset_ticket_links` сохраняет связь версии с обращениями даже при
+идемпотентном повторном импорте. Для версий, созданных до миграции 008, checksum
+заполняется при первом повторном импорте с совпадающим manifest.
 
 Причины quarantine стандартизируются: `BAD_CSV_STRUCTURE`, `INVALID_DATE`,
 `MISSING_REQUIRED_FIELD`, `UNKNOWN_SCHEMA`, `PII_REVIEW`. Quarantine не

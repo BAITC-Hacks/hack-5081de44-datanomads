@@ -60,7 +60,7 @@ def _parse_datetime(value: Any) -> datetime:
         try:
             parsed = datetime.fromisoformat(parsed_text)
         except ValueError as exc:
-            raise SchemaValidationError("INVALID_DATE", f"invalid created_at: {text}", "created_at") from exc
+            raise SchemaValidationError("INVALID_DATE", "invalid created_at", "created_at") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
@@ -145,12 +145,12 @@ class UnifiedTicket:
                 object.__setattr__(self, field_name, value.astimezone(timezone.utc))
         language = str(self.language or UNKNOWN).upper()
         if language not in ALLOWED_LANGUAGES:
-            raise SchemaValidationError("INVALID_VALUE", f"unsupported language: {language}", "language")
+            raise SchemaValidationError("INVALID_VALUE", "unsupported language", "language")
         object.__setattr__(self, "language", language)
         if self.priority is not None and self.priority not in ALLOWED_PRIORITIES:
-            raise SchemaValidationError("INVALID_VALUE", f"unsupported priority: {self.priority}", "priority")
+            raise SchemaValidationError("INVALID_VALUE", "unsupported priority", "priority")
         if self.status not in ALLOWED_STATUSES:
-            raise SchemaValidationError("INVALID_VALUE", f"unsupported status: {self.status}", "status")
+            raise SchemaValidationError("INVALID_VALUE", "unsupported status", "status")
         if self.text_redaction_count < 0:
             raise SchemaValidationError("INVALID_VALUE", "text_redaction_count cannot be negative")
         if self.duplicate_feedback not in {None, "CONFIRMED", "REJECTED"}:

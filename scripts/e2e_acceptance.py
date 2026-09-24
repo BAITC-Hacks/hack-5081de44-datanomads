@@ -164,6 +164,10 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     status, _, repeated = json_request(base_url, "POST", "/api/v1/import", body=import_payload, timeout=timeout)
     expect(status == 201, f"repeat import failed: {status} {repeated}")
     expect(repeated.get("imported_rows") == 0 and repeated.get("duplicate_rows") == 3 and repeated.get("indexed_rows") == 0, f"repeat import is not idempotent: {repeated}")
+    changed_payload = json.loads(json.dumps(import_payload))
+    changed_payload["tickets"][0]["original_text"] = "Изменённый текст с прежней версией набора"
+    status, _, conflict = json_request(base_url, "POST", "/api/v1/import", body=changed_payload, timeout=timeout)
+    expect(status == 409, f"dataset version accepted different content: {status} {conflict}")
 
     status, _, listed = json_request(base_url, "GET", "/api/v1/tickets?limit=100", timeout=timeout)
     expect(status == 200, f"ticket list failed: {status} {listed}")
