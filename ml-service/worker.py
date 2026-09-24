@@ -15,6 +15,8 @@ import os
 import sys
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.schemas import EvaluationRequest, TrainingRequest
 from app.services import make_services
 
@@ -35,7 +37,7 @@ def run_stdin_job(kind: str | None, payload: dict[str, Any]) -> int:
         sys.stdout.write("\n")
         return 0
     except Exception as exc:  # pragma: no cover - CLI failure path
-        json.dump({"error": str(exc)}, sys.stdout, ensure_ascii=False)
+        json.dump({"error": safe_job_error(exc)}, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
         return 1
 
@@ -95,6 +97,14 @@ async def fail_job(pool: Any, job_id: int, error: str) -> None:
             job_id,
             error[:4000],
         )
+
+
+def safe_job_error(error: Exception) -> str:
+    if isinstance(error, RuntimeError) and str(error) == "TRAINER_NOT_CONFIGURED":
+        return "TRAINER_NOT_CONFIGURED"
+    if isinstance(error, (ValidationError, json.JSONDecodeError)):
+        return "INVALID_JOB_PAYLOAD"
+    return "JOB_FAILED"
 
 
 async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict[str, Any] | None = None, error: str | None = None) -> None:
@@ -291,8 +301,9 @@ async def process_job(pool: Any, job: Any) -> None:
         if kind == "training":
             await update_learning_cycle(pool, payload, result=result)
     except Exception as exc:
-        await fail_job(pool, job_id, str(exc))
-        await update_learning_cycle(pool, payload, error=str(exc))
+        error_code = safe_job_error(exc)
+        await fail_job(pool, job_id, error_code)
+        await update_learning_cycle(pool, payload, error=error_code)
 
 
 async def run_worker() -> None:
@@ -328,7 +339,7 @@ def main() -> int:
     try:
         payload = json.load(sys.stdin)
     except Exception as exc:  # pragma: no cover - CLI failure path
-        json.dump({"error": str(exc)}, sys.stdout, ensure_ascii=False)
+        json.dump({"error": safe_job_error(exc)}, sys.stdout, ensure_ascii=False)
         sys.stdout.write("\n")
         return 1
     return run_stdin_job(args.kind, payload)

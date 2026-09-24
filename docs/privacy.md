@@ -70,6 +70,9 @@ Natural-language analytics использует optional intent parser, кото
 
 PII не отправляется внешнему LLM/API без отдельного, обоснованного и
 аудируемого разрешения. По умолчанию внешний provider отключён (`disabled`).
+ML worker сохраняет в `background_jobs.error` и заметке learning cycle только
+стабильный код ошибки. Текст ошибки валидации может содержать входной ticket
+text и поэтому не записывается в PostgreSQL или стандартный вывод worker.
 
 ## Demo и секреты
 
