@@ -49,13 +49,17 @@ PULSE_CONFIRM_RESET=1 scripts/demo-reset
 | `nginx` | 80 → host `PULSE_HTTP_PORT` | frontend/core-api |
 
 Внутренние ML endpoints не публикуются на host и не проксируются Nginx.
+Опубликованные Compose ports для Nginx, PostgreSQL и Qdrant привязаны к
+`127.0.0.1`; сервисы внутри Compose продолжают обращаться друг к другу по
+внутренней сети. Для внешнего доступа нужен отдельный доверенный ingress.
 
 ## Production checklist
 
 Перед внешним доступом необходимо:
 
 1. заменить demo password и все placeholder secrets через secret manager;
-2. ограничить `CORS_ALLOWED_ORIGINS`, host ports и network ingress;
+2. ограничить `CORS_ALLOWED_ORIGINS` и network ingress; Compose host ports уже
+   привязаны к `127.0.0.1`;
 3. включить TLS перед Nginx (или доверенный ingress) и проверить forwarded
    headers;
 4. настроить backup/restore PostgreSQL и Qdrant snapshot policy;
