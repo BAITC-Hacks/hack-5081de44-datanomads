@@ -408,8 +408,24 @@ export async function loadAnalyticsDrilldown(dimension: DrilldownDimension, valu
   return request<{ items: BackendTicket[]; total: number; limit: number; offset: number }>(`/analytics/drilldown?${params.toString()}`)
 }
 
+export interface QueryIntentResult {
+  intent: string
+  number?: number | string
+  rows?: QueryIntentRow[]
+  result?: { points?: QueryIntentRow[] }
+  source: string
+}
+
+interface QueryIntentRow {
+  period?: string
+  date?: string
+  label?: string
+  count?: number
+  tickets?: number
+}
+
 export async function runQueryIntent(text: string, filters: DashboardFilters = { range: '30d' }) {
-  return request<{ intent: string; number?: number | string; rows?: unknown[]; result?: unknown; source: string }>('/analytics/query', {
+  return request<QueryIntentResult>('/analytics/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
-import type { BackendTicket, DashboardFilters, DrilldownDimension } from './api/client'
+import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
 
 type Route =
@@ -123,7 +123,10 @@ function App() {
   }, [filters])
 
   useEffect(() => {
-    const onHashChange = () => setRoute(routeFromHash())
+    const onHashChange = () => {
+      setRoute(routeFromHash())
+      window.scrollTo(0, 0)
+    }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
@@ -188,11 +191,11 @@ function App() {
     <div className="app-shell">
       <Sidebar route={route} mobileOpen={mobileNavOpen} onNavigate={(next) => { navigate(next); setMobileNavOpen(false) }} />
       <main className="main-shell">
-        <Topbar onOpenNav={() => setMobileNavOpen(true)} />
+        <Topbar onOpenNav={() => setMobileNavOpen(true)} onOpenAlerts={() => navigate('/situation/alerts')} hasAlerts={Boolean(data?.alerts.length)} />
         {source === 'demo' && <div className="demo-banner"><span className="status-dot" /> Демо-данные · API подключится автоматически, когда backend будет доступен <span className="demo-banner-detail">{apiError ? `(${apiError})` : ''}</span></div>}
         {source === 'api' && apiError && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
         <div className="page-wrap">
-          <PageHeader {...title} route={route} onNavigate={navigate} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />
+          <PageHeader {...title} route={route} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />
           {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onRefresh={refreshDashboard} onToast={showToast} filters={filters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
         </div>
       </main>
@@ -217,11 +220,6 @@ function Sidebar({ route, mobileOpen, onNavigate }: { route: Route; mobileOpen: 
       <nav className="nav-list">
         {situationNav.map((item) => <NavItem key={item.route} item={item} active={route === item.route} onNavigate={onNavigate} />)}
       </nav>
-      <div className="sidebar-bottom">
-        <button className="sidebar-link"><Icon name="help" size={17} /><span>Помощь и правила</span></button>
-        <button className="sidebar-link"><Icon name="settings" size={17} /><span>Настройки</span></button>
-        <div className="user-card"><div className="avatar">АМ</div><div className="user-meta"><strong>Алия М.</strong><span>Оператор · Алматы</span></div><Icon name="more" size={18} /></div>
-      </div>
     </aside>
   </>
 }
@@ -230,17 +228,17 @@ function NavItem({ item, active, onNavigate }: { item: { label: string; route: R
   return <button className={`nav-item ${active ? 'nav-item-active' : ''}`} onClick={() => onNavigate(item.route)} aria-current={active ? 'page' : undefined}><Icon name={item.icon} size={17} /><span>{item.label}</span>{item.badge && <span className="nav-badge">{item.badge}</span>}</button>
 }
 
-function Topbar({ onOpenNav }: { onOpenNav: () => void }) {
+function Topbar({ onOpenNav, onOpenAlerts, hasAlerts }: { onOpenNav: () => void; onOpenAlerts: () => void; hasAlerts: boolean }) {
   return <header className="topbar">
     <button className="mobile-menu-button icon-button" aria-label="Открыть меню" onClick={onOpenNav}><span className="menu-lines" /></button>
-    <div className="topbar-search"><Icon name="search" size={17} /><input aria-label="Поиск по обращениям" placeholder="Поиск по ID, тексту или региону" /><kbd>⌘ K</kbd></div>
-    <div className="topbar-actions"><button className="icon-button" aria-label="Помощь"><Icon name="help" size={18} /></button><button className="notification-button" aria-label="Оповещения"><Icon name="bell" size={18} /><span /></button><div className="topbar-date"><span className="live-dot" />дата из API</div></div>
+    <div className="topbar-title">Pulse 109</div>
+    <button className="notification-button" aria-label="Открыть оповещения" onClick={onOpenAlerts}><Icon name="bell" size={18} />{hasAlerts && <span />}</button>
   </header>
 }
 
-function PageHeader({ eyebrow, title, description, route, onNavigate, filters, onFiltersChange, filterOptions }: { eyebrow: string; title: string; description: string; route: Route; onNavigate: (route: Route) => void; filters: DashboardFilters; onFiltersChange: (filters: DashboardFilters) => void; filterOptions?: DashboardData['filterOptions'] }) {
+function PageHeader({ eyebrow, title, description, route, filters, onFiltersChange, filterOptions }: { eyebrow: string; title: string; description: string; route: Route; filters: DashboardFilters; onFiltersChange: (filters: DashboardFilters) => void; filterOptions?: DashboardData['filterOptions'] }) {
   const situation = route !== '/operator'
-  return <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{route === '/operator' ? <button className="button button-quiet"><Icon name="download" size={16} />Экспорт очереди</button> : <div className="period-control"><div className="period-buttons">{[['7d', '7 дней'], ['30d', '30 дней'], ['90d', '90 дней']].map(([value, label]) => <button key={value} className={`period-button ${filters.range === value ? 'active' : ''}`} onClick={() => onFiltersChange({ ...filters, range: value })}>{label}</button>)}<button className="period-button icon-button" aria-label="Текущий период" title="Период задаётся в днях"><Icon name="clock" size={15} /></button></div>{situation && filterOptions && <div className="analytics-filter-selects"><label><span>Регион</span><select value={filters.regionId ?? ''} onChange={(event) => onFiltersChange({ ...filters, regionId: event.target.value || undefined })}><option value="">Все регионы</option>{filterOptions.regions.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label><label><span>Тема</span><select value={filters.topicId ?? ''} onChange={(event) => onFiltersChange({ ...filters, topicId: event.target.value || undefined })}><option value="">Все темы</option>{filterOptions.topics.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>{filterOptions.services.length > 0 && <label><span>Служба</span><select value={filters.serviceId ?? ''} onChange={(event) => onFiltersChange({ ...filters, serviceId: event.target.value || undefined })}><option value="">Все службы</option>{filterOptions.services.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.statuses.length > 0 && <label><span>Статус</span><select value={filters.status ?? ''} onChange={(event) => onFiltersChange({ ...filters, status: event.target.value || undefined })}><option value="">Все статусы</option>{filterOptions.statuses.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.districts.length > 0 && <label><span>Район</span><select value={filters.district ?? ''} onChange={(event) => onFiltersChange({ ...filters, district: event.target.value || undefined })}><option value="">Все районы</option>{filterOptions.districts.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.channels.length > 0 && <label><span>Канал</span><select value={filters.channel ?? ''} onChange={(event) => onFiltersChange({ ...filters, channel: event.target.value || undefined })}><option value="">Все каналы</option>{filterOptions.channels.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}</div>}</div>}</div>
+  return <div className="page-header"><div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{route === '/operator' ? null : <div className="period-control"><div className="period-buttons">{[['7d', '7 дней'], ['30d', '30 дней'], ['90d', '90 дней']].map(([value, label]) => <button key={value} className={`period-button ${filters.range === value ? 'active' : ''}`} onClick={() => onFiltersChange({ ...filters, range: value })}>{label}</button>)}</div>{situation && filterOptions && <div className="analytics-filter-selects"><label><span>Регион</span><select value={filters.regionId ?? ''} onChange={(event) => onFiltersChange({ ...filters, regionId: event.target.value || undefined })}><option value="">Все регионы</option>{filterOptions.regions.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label><label><span>Тема</span><select value={filters.topicId ?? ''} onChange={(event) => onFiltersChange({ ...filters, topicId: event.target.value || undefined })}><option value="">Все темы</option>{filterOptions.topics.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>{filterOptions.services.length > 0 && <label><span>Служба</span><select value={filters.serviceId ?? ''} onChange={(event) => onFiltersChange({ ...filters, serviceId: event.target.value || undefined })}><option value="">Все службы</option>{filterOptions.services.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.statuses.length > 0 && <label><span>Статус</span><select value={filters.status ?? ''} onChange={(event) => onFiltersChange({ ...filters, status: event.target.value || undefined })}><option value="">Все статусы</option>{filterOptions.statuses.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.districts.length > 0 && <label><span>Район</span><select value={filters.district ?? ''} onChange={(event) => onFiltersChange({ ...filters, district: event.target.value || undefined })}><option value="">Все районы</option>{filterOptions.districts.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}{filterOptions.channels.length > 0 && <label><span>Канал</span><select value={filters.channel ?? ''} onChange={(event) => onFiltersChange({ ...filters, channel: event.target.value || undefined })}><option value="">Все каналы</option>{filterOptions.channels.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>}</div>}</div>}</div>
 }
 
 function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onRefresh: () => Promise<void>; onToast: (message: string) => void; filters: DashboardFilters; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
@@ -253,7 +251,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
     case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
     case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onToast={onToast} onDrilldown={onDrilldown} />; break
     case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} status={data.forecastStatus} modelVersion={data.forecastModelVersion} />; break
-    case '/situation/reports': content = <CleanReportsPage reportSource={data.reportSource} filters={filters} />; break
+    case '/situation/reports': content = <CleanReportsPage filters={filters} />; break
     case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
     case '/situation/models': content = <CleanModelsPage models={data.models} />; break
   }
@@ -261,9 +259,9 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
 }
 
 function AnalyticsDrilldownPanel({ state, loading }: { state: DrilldownState; loading: boolean }) {
-  if (loading) return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2></div><p className="panel-note">Загружаем tickets из PostgreSQL…</p></section>
+  if (loading) return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2></div><p className="panel-note">Загружаем обращения…</p></section>
   if (!state) return null
-  return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2><span className="drilldown-label">{state.label} · {state.total}</span></div>{state.items.length ? <div className="drilldown-list">{state.items.map((ticket) => <article className="drilldown-ticket" key={ticket.id}><div><strong>{ticket.id}</strong><span>{ticket.region_name} · {ticket.topic_label}</span></div><p>{ticket.text}</p><small>{ticket.created_at} · {ticket.status} · {ticket.priority}</small></article>)}</div> : <p className="panel-note">За выбранный срез tickets не найдено.</p>}</section>
+  return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2><span className="drilldown-label">{state.label} · {state.total}</span></div>{state.items.length ? <div className="drilldown-list">{state.items.map((ticket) => <article className="drilldown-ticket" key={ticket.id}><div><strong>{ticket.id}</strong><span>{ticket.region_name} · {ticket.topic_label}</span></div><p>{ticket.text}</p><small>{ticket.created_at} · {ticket.status} · {ticket.priority}</small></article>)}</div> : <p className="panel-note">За выбранный период обращений не найдено.</p>}</section>
 }
 
 function LoadingState() {
@@ -297,7 +295,7 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
       const result = await submitDecision(ticketId, decision, taxonomy)
       const updated = tickets.map((item) => item.id === ticketId ? (result.ticket ?? { ...item, ...decision, priority: (decision.priority as Priority | undefined) ?? item.priority }) : item)
       onDataChange(updated)
-      onToast(result.source === 'demo' ? `Решение по ${ticketId} сохранено в демо-режиме` : `Решение по ${ticketId} перечитано из backend`)
+      onToast(result.source === 'demo' ? `Решение по ${ticketId} изменено только на этом экране` : `Решение по ${ticketId} сохранено`)
     } catch (error) {
       onToast(`Не удалось сохранить решение: ${error instanceof Error ? error.message : 'ошибка API'}`)
     }
@@ -315,10 +313,10 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
   const confirmationRate = overview.operatorDecisions ? Math.round((overview.confirmedDecisions / overview.operatorDecisions) * 100) : 0
   const decisionLatency = overview.avgDecisionMinutes && overview.avgDecisionMinutes > 0 ? `${Math.round(overview.avgDecisionMinutes)} мин` : 'нет решений'
   return <div className="operator-page">
-    <div className="operator-summary"><div className="summary-item"><span className="summary-value">{filtered.length}</span><span className="summary-label">обращений в загруженной выборке</span><span className="summary-trend">из API</span></div><div className="summary-item"><span className="summary-value">{confirmationRate}%</span><span className="summary-label">подтверждение без правок</span><span className="summary-trend">{overview.confirmedDecisions} из {overview.operatorDecisions}</span></div><div className="summary-item"><span className="summary-value">{decisionLatency}</span><span className="summary-label">среднее до решения</span><span className="summary-trend">из PostgreSQL</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">состояние API</span><span className="summary-sub">PostgreSQL · ML · Qdrant подключены</span></span></div></div>
+    <div className="operator-summary"><div className="summary-item"><span className="summary-value">{filtered.length}</span><span className="summary-label">обращений в загруженной выборке</span><span className="summary-trend">по текущим фильтрам</span></div><div className="summary-item"><span className="summary-value">{confirmationRate}%</span><span className="summary-label">подтверждение без правок</span><span className="summary-trend">{overview.confirmedDecisions} из {overview.operatorDecisions}</span></div><div className="summary-item"><span className="summary-value">{decisionLatency}</span><span className="summary-label">среднее до решения</span><span className="summary-trend">по данным решений</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">Система</span><span className="summary-sub">Рабочие данные доступны</span></span></div></div>
     <div className="workbench-grid">
       <section className="ticket-queue" aria-label="Очередь обращений">
-        <div className="section-toolbar"><div><h2>Очередь на разбор <span className="count-pill">{filtered.length}</span></h2><p>Сначала — обращения с высоким влиянием</p></div><button className="icon-button" aria-label="Настроить очередь"><Icon name="settings" size={17} /></button></div>
+        <div className="section-toolbar"><div><h2>Очередь на разбор <span className="count-pill">{filtered.length}</span></h2><p>Выберите обращение для проверки</p></div></div>
         <div className="filter-row"><div className="inline-search"><Icon name="search" size={16} /><input aria-label="Фильтр очереди" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти обращение" /></div><select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">Все статусы</option><option value="new">Новые</option><option value="reviewed">Разобранные</option></select><select aria-label="Фильтр по приоритету" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as typeof priorityFilter)}><option value="all">Все приоритеты</option><option value="Высокий">Высокий</option><option value="Средний">Средний</option><option value="Низкий">Низкий</option></select></div>
         <div className="ticket-table-wrap"><table className="ticket-table"><thead><tr><th scope="col">Обращение</th><th scope="col">Тема</th><th scope="col">Уверенность</th><th scope="col">Регион</th><th scope="col">Приоритет</th><th scope="col"><span className="sr-only">Действия</span></th></tr></thead><tbody>{filtered.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? 'selected-row' : ''} onClick={() => { setSelectedId(ticket.id); setMobileDetailOpen(true) }}><td><div className="ticket-id">{ticket.id}<span className={`channel-dot channel-${ticket.channel.replace(/[^a-zA-Z]/g, '').toLowerCase()}`} /></div><div className="ticket-preview">{ticket.originalText}</div><span className="ticket-time">{ticket.createdAt} · {ticket.language}</span></td><td><span className="topic-cell">{ticket.topic}</span><span className="status-text">{ticket.status === 'new' ? 'Нужно решение' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</span></td><td><Confidence value={ticket.confidence} compact /></td><td><span className="region-cell">{ticket.region}</span></td><td><PriorityBadge priority={ticket.priority} /></td><td><button className="row-arrow icon-button" aria-label={`Открыть ${ticket.id}`} onClick={(event) => { event.stopPropagation(); setSelectedId(ticket.id); setMobileDetailOpen(true) }}><Icon name="arrow" size={17} /></button></td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty-state"><div className="state-icon">⌕</div><h3>Ничего не найдено</h3><p>Измените запрос или сбросьте фильтры.</p><button className="button button-quiet" onClick={() => { setQuery(''); setStatusFilter('all'); setPriorityFilter('all') }}>Сбросить фильтры</button></div>}</div>
       </section>
@@ -383,7 +381,7 @@ function CleanTopicsPage({ topics, onDrilldown }: { topics: TopicMetric[]; onDri
 }
 
 function CleanTimeSeriesPage({ timeSeries, onDrilldown }: { timeSeries: DashboardData['timeSeries']; onDrilldown: DrilldownHandler }) {
-  if (!timeSeries.length) return <div className="analytics-page"><NoData message="Временной ряд пуст: API вернул 0 наблюдений за выбранный период." /></div>
+  if (!timeSeries.length) return <div className="analytics-page"><NoData message="За выбранный период нет обращений." /></div>
   return <div className="analytics-page"><section className="panel"><PanelHeading title="Временная динамика" /><div className="region-table region-table-full"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля закрытия</span></div>{timeSeries.map((point) => <button className="region-table-row region-table-row-full drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div></section></div>
 }
 
@@ -405,13 +403,13 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
 }
 
 function CleanForecastPage({ forecast, status, modelVersion }: { forecast: ForecastPoint[]; status?: string; modelVersion?: string }) {
-  if (!forecast.length) return <div className="analytics-page"><NoData message="Прогноз пуст: недостаточно истории в PostgreSQL." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Источник: PostgreSQL → ML baseline · состояние {status ?? 'unknown'} · версия {modelVersion ?? 'не указана'}</p><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
+  if (!forecast.length) return <div className="analytics-page"><NoData message="Для прогноза пока недостаточно истории обращений." /></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Расчёт по истории обращений · состояние {status ?? 'unknown'} · версия {modelVersion ?? 'не указана'}</p><div className="forecast-bars">{forecast.map((point, index) => <div className="forecast-column" key={point.label + '-' + index}><div className="forecast-bar" style={{ height: String((point.actual ?? point.forecast ?? 0) / 4) + 'px' }} /><span>{point.label}</span></div>)}</div></section></div>
 }
 
-function CleanReportsPage({ reportSource, filters }: { reportSource: string; filters: DashboardFilters }) {
+function CleanReportsPage({ filters }: { filters: DashboardFilters }) {
   const filterSummary = [filters.range, filters.regionId ?? 'все регионы', filters.topicId ?? 'все темы', filters.serviceId ?? 'все службы', filters.status ?? 'все статусы', filters.district ?? 'все районы', filters.channel ?? 'все каналы'].join(', ')
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Отчёты" /><p className="panel-note">Один ReportSlice из {reportSource}; применены фильтры {filterSummary}.</p><div className="report-actions"><a className="button button-primary" href={reportUrl('pdf', filters)}>Скачать PDF</a><a className="button button-secondary" href={reportUrl('xlsx', filters)}>Скачать XLSX</a></div></section></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Отчёты" /><p className="panel-note">В выгрузку войдут данные за {filterSummary}.</p><div className="report-actions"><a className="button button-primary" href={reportUrl('pdf', filters)}>Скачать PDF</a><a className="button button-secondary" href={reportUrl('xlsx', filters)}>Скачать XLSX</a></div></section></div>
 }
 
 function CleanLearningPage({ learning, onRefresh, onToast }: { learning: LearningCycle; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
@@ -501,35 +499,57 @@ function CleanModelsPage({ models }: { models: ModelStatus[] }) {
 
 function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: DashboardData; filters: DashboardFilters; onNavigate: (route: Route) => void; onDrilldown: DrilldownHandler }) {
   const [query, setQuery] = useState('')
-  const [queryResult, setQueryResult] = useState<string | null>(null)
+  const [queryResult, setQueryResult] = useState<QueryIntentResult | null>(null)
+  const [queryError, setQueryError] = useState<string | null>(null)
   const [queryLoading, setQueryLoading] = useState(false)
   const total = data.overview.totalTickets
   const highPriority = data.overview.highPriorityTickets
+  const queryRows = queryResult?.rows ?? queryResult?.result?.points ?? []
+  const queryTitle = queryResult ? ({
+    count: 'Количество обращений',
+    trend: 'Динамика обращений',
+    compare_regions: 'Обращения по регионам',
+    top_topics: 'Темы обращений',
+    spikes: 'Всплески обращений',
+    forecast: 'Прогноз обращений',
+  } as Record<string, string>)[queryResult.intent] ?? 'Результат запроса' : ''
   const submitQuery = async () => {
     if (!query.trim()) return
     setQueryLoading(true)
+    setQueryError(null)
     try {
       const result = await runQueryIntent(query, filters)
-      setQueryResult(`${result.intent}: ${typeof result.number === 'number' || typeof result.number === 'string' ? result.number : 'см. строки результата'} · ${result.source}`)
+      setQueryResult(result)
     } catch (error) {
-      setQueryResult(`Ошибка запроса: ${error instanceof Error ? error.message : 'API недоступен'}`)
+      setQueryResult(null)
+      setQueryError(error instanceof Error ? error.message : 'API недоступен')
     } finally {
       setQueryLoading(false)
     }
   }
   return <div className="analytics-page">
     <div className="metrics-grid">
-      <MetricCard label="Обращений в выборке" value={String(total)} change="из API" detail="загруженная выборка" tone="mint" icon="inbox" />
-      <MetricCard label="Высокий приоритет" value={String(highPriority)} change="из API" detail="по текущей выборке" tone="rose" icon="pulse" />
-      <MetricCard label="Решения оператора" value={String(data.overview.operatorDecisions)} change={`${data.overview.confirmedDecisions} подтверждено · ${data.overview.correctedDecisions} исправлено`} detail="из PostgreSQL" tone="amber" icon="clock" />
-      <MetricCard label="Аномальные сигналы" value={String(data.alerts.length)} change="из alerts" detail="текущий срез" tone="blue" icon="bell" />
+      <MetricCard label="Обращений в выборке" value={String(total)} change="текущий срез" detail="по выбранным фильтрам" tone="mint" icon="inbox" />
+      <MetricCard label="Высокий приоритет" value={String(highPriority)} change="текущий срез" detail="по выбранным фильтрам" tone="rose" icon="pulse" />
+      <MetricCard label="Решения оператора" value={String(data.overview.operatorDecisions)} change={`${data.overview.confirmedDecisions} подтверждено · ${data.overview.correctedDecisions} исправлено`} detail="по данным решений" tone="amber" icon="clock" />
+      <MetricCard label="Аномальные сигналы" value={String(data.alerts.length)} change="обнаружено системой" detail="текущий срез" tone="blue" icon="bell" />
     </div>
     <div className="analytics-grid overview-grid">
-      <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} />{data.timeSeries.length ? <div className="region-table"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля</span></div>{data.timeSeries.slice(-7).map((point) => <button className="region-table-row drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div> : <NoData message="Временной ряд пуст: PostgreSQL не вернул наблюдений." />}</section>
+      <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} />{data.timeSeries.length ? <div className="region-table"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля</span></div>{data.timeSeries.slice(-7).map((point) => <button className="region-table-row drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div> : <NoData message="За выбранный период нет обращений." />}</section>
       <section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} />{data.topics.length ? <div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value * 2.7) + '%', background: topic.color }} /></div></button>)}</div> : <NoData message="Нет данных по темам." />}</section>
       <section className="panel"><PanelHeading title="Сигналы" action="Открыть все" onClick={() => onNavigate('/situation/alerts')} />{data.alerts.length ? <div className="alert-list">{data.alerts.map((alert) => <AlertListItem alert={alert} key={alert.id} />)}</div> : <NoData message="Нет подключённых сигналов." />}</section>
-      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="К карте регионов" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} onDrilldown={onDrilldown} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
-      <section className="panel query-panel"><div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div><h3>Найдите ответ в потоке</h3><p>Ограниченные QueryIntent: количество, тренд, регионы, темы, всплески, прогноз.</p><div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Сколько обращений по регионам?" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitQuery() }} /><button aria-label="Выполнить поиск" onClick={() => void submitQuery()} disabled={queryLoading}><Icon name="arrow" size={16} /></button></div>{queryResult && <span className="query-note">{queryResult}</span>}</section>
+      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="Все регионы" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} onDrilldown={onDrilldown} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
+      <section className="panel query-panel">
+        <div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div>
+        <h3>Ответ по обращениям</h3>
+        <p>Можно спросить о количестве, динамике, регионах, темах, всплесках или прогнозе.</p>
+        <div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Сколько обращений по регионам?" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitQuery() }} /><button aria-label="Выполнить поиск" onClick={() => void submitQuery()} disabled={queryLoading}><Icon name="arrow" size={16} /></button></div>
+        {queryError && <p className="query-error" role="alert">Не удалось получить ответ: {queryError}</p>}
+        {queryResult && <div className="query-results" role="status">
+          <strong>{queryTitle}</strong>
+          {queryResult.intent === 'count' ? <p>Обращений за выбранный период: {queryResult.number ?? 0}</p> : queryRows.length ? <ul>{queryRows.slice(0, 10).map((row, index) => <li key={`${row.label ?? row.period ?? row.date ?? 'row'}-${index}`}><span>{row.label ?? row.period ?? row.date ?? `Позиция ${index + 1}`}</span><strong>{row.count ?? row.tickets ?? 0}</strong></li>)}</ul> : <p>По выбранным фильтрам результатов нет.</p>}
+        </div>}
+      </section>
     </div>
   </div>
 }
@@ -544,11 +564,6 @@ function NoData({ message }: { message: string }) {
 
 function PanelHeading({ title, action, onClick }: { title: string; action?: string; onClick?: () => void }) {
   return <div className="panel-heading"><h2>{title}</h2>{action && <button className="text-button" onClick={onClick}>{action}<Icon name="arrow" size={14} /></button>}</div>
-}
-
-function Sparkline({ large = false }: { large?: boolean }) {
-  const points = large ? '0,99 36,92 72,95 108,73 144,80 180,66 216,72 252,45 288,56 324,38 360,44 396,20 432,31 468,12 504,25 540,7' : '0,35 22,29 44,32 66,20 88,25 110,12 132,17 154,4'
-  return <svg className={`sparkline ${large ? 'sparkline-large' : ''}`} viewBox={large ? '0 0 540 115' : '0 0 154 40'} preserveAspectRatio="none" aria-label="График динамики"><defs><linearGradient id="pulse-gradient" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#8cf0c8" stopOpacity=".28" /><stop offset="1" stopColor="#8cf0c8" stopOpacity="0" /></linearGradient></defs>{large && <path d={`M ${points.replaceAll(' ', ' L ')} L 540,115 L 0,115 Z`} fill="url(#pulse-gradient)" />}<polyline points={points} fill="none" stroke="#8cf0c8" strokeWidth={large ? 2.5 : 2} strokeLinecap="round" strokeLinejoin="round" /></svg>
 }
 
 function AlertListItem({ alert }: { alert: Alert }) {
