@@ -3207,7 +3207,7 @@ async fn forecast(
         .collect();
     Ok(Json(ForecastResponse {
         source: "deterministic-demo".to_owned(),
-        model_version: "forecast-seasonal-naive-2026-09-21-001".to_owned(),
+        model_version: "forecast-statsforecast-seasonal-naive-2026-09-24-001".to_owned(),
         model: "seasonal-naive-demo".to_owned(),
         status: "OK".to_owned(),
         insufficient_history: false,

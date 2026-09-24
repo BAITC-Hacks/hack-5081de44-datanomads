@@ -1,6 +1,6 @@
 """Deterministic local ML primitives used by the Pulse 109 demo.
 
-The service deliberately has no network/model-download side effects.  These
+The service has no network/model-download side effects at runtime. These
 implementations are baselines that preserve the production API contract while
 the real, versioned artifacts are prepared from the 109 dataset.
 """
@@ -16,6 +16,9 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+import numpy as np
+from statsforecast.models import SeasonalNaive
 
 from .constants import MODEL_VERSIONS, TOPICS, TOPIC_BY_ID, Topic
 from .schemas import (
@@ -183,22 +186,28 @@ class ForecastService:
 
     @staticmethod
     def _forecast_values(values: list[float], horizon: int, season_length: int) -> list[float]:
-        if len(values) >= season_length:
-            cycle = values[-season_length:]
-        else:
-            cycle = [values[-1]]
-        return [round(max(0.0, _safe_float(cycle[index % len(cycle)])), 6) for index in range(horizon)]
+        if len(values) < season_length:
+            return [round(max(0.0, _safe_float(values[-1])), 6)] * horizon
+        predicted = SeasonalNaive(season_length=season_length).forecast(
+            y=np.asarray(values, dtype=np.float64), h=horizon
+        )["mean"]
+        return [round(max(0.0, _safe_float(float(value))), 6) for value in predicted]
 
     @staticmethod
     def _backtest(values: list[float], season_length: int) -> dict[str, float | int | None]:
         if len(values) <= season_length:
-            return {"mae": None, "wape": None, "smape": None, "sample_count": 0}
-        holdout = min(season_length, len(values) - season_length)
-        train = values[:-holdout]
-        actual = values[-holdout:]
-        predicted = ForecastService._forecast_values(train, holdout, season_length)
+            return {"mae": None, "rmse": None, "wape": None, "smape": None, "sample_count": 0, "window_count": 0}
+        actual: list[float] = []
+        predicted: list[float] = []
+        window_count = 0
+        for cutoff in range(season_length, len(values), season_length):
+            window = values[cutoff : cutoff + season_length]
+            actual.extend(window)
+            predicted.extend(ForecastService._forecast_values(values[:cutoff], len(window), season_length))
+            window_count += 1
         errors = [abs(a - p) for a, p in zip(actual, predicted)]
         mae = sum(errors) / len(errors)
+        rmse = math.sqrt(sum((a - p) ** 2 for a, p in zip(actual, predicted)) / len(errors))
         denominator = sum(abs(item) for item in actual)
         wape = sum(errors) / denominator if denominator else 0.0
         smape_terms = [
@@ -209,9 +218,11 @@ class ForecastService:
         smape = sum(smape_terms) / len(smape_terms) if smape_terms else 0.0
         return {
             "mae": round(mae, 6),
+            "rmse": round(rmse, 6),
             "wape": round(wape, 6),
             "smape": round(smape, 6),
-            "sample_count": holdout,
+            "sample_count": len(actual),
+            "window_count": window_count,
         }
 
     @staticmethod
@@ -251,6 +262,7 @@ class ForecastService:
         insufficient = len(values) < season_length
         return ForecastResponse(
             model_version=self.model_version,
+            model="seasonal_naive",
             status="INSUFFICIENT_HISTORY" if insufficient else "OK",
             insufficient_history=insufficient,
             horizon=horizon,

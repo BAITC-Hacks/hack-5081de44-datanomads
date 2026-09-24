@@ -14,7 +14,7 @@ use crate::{
     Prediction, QueryIntentRequest, ResponseTemplate, SimilarTicket, Ticket, TicketDetailResponse,
     TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ use std::env;
 const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
-const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-seasonal-naive-2026-09-21-001";
+const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
 
 pub fn default_qdrant_collection(embedder_version: &str, dimension: usize) -> String {
     if embedder_version == DEFAULT_EMBEDDER_VERSION && dimension == DEFAULT_EMBEDDING_DIMENSION {
@@ -1411,9 +1411,31 @@ impl PgRepository {
             .map_err(|error| format!("forecast history: {error}"))?;
         let mut dates = Vec::with_capacity(rows.len());
         let mut values = Vec::with_capacity(rows.len());
+        let mut next_date: Option<NaiveDate> = None;
         for row in rows {
-            dates.push(row.try_get::<String, _>("date").unwrap_or_default());
-            values.push(row.try_get::<f64, _>("value").unwrap_or(0.0));
+            let date = row
+                .try_get::<String, _>("date")
+                .map_err(|error| format!("forecast date: {error}"))?;
+            let parsed = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                .map_err(|error| format!("forecast date format: {error}"))?;
+            while next_date.is_some_and(|next| next < parsed) {
+                let missing = next_date.expect("date is present");
+                dates.push(missing.to_string());
+                values.push(0.0);
+                next_date = Some(missing + chrono::Duration::days(1));
+            }
+            dates.push(date);
+            values.push(
+                row.try_get::<f64, _>("value")
+                    .map_err(|error| format!("forecast value: {error}"))?,
+            );
+            next_date = Some(parsed + chrono::Duration::days(1));
+        }
+        while next_date.is_some_and(|next| next <= Utc::now().date_naive()) {
+            let missing = next_date.expect("date is present");
+            dates.push(missing.to_string());
+            values.push(0.0);
+            next_date = Some(missing + chrono::Duration::days(1));
         }
         if values.is_empty() {
             return Ok(ForecastResponse {
@@ -1446,10 +1468,15 @@ impl PgRepository {
             .json::<Value>()
             .await
             .map_err(|error| format!("ML forecast JSON: {error}"))?;
-        let model = payload
+        let model_version = payload
             .get("model_version")
             .and_then(Value::as_str)
-            .unwrap_or("seasonal-naive-baseline")
+            .unwrap_or(&self.forecast_model_version)
+            .to_owned();
+        let model = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("seasonal_naive")
             .to_owned();
         let status = payload
             .get("status")
@@ -1497,7 +1524,7 @@ impl PgRepository {
             .collect::<Vec<_>>();
         Ok(ForecastResponse {
             source: "postgres+ml".to_owned(),
-            model_version: model.clone(),
+            model_version,
             model,
             status,
             insufficient_history,

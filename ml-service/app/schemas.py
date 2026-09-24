@@ -169,6 +169,7 @@ class ForecastPoint(APIModel):
 
 class ForecastResponse(APIModel):
     model_version: str
+    model: Literal["seasonal_naive"]
     status: Literal["OK", "INSUFFICIENT_HISTORY"]
     insufficient_history: bool
     horizon: int

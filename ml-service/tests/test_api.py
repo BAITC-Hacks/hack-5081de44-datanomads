@@ -73,6 +73,18 @@ def test_forecast_seasonal_naive_and_short_history_state() -> None:
     assert response.json()["forecast"] == [1, 2, 3, 4, 5, 6, 7, 1, 2]
     assert response.json()["status"] == "OK"
 
+    rolling = client.post(
+        "/internal/v1/forecast",
+        json={"values": [1, 2, 3, 4, 5, 6, 7] * 3, "horizon": 7, "season_length": 7},
+    )
+    assert rolling.status_code == 200
+    assert rolling.json()["backtest"]["window_count"] == 2
+    assert rolling.json()["backtest"]["sample_count"] == 14
+    assert rolling.json()["backtest"]["mae"] == 0
+    assert rolling.json()["model"] == "seasonal_naive"
+    manifest = client.get("/internal/v1/models").json()
+    assert manifest["models"]["forecast"]["model_version"] == rolling.json()["model_version"]
+
     short = client.post("/internal/v1/forecast", json={"values": [9, 10], "horizon": 2, "season_length": 7})
     assert short.status_code == 200
     assert short.json()["status"] == "INSUFFICIENT_HISTORY"

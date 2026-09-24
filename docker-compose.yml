@@ -44,11 +44,11 @@ services:
       PULSE_ENV: ${PULSE_ENV:-demo}
       ML_HOST: 0.0.0.0
       ML_PORT: 8000
-      MODEL_DIR: ${MODEL_DIR:-/app/artifacts}
+      MODEL_DIR: ${MODEL_DIR:-/app/trained-artifacts}
       LOG_LEVEL: ${ML_LOG_LEVEL:-INFO}
       PULSE_TEST_FAKE_TRAINER: ${PULSE_TEST_FAKE_TRAINER:-false}
     volumes:
-      - ml-artifacts:/app/artifacts
+      - ml-artifacts:/app/trained-artifacts
     expose:
       - "8000"
     healthcheck:
@@ -79,11 +79,11 @@ services:
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-32}
       EMBEDDER_VERSION: ${EMBEDDER_VERSION:-embedder-demo-2026-09-21-001}
       ML_SERVICE_URL: http://ml-service:8000
-      MODEL_DIR: ${MODEL_DIR:-/app/artifacts}
+      MODEL_DIR: ${MODEL_DIR:-/app/trained-artifacts}
       LOG_LEVEL: ${ML_LOG_LEVEL:-INFO}
       PULSE_TEST_FAKE_TRAINER: ${PULSE_TEST_FAKE_TRAINER:-false}
     volumes:
-      - ml-artifacts:/app/artifacts
+      - ml-artifacts:/app/trained-artifacts
       - ./ml-service/worker.py:/app/worker.py:ro
     depends_on:
       postgres:
@@ -111,7 +111,7 @@ services:
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-32}
       EMBEDDER_VERSION: ${EMBEDDER_VERSION:-embedder-demo-2026-09-21-001}
-      FORECAST_MODEL_VERSION: ${FORECAST_MODEL_VERSION:-forecast-seasonal-naive-2026-09-21-001}
+      FORECAST_MODEL_VERSION: ${FORECAST_MODEL_VERSION:-forecast-statsforecast-seasonal-naive-2026-09-24-001}
       ML_SERVICE_URL: http://ml-service:8000
       RUST_LOG: ${RUST_LOG:-info}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}

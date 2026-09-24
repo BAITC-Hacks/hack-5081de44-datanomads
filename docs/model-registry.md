@@ -22,8 +22,10 @@ artifacts/
 └── forecast/
 ```
 
-В demo контейнерный volume `/app/artifacts` монтируется в `ml-service` и
-`ml-worker`; исходные артефакты не должны загружаться из непроверенного URL во
+Baseline manifest поставляется в image по `/app/artifacts/manifest.json`.
+Отдельный volume `/app/trained-artifacts` монтируется в `ml-service` и
+`ml-worker` для будущих immutable versions; обновление image не перекрывается
+старым содержимым volume. Артефакты не загружаются из непроверенного URL во
 время inference.
 
 ## Manifest

@@ -11,7 +11,9 @@
   17 стабильным labels (16 тем и `other`), confidence state и alternatives;
 - `POST /internal/v1/embed` — воспроизводимый локальный hashed embedding без
   загрузки внешней модели;
-- `POST /internal/v1/forecast` — seasonal-naive baseline, backtest metrics и
+- `POST /internal/v1/forecast` — StatsForecast `SeasonalNaive` baseline и
+  rolling-origin backtest (MAE/RMSE/WAPE/sMAPE, число окон и наблюдений);
+  история короче сезона помечается `INSUFFICIENT_HISTORY`;
   горизонты до 366 точек (30/60/90 поддерживаются параметром `horizon`);
 - `POST /internal/v1/anomaly` — rolling median/MAD anomaly detector;
 - `POST /internal/v1/training[/<model_type>]` — offline-only candidate metadata;

@@ -54,6 +54,8 @@ python -m pytest ml-service/tests
 Проверяются deterministic preprocessing, RU/KZ language cases, минимум 10
 классов при наличии данных, embedding dimension, forecast horizon, model
 manifest/checksum, no-PII payload и reproducible seed.
+Для forecast дополнительно проверяются weekly `SeasonalNaive`, несколько
+rolling backtest окон, MAE/RMSE и состояние короткой истории.
 
 ### API contract
 

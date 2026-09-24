@@ -59,14 +59,14 @@
       "artifact_checksum": "sha256:demo-embedder-2026-09-21-001"
     },
     "forecast": {
-      "model_version": "forecast-seasonal-naive-2026-09-21-001",
+      "model_version": "forecast-statsforecast-seasonal-naive-2026-09-24-001",
       "model_family": "seasonal_naive",
-      "base_model": "local-no-download",
+      "base_model": "statsforecast==2.1.1/SeasonalNaive",
       "dataset_version": "demo-time-series-v1",
       "created_at": "2026-09-21T00:00:00Z",
       "metrics": {
         "status": "baseline",
-        "backtest": "computed_per_request"
+        "backtest": "rolling_origin_computed_per_request"
       },
       "languages": [],
       "labels": [],
@@ -74,7 +74,7 @@
         "default_season_length": 7,
         "horizons": [30, 60, 90]
       },
-      "artifact_checksum": "sha256:demo-forecast-seasonal-naive-2026-09-21-001"
+      "artifact_checksum": "sha256:demo-forecast-statsforecast-seasonal-naive-2026-09-24-001"
     },
     "anomaly": {
       "model_version": "anomaly-robust-zscore-2026-09-21-001",

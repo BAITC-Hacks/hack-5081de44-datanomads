@@ -128,7 +128,7 @@ TOPIC_BY_ID = {topic.topic_id: topic for topic in TOPICS}
 MODEL_VERSIONS: dict[str, str] = {
     "classifier": "classifier-demo-2026-09-21-001",
     "embedder": "embedder-demo-2026-09-21-001",
-    "forecast": "forecast-seasonal-naive-2026-09-21-001",
+    "forecast": "forecast-statsforecast-seasonal-naive-2026-09-24-001",
     "anomaly": "anomaly-robust-zscore-2026-09-21-001",
 }
 

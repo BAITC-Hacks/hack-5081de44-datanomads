@@ -200,18 +200,43 @@ components:
         model_version: { type: string }
     ForecastRequest:
       type: object
-      required: [series, horizon_days, model_version]
+      description: Exactly one of values, observations, history or series must be supplied.
       properties:
-        series: { type: array, items: { type: object, additionalProperties: true }, minItems: 2 }
-        horizon_days: { type: integer, enum: [30, 60, 90] }
+        values: { type: array, items: { type: number }, minItems: 1 }
+        observations: { type: array, items: { type: number }, minItems: 1 }
+        history: { type: array, items: { $ref: '#/components/schemas/ForecastObservation' }, minItems: 1 }
+        series: { type: array, items: { $ref: '#/components/schemas/ForecastObservation' }, minItems: 1 }
+        horizon: { type: integer, minimum: 1, maximum: 366, default: 30 }
+        season_length: { type: integer, minimum: 1, maximum: 366, default: 7 }
         model_version: { type: string }
+    ForecastObservation:
+      type: object
+      required: [value]
+      properties:
+        timestamp: { type: string, nullable: true }
+        value: { type: number }
     ForecastResponse:
       type: object
-      required: [points, model_version]
+      required: [model_version, model, status, insufficient_history, horizon, season_length, forecast, points, expected_peaks, backtest]
       properties:
-        points: { type: array, items: { type: object, additionalProperties: true } }
-        expected_peaks: { type: array, items: { type: object, additionalProperties: true } }
         model_version: { type: string }
+        model: { type: string, enum: [seasonal_naive] }
+        status: { type: string, enum: [OK, INSUFFICIENT_HISTORY] }
+        insufficient_history: { type: boolean }
+        horizon: { type: integer }
+        season_length: { type: integer }
+        forecast: { type: array, items: { type: number } }
+        points: { type: array, items: { type: object, additionalProperties: true } }
+        expected_peaks: { type: array, items: { type: integer } }
+        backtest:
+          type: object
+          properties:
+            mae: { type: number, nullable: true }
+            rmse: { type: number, nullable: true }
+            wape: { type: number, nullable: true }
+            smape: { type: number, nullable: true }
+            sample_count: { type: integer }
+            window_count: { type: integer }
     AnomalyRequest:
       type: object
       required: [observations]
