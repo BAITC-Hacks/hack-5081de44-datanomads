@@ -9,6 +9,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .venv/
+.venv-sdg/
 venv/
 
 # Local runtime configuration and generated demo output
