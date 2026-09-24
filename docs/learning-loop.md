@@ -75,6 +75,11 @@ critical_regressions, sample_size, decision, created_at
 7. **Human decision**: только `ML_REVIEWER`/`ADMIN` переводит candidate в
    `PROMOTED` или `REJECTED`.
 
+Пока реальный trainer не подключён, обычный ML runtime возвращает
+`TRAINER_NOT_CONFIGURED` и не создаёт candidate. Тестовый fake trainer включается
+только через `PULSE_TEST_FAKE_TRAINER=true` для проверки state machine; его
+результат не является обученной моделью или валидной ML-метрикой.
+
 Операторское исправление никогда не вызывает serving replacement или
 автоматический retraining.
 

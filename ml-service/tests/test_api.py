@@ -102,7 +102,7 @@ def test_anomaly_flags_latest_spike() -> None:
     assert body["anomalies"][-1]["index"] == 6
 
 
-def test_training_evaluation_and_manifest() -> None:
+def test_training_evaluation_and_manifest(monkeypatch) -> None:
     training = client.post(
         "/internal/v1/training/classifier",
         json={
@@ -112,9 +112,18 @@ def test_training_evaluation_and_manifest() -> None:
         },
     )
     assert training.status_code == 200
-    assert training.json()["state"] == "COMPLETED"
+    assert training.json()["state"] == "TRAINER_NOT_CONFIGURED"
+    assert training.json()["candidate_model_version"] is None
     job_id = training.json()["job_id"]
     assert client.get(f"/internal/v1/training/{job_id}").status_code == 200
+
+    monkeypatch.setenv("PULSE_TEST_FAKE_TRAINER", "true")
+    fake_training = client.post(
+        "/internal/v1/training/classifier",
+        json={"dataset_version": "feedback-1", "samples": [{"text": "Нет воды", "label": "water_supply"}], "min_samples": 1},
+    )
+    assert fake_training.json()["state"] == "COMPLETED"
+    monkeypatch.delenv("PULSE_TEST_FAKE_TRAINER")
 
     evaluation = client.post(
         "/internal/v1/evaluation/classifier",

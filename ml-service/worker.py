@@ -25,6 +25,8 @@ def run_stdin_job(kind: str | None, payload: dict[str, Any]) -> int:
     try:
         if selected_kind == "training":
             result = trainer.train(TrainingRequest.model_validate(payload))
+            if result.state == "TRAINER_NOT_CONFIGURED":
+                raise RuntimeError(result.state)
         elif selected_kind == "evaluation":
             result = evaluator.evaluate(EvaluationRequest.model_validate(payload))
         else:
@@ -276,6 +278,8 @@ async def process_job(pool: Any, job: Any) -> None:
             kind = "training"
         if kind in {"training", "train"}:
             result = trainer.train(TrainingRequest.model_validate(payload)).model_dump(mode="json")
+            if result["state"] == "TRAINER_NOT_CONFIGURED":
+                raise RuntimeError(result["state"])
             if payload.get("candidate_model_version"):
                 result["candidate_model_version"] = str(payload["candidate_model_version"])
                 result.setdefault("manifest", {})["model_version"] = str(payload["candidate_model_version"])

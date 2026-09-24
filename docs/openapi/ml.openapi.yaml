@@ -83,15 +83,15 @@ paths:
   /internal/v1/training/classifier:
     post:
       tags: [jobs]
-      summary: Queue or execute offline classifier training
+      summary: Request offline classifier training; reports TRAINER_NOT_CONFIGURED without a trainer
       security: [{ serviceToken: [] }]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/TrainingRequest' } } }
       responses:
-        '202':
-          description: Candidate training started
-          content: { application/json: { schema: { $ref: '#/components/schemas/JobResponse' } } }
+        '200':
+          description: Training state; candidate is returned only by the test adapter until a real trainer is configured
+          content: { application/json: { schema: { $ref: '#/components/schemas/TrainingResponse' } } }
         '400': { $ref: '#/components/responses/BadRequest' }
   /internal/v1/training/embeddings:
     post:
@@ -102,9 +102,9 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/TrainingRequest' } } }
       responses:
-        '202':
-          description: Embedding job accepted
-          content: { application/json: { schema: { $ref: '#/components/schemas/JobResponse' } } }
+        '200':
+          description: Training state
+          content: { application/json: { schema: { $ref: '#/components/schemas/TrainingResponse' } } }
   /internal/v1/training/forecast:
     post:
       tags: [jobs]
@@ -114,9 +114,23 @@ paths:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/TrainingRequest' } } }
       responses:
-        '202':
-          description: Forecast job accepted
-          content: { application/json: { schema: { $ref: '#/components/schemas/JobResponse' } } }
+        '200':
+          description: Training state
+          content: { application/json: { schema: { $ref: '#/components/schemas/TrainingResponse' } } }
+  /internal/v1/training/{job_id}:
+    get:
+      tags: [jobs]
+      summary: Read the last training result held by this ML process
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Training result
+          content: { application/json: { schema: { $ref: '#/components/schemas/TrainingResponse' } } }
+        '404': { description: Training result was not found in this process }
   /internal/v1/evaluation/classifier:
     post:
       tags: [jobs]
@@ -252,19 +266,25 @@ components:
         method: { type: string }
     TrainingRequest:
       type: object
-      required: [dataset_version, requested_by]
       properties:
+        model_type: { type: string, default: classifier }
         dataset_version: { type: string }
+        samples: { type: array, items: { type: object, additionalProperties: true } }
+        min_samples: { type: integer, minimum: 0, default: 1 }
         base_model: { type: string }
-        requested_by: { type: string }
         config: { type: object, additionalProperties: true }
-    JobResponse:
+    TrainingResponse:
       type: object
-      required: [job_id, state]
+      required: [job_id, state, model_type, dataset_version, sample_count]
       properties:
         job_id: { type: string }
-        state: { type: string, enum: [queued, running, completed, failed] }
-        model_version: { type: string }
+        state: { type: string, enum: [COMPLETED, INSUFFICIENT_FEEDBACK, TRAINER_NOT_CONFIGURED, FAILED] }
+        model_type: { type: string }
+        dataset_version: { type: string }
+        candidate_model_version: { type: string, nullable: true }
+        sample_count: { type: integer }
+        metrics: { type: object, additionalProperties: true }
+        manifest: { type: object, additionalProperties: true }
     EvaluationRequest:
       type: object
       required: [model_version, evaluation_version]

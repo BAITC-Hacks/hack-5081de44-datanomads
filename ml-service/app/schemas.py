@@ -247,7 +247,7 @@ class TrainingRequest(APIModel):
 
 class TrainingResponse(APIModel):
     job_id: str
-    state: Literal["COMPLETED", "INSUFFICIENT_FEEDBACK", "FAILED"]
+    state: Literal["COMPLETED", "INSUFFICIENT_FEEDBACK", "TRAINER_NOT_CONFIGURED", "FAILED"]
     model_type: str
     dataset_version: str
     candidate_model_version: str | None = None

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import statistics
 from collections import Counter
@@ -412,6 +413,15 @@ class TrainingService:
                 dataset_version=request.dataset_version,
                 sample_count=sample_count,
                 metrics={"required_samples": request.min_samples, "reason": "insufficient_feedback"},
+            )
+        elif os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() not in {"1", "true", "yes"}:
+            response = TrainingResponse(
+                job_id=job_id,
+                state="TRAINER_NOT_CONFIGURED",
+                model_type=selected,
+                dataset_version=request.dataset_version,
+                sample_count=sample_count,
+                metrics={"reason": "trained_model_pipeline_not_configured"},
             )
         else:
             labels = sorted({sample.get_label() for sample in request.samples if sample.get_label()})
