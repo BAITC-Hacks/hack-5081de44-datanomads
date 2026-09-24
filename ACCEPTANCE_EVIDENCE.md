@@ -86,3 +86,29 @@ Forecast использовал 267 дней истории и 38 rolling backte
 прошли 10 Rust unit + 3 API tests, 15 data/contract tests, 6 ML tests, обе
 OpenAPI YAML схемы успешно разобраны parser-ом. Тестовые контейнеры остановлены;
 volumes оставлены без удаления.
+
+## Финальная повторная проверка 2026-09-24
+
+На отдельном свежем проекте `pulse109-finalcheck` команда
+`docker compose --profile demo up --build -d` подняла frontend, Core API,
+ML service/worker, PostgreSQL, Qdrant и Nginx. `demo-seed` автоматически
+импортировал 160 synthetic tickets (20 регионов, 16 тем, RU/KZ).
+
+Через public Nginx на `127.0.0.1:18185` прошли `scripts/smoke`,
+`scripts/e2e_acceptance.py` (`status=passed`, normal learning:
+`TRAINER_NOT_CONFIGURED_AND_REJECTED`) и `scripts/smoke_test.py` с проверкой
+логов (`60/60`). Проверены импорт и конфликт изменённой source record,
+PostgreSQL/Qdrant preview, решение оператора, feedback, learning state,
+analytics, alerts/SSE, forecast, PDF/XLSX и RBAC.
+
+Дополнительно прошли: 10 Rust unit + 3 API tests, 10 data tests, 7 contract
+tests, 7 ML tests, TypeScript/Vite build, deterministic fixture check и
+`docker compose --profile demo config`. В браузере проверены графики
+временного ряда и 30 точек прогноза; при ширине 390 px горизонтального
+переполнения и ошибок консоли нет. YAML Core и ML OpenAPI разобраны parser-ом;
+Core OpenAPI покрывает все 50 операций Axum, ML YAML совпадает с FastAPI.
+
+Оставшиеся внешние зависимости: реальные 109 dataset и source update contract,
+официальные routing/priority rules и утверждённые response templates,
+production identity gateway. Дообученный classifier/embedder и его held-out
+метрики отложены отдельно; обычный runtime не выдаёт фиктивный candidate.

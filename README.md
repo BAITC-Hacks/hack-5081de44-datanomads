@@ -11,15 +11,15 @@ operator feedback, аналитику, alerts, forecasts и версии мод�
 | Контур | Статус в репозитории |
 | --- | --- |
 | Compose topology, Nginx gateway и env contract | demo-контур реализован |
-| Operator Workspace / Situation Center | demo-контур реализован в `frontend/` |
+| Operator Workspace / Situation Center | demo-контур, графики и рабочие действия реализованы в `frontend/` |
 | Rust Core API | demo-контур реализован в `backend/` |
-| Python ML runtime/worker | deterministic runtime реализован в `ml-service/` |
+| Python ML runtime/worker | deterministic classifier/embedder, StatsForecast baseline и PostgreSQL worker; реальный trainer пока отключён |
 | Data importers и demo fixtures | import/quarantine и fixtures реализованы в `data/` |
-| OpenAPI и инженерные контракты | зафиксированы в `docs/` |
+| OpenAPI и инженерные контракты | Core path/method coverage проверяется контрактным тестом; ML схема экспортирована из FastAPI |
 
 Compose-контракт запускает сервисы на frontend `0.0.0.0:5174`, Core API
-`0.0.0.0:8080` и ML service `0.0.0.0:8000`. Внешний доступ идёт через Nginx
-на `PULSE_HTTP_PORT`.
+`0.0.0.0:8080` и ML service `0.0.0.0:8000` внутри Compose. Локальный доступ
+идёт через Nginx на `127.0.0.1:PULSE_HTTP_PORT`.
 
 ## Быстрый запуск demo
 
@@ -77,6 +77,8 @@ demo ticket → assist preview → AI prediction → operator confirm/correct
 Controlled Learning Loop не является online self-learning:
 `COLLECT → versioned dataset → offline TRAIN → shadow EVALUATE → human
 PROMOTE/REJECT`. Candidate не заменяет production автоматически.
+До подключения реального trainer цикл завершается явным
+`TRAINER_NOT_CONFIGURED`; тестовый candidate не используется в обычном Compose.
 
 ## Документация
 
@@ -101,6 +103,9 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
 - Seeded routing/priority mappings are `MANUAL` demo defaults, not official
   109 rules. Seeded response templates have `approved=false` and are exposed as
   `MANUAL_DEMO` until authoritative rules and copy are supplied.
+- Production identity gateway/JWT и контракт синхронизации изменённых
+  обращений внешней системы 109 не предоставлены. Demo RBAC использует
+  `PULSE_DEV_AUTH`; внешняя публикация Compose без trusted identity запрещена.
 - Forecast responses carry their own `forecast_model_version`; the embedding
   version is never used as forecast metadata.
 - Optional LLM отключён по умолчанию; аналитика обязана работать через

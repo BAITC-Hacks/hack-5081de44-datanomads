@@ -37,7 +37,7 @@ latency_ms, model_version, status, error_code, ticket_id, user_id
 | `OPERATOR` | разрешённые обращения, assist, confirm/correct, relation feedback |
 | `MANAGER` | analytics, alerts, forecast, reports |
 | `ML_REVIEWER` | candidate evaluation, learning cycles, promote/reject, model metadata |
-| `ADMIN` | управление пользователями, политика доступа и model management |
+| `ADMIN` | полный доступ к demo-контуру, импорт и model management; управление пользователями требует внешнего identity contract |
 
 Core API является единой границей auth/RBAC. Frontend не вызывает ML service
 напрямую, а ML service не принимает решения о правах пользователя.
