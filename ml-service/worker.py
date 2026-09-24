@@ -165,7 +165,7 @@ async def reindex_qdrant(pool: Any, payload: dict[str, Any]) -> dict[str, Any]:
     embedder_version = str(payload.get("embedder_version") or os.environ.get("EMBEDDER_VERSION", "baseline"))
     collection = str(payload.get("collection") or os.environ.get("QDRANT_COLLECTION", "").strip() or default_qdrant_collection(embedder_version, dimension))
     rows = await pool.fetch(
-        "SELECT id, external_ticket_id, original_text, topic_id, region_id, created_at FROM tickets WHERE original_text IS NOT NULL ORDER BY id"
+        "SELECT id, original_text, topic_id, region_id, created_at FROM tickets WHERE original_text IS NOT NULL ORDER BY id"
     )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -218,7 +218,6 @@ async def reindex_qdrant(pool: Any, payload: dict[str, Any]) -> dict[str, Any]:
                         "vector": vector,
                         "payload": {
                             "ticket_id": str(row["id"]),
-                            "external_ticket_id": str(row["external_ticket_id"]),
                             "topic_id": str(row["topic_id"] or "unknown"),
                             "region_id": str(row["region_id"] or "unknown"),
                             "created_at": row["created_at"].isoformat(),

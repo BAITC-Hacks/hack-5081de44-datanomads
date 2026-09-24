@@ -119,6 +119,10 @@ class DemoFixtureTests(unittest.TestCase):
         self.assertGreaterEqual(manifest["coverage"]["region_count"], 20)
         self.assertGreaterEqual(manifest["coverage"]["topic_count"], 10)
         self.assertEqual(set(manifest["languages"]), {"RU", "KZ"})
+        self.assertEqual(
+            set(manifest["pii_policy"]["vector_payload_fields"]),
+            {"ticket_id", "region_id", "topic_id", "created_at"},
+        )
         tickets_path = ROOT / "data" / "demo" / "tickets.jsonl"
         rows = [json.loads(line) for line in tickets_path.read_text(encoding="utf-8").splitlines() if line]
         self.assertEqual(len(rows), manifest["record_count"])

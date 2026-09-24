@@ -397,7 +397,6 @@ impl PgRepository {
         vector: &[f32],
         topic_id: &str,
         region_id: &str,
-        external_ticket_id: &str,
         created_at: &str,
     ) -> Result<(), String> {
         self.ensure_qdrant_collection().await?;
@@ -412,7 +411,6 @@ impl PgRepository {
                     "vector": vector,
                     "payload": {
                         "ticket_id": ticket_id.to_string(),
-                        "external_ticket_id": external_ticket_id,
                         "topic_id": topic_id,
                         "region_id": region_id,
                         "created_at": created_at,
@@ -754,15 +752,8 @@ impl PgRepository {
             .map_err(|error| format!("commit ticket transaction: {error}"))?;
 
         let (_, vector) = self.embed(text, request_id).await?;
-        self.qdrant_upsert(
-            ticket_id,
-            &vector,
-            &db_topic,
-            &db_region,
-            &external_id,
-            &now.to_rfc3339(),
-        )
-        .await?;
+        self.qdrant_upsert(ticket_id, &vector, &db_topic, &db_region, &now.to_rfc3339())
+            .await?;
         sqlx::query("UPDATE tickets SET embedding_ref = $2, model_versions = model_versions || $3::jsonb, updated_in_pulse_at = now() WHERE id = $1")
             .bind(ticket_id)
             .bind(format!("qdrant:{}:{ticket_id}", self.qdrant_collection))
@@ -831,7 +822,7 @@ impl PgRepository {
 
         let mut imported_rows = 0usize;
         let mut duplicate_rows = 0usize;
-        let mut index_queue: Vec<(i64, String, String, String, String, String)> = Vec::new();
+        let mut index_queue: Vec<(i64, String, String, String, String)> = Vec::new();
         for item in &request.tickets {
             let external_id = json_text(item, "external_ticket_id")
                 .ok_or_else(|| "ticket external_ticket_id is required".to_owned())?;
@@ -953,7 +944,6 @@ impl PgRepository {
             if is_new_ticket {
                 index_queue.push((
                     ticket_id,
-                    external_id,
                     region_id,
                     topic_id,
                     text,
@@ -990,17 +980,10 @@ impl PgRepository {
             .map_err(|error| format!("commit import: {error}"))?;
 
         let mut indexed_rows = 0usize;
-        for (ticket_id, external_id, region_id, topic_id, text, created_at) in index_queue {
+        for (ticket_id, region_id, topic_id, text, created_at) in index_queue {
             let (_, vector) = self.embed(&text, request_id).await?;
-            self.qdrant_upsert(
-                ticket_id,
-                &vector,
-                &topic_id,
-                &region_id,
-                &external_id,
-                &created_at,
-            )
-            .await?;
+            self.qdrant_upsert(ticket_id, &vector, &topic_id, &region_id, &created_at)
+                .await?;
             sqlx::query("UPDATE tickets SET embedding_ref = $2, model_versions = model_versions || $3::jsonb, updated_in_pulse_at = now() WHERE id = $1")
                 .bind(ticket_id)
                 .bind(format!("qdrant:{}:{ticket_id}", self.qdrant_collection))

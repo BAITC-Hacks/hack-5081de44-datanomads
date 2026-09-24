@@ -58,7 +58,7 @@
       "[ADDRESS]"
     ],
     "vector_payload_fields": [
-      "external_ticket_id",
+      "ticket_id",
       "region_id",
       "topic_id",
       "created_at"

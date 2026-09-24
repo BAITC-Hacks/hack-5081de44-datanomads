@@ -178,7 +178,7 @@ def generate(output_dir: Path) -> Mapping[str, Any]:
         "pii_policy": {
             "raw_pii_in_normalized_fixture": False,
             "text_redaction_tokens": ["[EMAIL]", "[PHONE]", "[IIN]", "[NAME]", "[ADDRESS]"],
-            "vector_payload_fields": ["external_ticket_id", "region_id", "topic_id", "created_at"],
+            "vector_payload_fields": ["ticket_id", "region_id", "topic_id", "created_at"],
         },
         "files": files,
     }
