@@ -11,6 +11,9 @@ docker compose --profile demo config
 docker compose --profile demo up --build
 ```
 
+Контейнер `demo-seed` ждёт `/readyz`, проверяет checksum synthetic fixture и
+идемпотентно загружает обращения через Core API. Его exit code должен быть 0.
+
 После запуска:
 
 ```bash
@@ -46,6 +49,7 @@ PULSE_CONFIRM_RESET=1 scripts/demo-reset
 | `core-api` | 8080 | postgres, qdrant, ml-service |
 | `frontend` | 5174 | core-api |
 | `ml-worker` | — | postgres, qdrant, ml-service; profile `demo` |
+| `demo-seed` | — | core-api; profile `demo`, exits after import |
 | `nginx` | 80 → host `PULSE_HTTP_PORT` | frontend/core-api |
 
 Внутренние ML endpoints не публикуются на host и не проксируются Nginx.

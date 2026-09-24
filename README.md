@@ -31,6 +31,9 @@ docker compose --profile demo config
 docker compose --profile demo up --build
 ```
 
+`demo-seed` автоматически сверяет checked-in synthetic fixture с manifest и
+идемпотентно импортирует её в PostgreSQL/Qdrant при запуске demo profile.
+
 В другом терминале:
 
 ```bash

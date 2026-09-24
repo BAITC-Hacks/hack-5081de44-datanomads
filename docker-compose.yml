@@ -94,6 +94,22 @@ services:
         condition: service_healthy
     networks: [pulse]
 
+  demo-seed:
+    image: python:3.12-slim
+    profiles: [demo]
+    restart: "no"
+    command: ["python", "/app/seed_demo.py"]
+    environment:
+      PULSE_ENV: ${PULSE_ENV:-demo}
+      CORE_URL: http://core-api:8080
+    volumes:
+      - ./scripts/seed_demo.py:/app/seed_demo.py:ro
+      - ./data/demo:/data/demo:ro
+      - ./data/manifests:/data/manifests:ro
+    depends_on:
+      - core-api
+    networks: [pulse]
+
   core-api:
     build:
       context: .

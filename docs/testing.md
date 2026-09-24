@@ -20,7 +20,9 @@ docker compose --profile demo logs --tail=200 core-api ml-service ml-worker ngin
 ```
 
 `docker compose ... config` — обязательная проверка разрешения путей, env и
-health dependencies. Она не запускает контейнеры.
+health dependencies. Она не запускает контейнеры. `demo-seed` после старта
+проверяет checksum fixture, загружает 160 synthetic tickets и завершается с
+кодом 0; повторный запуск должен вернуть 160 duplicates и 0 imported rows.
 
 ## Уровни
 
