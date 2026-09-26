@@ -85,6 +85,8 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
 - [`docs/architecture.md`](docs/architecture.md) — сервисные границы и потоки;
 - [`docs/data-contract.md`](docs/data-contract.md) — UnifiedTicket, import и
   quality gate;
+- [`docs/vko-109-data-audit.md`](docs/vko-109-data-audit.md) — границы
+  предоставленной реальной выгрузки Восточно-Казахстанской области;
 - [`docs/privacy.md`](docs/privacy.md) — PII, RBAC, logs и LLM boundary;
 - [`docs/model-registry.md`](docs/model-registry.md) — immutable artifacts;
 - [`docs/learning-loop.md`](docs/learning-loop.md) — lifecycle candidate model;
@@ -97,6 +99,9 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
 
 - Demo fixture — synthetic/deterministic, не реальная статистика и не замена
   полного набора данных 20 регионов.
+- Предоставленная выгрузка Восточно-Казахстанской области пригодна для проверки
+  агрегатной динамики, но не содержит отдельного текста обращения или языка;
+  подробности в `docs/vko-109-data-audit.md`.
 - Без полного dataset нельзя честно утверждать held-out качество classifier,
   embeddings, spike detector или forecast; такие метрики должны иметь
   dataset/model/evaluation versions.

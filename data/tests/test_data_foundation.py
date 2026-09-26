@@ -12,6 +12,7 @@ from data.normalization import minimize_text, scan_pii
 from data.normalization.pipeline import normalize_row
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
 from data.schemas.unified_ticket import UnifiedTicket
+from scripts.data_audit import build_report
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -153,6 +154,31 @@ class DemoFixtureTests(unittest.TestCase):
     def test_taxonomy_matches_fixture_contract(self) -> None:
         self.assertEqual(len(REGION_DEFINITIONS), 20)
         self.assertGreaterEqual(len(TOPIC_DEFINITIONS), 10)
+
+
+class DataAuditTests(unittest.TestCase):
+    def test_raw_csv_report_contains_counts_without_source_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([
+                    "application_number", "creation_date", "category", "service",
+                    "com_exp", "full_name", "region", "private@example.com",
+                ])
+                writer.writerow([
+                    "ticket-1", "01.02.2025 12:30:00", "Дороги", "Ремонт",
+                    "ФИО: Иван Иванов, нет освещения", "Иван Иванов", "Усть-Каменогорск", "secret",
+                ])
+            report = build_report(path)
+
+        self.assertEqual(report["record_count"], 1)
+        self.assertEqual(report["nonempty_by_column"]["com_exp"], 1)
+        self.assertEqual(report["by_year"], {"2025": 1})
+        self.assertEqual(report["unknown_column_count"], 1)
+        encoded = json.dumps(report, ensure_ascii=False)
+        for sensitive in ("Иван Иванов", "ФИО:", "ticket-1", "private@example.com", "secret"):
+            self.assertNotIn(sensitive, encoded)
 
 
 class MigrationTests(unittest.TestCase):

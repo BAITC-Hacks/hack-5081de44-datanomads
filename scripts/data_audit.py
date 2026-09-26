@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build a compact data-quality report from normalized UnifiedTicket JSONL."""
+"""Build a quality report from UnifiedTicket JSONL or a raw 109 CSV export."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import Counter
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -14,6 +16,13 @@ from typing import Any, Dict, Iterable, Mapping
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+AUDIT_COLUMNS = {
+    "application_number", "creation_date", "closing_date", "region", "district",
+    "street", "full_name", "applicant_number", "application_type",
+    "submittal_channel", "category", "service", "contractor", "com_exp",
+    "result", "status", "status_1", "operator",
+}
 
 
 def _rows(path: Path) -> Iterable[Mapping[str, Any]]:
@@ -32,7 +41,7 @@ def _rows(path: Path) -> Iterable[Mapping[str, Any]]:
                 yield {"_schema_error": f"line {line_number}: expected object"}
 
 
-def build_report(path: Path) -> Dict[str, Any]:
+def build_normalized_report(path: Path) -> Dict[str, Any]:
     records = list(_rows(path))
     valid = [row for row in records if "external_ticket_id" in row and "_parse_error" not in row and "_schema_error" not in row]
     created = []
@@ -61,6 +70,87 @@ def build_report(path: Path) -> Dict[str, Any]:
         "by_status": dict(sorted(Counter(str(row.get("status", "UNKNOWN")) for row in valid).items())),
     }
     return report
+
+
+def build_109_csv_report(path: Path) -> Dict[str, Any]:
+    """Count only structural properties; never serialize source field values."""
+    required = {"application_number", "creation_date", "category", "service", "com_exp"}
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        headers = reader.fieldnames or []
+        if not required.issubset(headers):
+            raise ValueError("CSV is missing required 109 export columns")
+
+        nonempty = Counter()
+        categories = Counter()
+        years = Counter()
+        seen_ids = set()
+        row_count = invalid_date_count = duplicate_id_count = malformed_row_count = 0
+        missing_id_count = long_region_value_count = 0
+        first_date = last_date = None
+        for row in reader:
+            row_count += 1
+            if None in row or any(value is None for value in row.values()):
+                malformed_row_count += 1
+                continue
+            for column in headers:
+                if column not in AUDIT_COLUMNS:
+                    continue
+                if row[column].strip():
+                    nonempty[column] += 1
+            identifier = row["application_number"].strip()
+            if identifier:
+                if identifier in seen_ids:
+                    duplicate_id_count += 1
+                seen_ids.add(identifier)
+            else:
+                missing_id_count += 1
+            try:
+                created = datetime.strptime(row["creation_date"].strip(), "%d.%m.%Y %H:%M:%S")
+            except ValueError:
+                invalid_date_count += 1
+            else:
+                first_date = created if first_date is None else min(first_date, created)
+                last_date = created if last_date is None else max(last_date, created)
+                years[str(created.year)] += 1
+            category = row["category"].strip()
+            if category:
+                categories[category] += 1
+            if "region" in row and len(row["region"].strip()) > 120:
+                long_region_value_count += 1
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "format": "raw_109_csv",
+        "sha256": digest.hexdigest(),
+        "record_count": row_count,
+        "malformed_row_count": malformed_row_count,
+        "missing_external_id_count": missing_id_count,
+        "invalid_date_count": invalid_date_count,
+        "duplicate_external_id_count": duplicate_id_count,
+        "time_range": {
+            "min": first_date.isoformat() if first_date else None,
+            "max": last_date.isoformat() if last_date else None,
+        },
+        "by_year": dict(sorted(years.items())),
+        "nonempty_by_column": {
+            column: nonempty[column] for column in headers if column in AUDIT_COLUMNS
+        },
+        "unknown_column_count": sum(column not in AUDIT_COLUMNS for column in headers),
+        "category_count": len(categories),
+        "largest_category_count": max(categories.values(), default=0),
+        "region_values_over_120_chars": long_region_value_count,
+        "has_original_text_column": "original_text" in headers,
+    }
+
+
+def build_report(path: Path) -> Dict[str, Any]:
+    if path.suffix.lower() == ".csv":
+        return build_109_csv_report(path)
+    return build_normalized_report(path)
 
 
 def main() -> int:
