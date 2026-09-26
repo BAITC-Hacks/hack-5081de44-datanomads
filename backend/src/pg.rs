@@ -8,11 +8,12 @@
 use crate::{
     Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery,
     AnalyticsResponse, AssistPreviewResponse, CloseLearningCycleRequest,
-    CreateLearningCycleRequest, DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse,
-    ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
-    LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
-    Prediction, QueryIntentRequest, ResponseTemplate, SimilarTicket, Ticket, TicketDetailResponse,
-    TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
+    ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
+    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
+    ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest, ResponseTemplate,
+    SimilarTicket, Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint,
+    Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -35,9 +36,13 @@ pub enum ImportError {
 }
 
 impl From<String> for ImportError {
-    fn from(message: String) -> Self {
-        Self::Internal(message)
+    fn from(_message: String) -> Self {
+        Self::Internal("dataset import failed".to_owned())
     }
+}
+
+fn import_row_error(row_number: usize, reason: &str, field: &str) -> ImportError {
+    ImportError::Invalid(format!("row {row_number}: {reason}: {field}"))
 }
 
 pub fn default_qdrant_collection(embedder_version: &str, dimension: usize) -> String {
@@ -66,6 +71,52 @@ pub fn default_qdrant_collection(embedder_version: &str, dimension: usize) -> St
     )
 }
 
+fn qdrant_distance_name(value: &str) -> Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cosine" => Ok("Cosine".to_owned()),
+        "dot" => Ok("Dot".to_owned()),
+        "euclid" | "euclidean" => Ok("Euclid".to_owned()),
+        _ => Err("embedding distance must be cosine, dot, or euclidean".to_owned()),
+    }
+}
+
+fn ml_distance_name(value: &str) -> Result<&'static str, String> {
+    match value {
+        "Cosine" => Ok("cosine"),
+        "Dot" => Ok("dot"),
+        "Euclid" => Ok("euclidean"),
+        _ => Err("active vector index has an unsupported distance metric".to_owned()),
+    }
+}
+
+fn qdrant_vector_config(info: &Value) -> Result<(usize, String), String> {
+    let vectors = info
+        .pointer("/result/config/params/vectors")
+        .ok_or_else(|| "Qdrant collection has no single unnamed vector config".to_owned())?;
+    let dimension = vectors
+        .get("size")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| "Qdrant collection vector dimension is unavailable".to_owned())?;
+    let distance = vectors
+        .get("distance")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Qdrant collection vector distance is unavailable".to_owned())?;
+    let distance = qdrant_distance_name(distance)?;
+    Ok((dimension, distance))
+}
+
+fn validate_qdrant_vector_config(info: &Value, expected: &VectorIndexConfig) -> Result<(), String> {
+    let (dimension, distance) = qdrant_vector_config(info)?;
+    if dimension != expected.dimension() {
+        return Err("Qdrant collection dimension does not match active embedder".to_owned());
+    }
+    if distance != expected.distance_metric {
+        return Err("Qdrant collection distance does not match active embedder".to_owned());
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct PgRepository {
     pub pool: PgPool,
@@ -73,6 +124,7 @@ pub struct PgRepository {
     pub ml_service_url: String,
     pub qdrant_collection: String,
     pub embedding_dimension: usize,
+    pub embedding_distance: String,
     pub embedder_version: String,
     pub forecast_model_version: String,
     client: Client,
@@ -112,6 +164,8 @@ struct MlAlternative {
 
 #[derive(Debug, Deserialize)]
 struct MlEmbedResponse {
+    model_version: String,
+    dimension: usize,
     #[serde(default)]
     embeddings: Vec<Vec<f32>>,
     embedding: Option<Vec<f32>>,
@@ -170,6 +224,28 @@ struct QdrantHit {
     topic_id: String,
     region_id: String,
     created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct VectorIndexConfig {
+    embedder_version: String,
+    embedding_dimension: i32,
+    distance_metric: String,
+    collection_name: String,
+    generation: i64,
+}
+
+impl VectorIndexConfig {
+    fn dimension(&self) -> usize {
+        self.embedding_dimension as usize
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MlEmbedderMetadata {
+    model_version: String,
+    dimension: Option<usize>,
+    distance_metric: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +321,9 @@ impl PgRepository {
         if !(8..=1024).contains(&embedding_dimension) {
             return Err("embedding dimension must be between 8 and 1024".to_owned());
         }
+        let embedding_distance = qdrant_distance_name(
+            &env::var("EMBEDDING_DISTANCE_METRIC").unwrap_or_else(|_| "cosine".to_owned()),
+        )?;
         let pool = PgPoolOptions::new()
             .max_connections(10)
             .min_connections(1)
@@ -256,6 +335,7 @@ impl PgRepository {
             ml_service_url: ml_service_url.into().trim_end_matches('/').to_owned(),
             qdrant_collection: qdrant_collection.into(),
             embedding_dimension,
+            embedding_distance,
             embedder_version: embedder_version.into(),
             forecast_model_version: env::var("FORECAST_MODEL_VERSION")
                 .unwrap_or_else(|_| DEFAULT_FORECAST_MODEL_VERSION.to_owned()),
@@ -270,7 +350,9 @@ impl PgRepository {
             .run(&self.pool)
             .await
             .map_err(|error| format!("apply migrations: {error}"))?;
-        self.ensure_qdrant_collection().await
+        self.initialize_vector_index_state().await?;
+        let active_index = self.active_vector_index().await?;
+        self.ensure_qdrant_collection(&active_index, true).await
     }
 
     pub async fn readiness(&self) -> Result<Value, String> {
@@ -278,6 +360,13 @@ impl PgRepository {
             .execute(&self.pool)
             .await
             .map_err(|error| format!("postgres: {error}"))?;
+        let active_index = self.active_vector_index().await?;
+        if active_index.embedder_version != self.embedder_version
+            || active_index.dimension() != self.embedding_dimension
+            || active_index.distance_metric != self.embedding_distance
+        {
+            return Err("active vector index does not match configured embedder".to_owned());
+        }
         let qdrant = self
             .client
             .get(format!("{}/readyz", self.qdrant_url))
@@ -286,6 +375,7 @@ impl PgRepository {
             .map_err(|error| format!("qdrant: {error}"))?
             .error_for_status()
             .map_err(|error| format!("qdrant: {error}"))?;
+        self.ensure_qdrant_collection(&active_index, false).await?;
         let ml = self
             .client
             .get(format!("{}/readyz", self.ml_service_url))
@@ -294,19 +384,133 @@ impl PgRepository {
             .map_err(|error| format!("ml service: {error}"))?
             .error_for_status()
             .map_err(|error| format!("ml service: {error}"))?;
+        let embedder = self
+            .client
+            .get(format!(
+                "{}/internal/v1/models/embedder",
+                self.ml_service_url
+            ))
+            .send()
+            .await
+            .map_err(|error| format!("ML embedder metadata: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("ML embedder metadata: {error}"))?
+            .json::<MlEmbedderMetadata>()
+            .await
+            .map_err(|error| format!("ML embedder metadata JSON: {error}"))?;
+        if embedder.model_version != active_index.embedder_version
+            || embedder.dimension != Some(active_index.dimension())
+            || embedder.distance_metric.as_deref()
+                != Some(ml_distance_name(&active_index.distance_metric)?)
+        {
+            return Err("ML embedder metadata does not match active vector index".to_owned());
+        }
         Ok(json!({
             "postgres": true,
             "qdrant": qdrant.status().is_success(),
             "ml_service": ml.status().is_success(),
-            "collection": self.qdrant_collection,
-            "embedding_dimension": self.embedding_dimension,
-            "embedder_version": self.embedder_version,
+            "collection": active_index.collection_name,
+            "embedding_dimension": active_index.dimension(),
+            "embedding_distance": active_index.distance_metric,
+            "embedder_version": active_index.embedder_version,
+            "index_generation": active_index.generation,
             "forecast_model_version": self.forecast_model_version,
         }))
     }
 
-    async fn ensure_qdrant_collection(&self) -> Result<(), String> {
-        let url = format!("{}/collections/{}", self.qdrant_url, self.qdrant_collection);
+    async fn initialize_vector_index_state(&self) -> Result<(), String> {
+        if self.active_vector_index_optional().await?.is_some() {
+            return Ok(());
+        }
+
+        let legacy = sqlx::query(
+            "SELECT model_versions->>'embedder' AS embedder_version, split_part(embedding_ref, ':', 2) AS collection_name FROM tickets WHERE embedding_ref LIKE 'qdrant:%' AND model_versions ? 'embedder' GROUP BY 1, 2 ORDER BY COUNT(*) DESC, 1, 2 LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("read legacy vector index lineage: {error}"))?;
+
+        let (embedder_version, embedding_dimension, distance_metric, collection_name) =
+            if let Some(legacy) = legacy {
+                let embedder_version: String = legacy
+                    .try_get("embedder_version")
+                    .map_err(|error| format!("read legacy embedder version: {error}"))?;
+                let collection_name: String = legacy
+                    .try_get("collection_name")
+                    .map_err(|error| format!("read legacy collection name: {error}"))?;
+                let info = self
+                    .client
+                    .get(format!("{}/collections/{collection_name}", self.qdrant_url))
+                    .send()
+                    .await
+                    .map_err(|error| format!("read legacy Qdrant collection: {error}"))?
+                    .error_for_status()
+                    .map_err(|error| format!("read legacy Qdrant collection: {error}"))?
+                    .json::<Value>()
+                    .await
+                    .map_err(|error| format!("legacy Qdrant collection JSON: {error}"))?;
+                let (embedding_dimension, distance_metric) = qdrant_vector_config(&info)?;
+                (
+                    embedder_version,
+                    embedding_dimension,
+                    distance_metric,
+                    collection_name,
+                )
+            } else {
+                (
+                    self.embedder_version.clone(),
+                    self.embedding_dimension,
+                    self.embedding_distance.clone(),
+                    self.qdrant_collection.clone(),
+                )
+            };
+
+        sqlx::query(
+            "INSERT INTO vector_index_state (singleton_id, embedder_version, embedding_dimension, distance_metric, collection_name) VALUES (1, $1, $2, $3, $4) ON CONFLICT (singleton_id) DO NOTHING",
+        )
+        .bind(embedder_version)
+        .bind(embedding_dimension as i32)
+        .bind(distance_metric)
+        .bind(collection_name)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("initialize vector index state: {error}"))?;
+        Ok(())
+    }
+
+    async fn active_vector_index_optional(&self) -> Result<Option<VectorIndexConfig>, String> {
+        sqlx::query_as::<_, VectorIndexConfig>(
+            "SELECT embedder_version, embedding_dimension, distance_metric, collection_name, generation FROM vector_index_state WHERE singleton_id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("read active vector index: {error}"))
+    }
+
+    async fn active_vector_index(&self) -> Result<VectorIndexConfig, String> {
+        self.active_vector_index_optional()
+            .await?
+            .ok_or_else(|| "active vector index is not configured".to_owned())
+    }
+
+    async fn locked_vector_index(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, Postgres>,
+    ) -> Result<VectorIndexConfig, String> {
+        sqlx::query_as::<_, VectorIndexConfig>(
+            "SELECT embedder_version, embedding_dimension, distance_metric, collection_name, generation FROM vector_index_state WHERE singleton_id = 1 FOR SHARE",
+        )
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| format!("lock active vector index: {error}"))
+    }
+
+    async fn ensure_qdrant_collection(
+        &self,
+        index: &VectorIndexConfig,
+        create_missing: bool,
+    ) -> Result<(), String> {
+        let url = format!("{}/collections/{}", self.qdrant_url, index.collection_name);
         let response = self
             .client
             .get(&url)
@@ -314,7 +518,11 @@ impl PgRepository {
             .await
             .map_err(|error| format!("qdrant collection check: {error}"))?;
         if response.status().is_success() {
-            return Ok(());
+            let info = response
+                .json::<Value>()
+                .await
+                .map_err(|error| format!("qdrant collection JSON: {error}"))?;
+            return validate_qdrant_vector_config(&info, index);
         }
         if response.status() != HttpStatus::NOT_FOUND {
             return Err(format!(
@@ -322,12 +530,15 @@ impl PgRepository {
                 response.status()
             ));
         }
+        if !create_missing {
+            return Err("active Qdrant collection is missing".to_owned());
+        }
         self.client
             .put(&url)
             .json(&json!({
                 "vectors": {
-                    "size": self.embedding_dimension,
-                    "distance": "Cosine"
+                    "size": index.dimension(),
+                    "distance": index.distance_metric,
                 }
             }))
             .send()
@@ -335,7 +546,18 @@ impl PgRepository {
             .map_err(|error| format!("qdrant collection create: {error}"))?
             .error_for_status()
             .map_err(|error| format!("qdrant collection create: {error}"))?;
-        Ok(())
+        let info = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| format!("qdrant collection verify: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("qdrant collection verify: {error}"))?
+            .json::<Value>()
+            .await
+            .map_err(|error| format!("qdrant collection verify JSON: {error}"))?;
+        validate_qdrant_vector_config(&info, index)
     }
 
     async fn classify(
@@ -373,15 +595,21 @@ impl PgRepository {
         })
     }
 
-    async fn embed(&self, text: &str, request_id: &str) -> Result<(String, Vec<f32>), String> {
+    async fn embed(
+        &self,
+        index: &VectorIndexConfig,
+        text: &str,
+        request_id: &str,
+    ) -> Result<Vec<f32>, String> {
         let response = self
             .client
             .post(format!("{}/internal/v1/embed", self.ml_service_url))
             .header("x-request-id", request_id)
             .json(&json!({
                 "text": text,
-                "dimension": self.embedding_dimension,
+                "dimension": index.dimension(),
                 "normalize": true,
+                "model_version": index.embedder_version,
             }))
             .send()
             .await
@@ -391,33 +619,44 @@ impl PgRepository {
             .json::<MlEmbedResponse>()
             .await
             .map_err(|error| format!("ML embed JSON: {error}"))?;
+        if response.model_version != index.embedder_version {
+            return Err("ML embed returned a different model version".to_owned());
+        }
+        if response.dimension != index.dimension() {
+            return Err(format!(
+                "ML embed returned dimension {}, expected {}",
+                response.dimension,
+                index.dimension()
+            ));
+        }
         let vector = response
             .embedding
             .or_else(|| response.embeddings.into_iter().next())
             .ok_or_else(|| "ML embed returned no vector".to_owned())?;
-        if vector.len() != self.embedding_dimension {
+        if vector.len() != index.dimension() {
             return Err(format!(
                 "ML embed returned dimension {}, expected {}",
                 vector.len(),
-                self.embedding_dimension
+                index.dimension()
             ));
         }
-        Ok((self.embedder_version.clone(), vector))
+        Ok(vector)
     }
 
     async fn qdrant_upsert(
         &self,
+        index: &VectorIndexConfig,
         ticket_id: i64,
         vector: &[f32],
         topic_id: &str,
         region_id: &str,
         created_at: &str,
     ) -> Result<(), String> {
-        self.ensure_qdrant_collection().await?;
+        self.ensure_qdrant_collection(index, false).await?;
         self.client
             .put(format!(
                 "{}/collections/{}/points?wait=true",
-                self.qdrant_url, self.qdrant_collection
+                self.qdrant_url, index.collection_name
             ))
             .json(&json!({
                 "points": [{
@@ -441,15 +680,16 @@ impl PgRepository {
 
     async fn qdrant_update_payload(
         &self,
+        index: &VectorIndexConfig,
         ticket_id: i64,
         topic_id: &str,
         region_id: &str,
     ) -> Result<(), String> {
-        self.ensure_qdrant_collection().await?;
+        self.ensure_qdrant_collection(index, false).await?;
         self.client
             .post(format!(
                 "{}/collections/{}/points/payload?wait=true",
-                self.qdrant_url, self.qdrant_collection
+                self.qdrant_url, index.collection_name
             ))
             .json(&json!({
                 "payload": {
@@ -467,12 +707,12 @@ impl PgRepository {
         Ok(())
     }
 
-    async fn qdrant_delete(&self, ticket_id: i64) -> Result<(), String> {
-        self.ensure_qdrant_collection().await?;
+    async fn qdrant_delete(&self, index: &VectorIndexConfig, ticket_id: i64) -> Result<(), String> {
+        self.ensure_qdrant_collection(index, false).await?;
         self.client
             .post(format!(
                 "{}/collections/{}/points/delete?wait=true",
-                self.qdrant_url, self.qdrant_collection
+                self.qdrant_url, index.collection_name
             ))
             .json(&json!({"points": [ticket_id]}))
             .send()
@@ -485,15 +725,16 @@ impl PgRepository {
 
     async fn qdrant_search(
         &self,
+        index: &VectorIndexConfig,
         vector: &[f32],
         exclude_id: Option<i64>,
     ) -> Result<Vec<QdrantHit>, String> {
-        self.ensure_qdrant_collection().await?;
+        self.ensure_qdrant_collection(index, false).await?;
         let result = self
             .client
             .post(format!(
                 "{}/collections/{}/points/search",
-                self.qdrant_url, self.qdrant_collection
+                self.qdrant_url, index.collection_name
             ))
             .json(&json!({
                 "vector": vector,
@@ -702,6 +943,12 @@ impl PgRepository {
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
         let now = Utc::now();
+        let mut index_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin vector index update: {error}"))?;
+        let active_index = self.locked_vector_index(&mut index_tx).await?;
         let mut tx = self
             .pool
             .begin()
@@ -773,22 +1020,59 @@ impl PgRepository {
             .await
             .map_err(|error| format!("commit ticket transaction: {error}"))?;
 
-        let (_, vector) = self.embed(text, request_id).await?;
-        self.qdrant_upsert(ticket_id, &vector, &db_topic, &db_region, &now.to_rfc3339())
-            .await?;
+        let vector = self.embed(&active_index, text, request_id).await?;
+        self.qdrant_upsert(
+            &active_index,
+            ticket_id,
+            &vector,
+            &db_topic,
+            &db_region,
+            &now.to_rfc3339(),
+        )
+        .await?;
         sqlx::query("UPDATE tickets SET embedding_ref = $2, model_versions = model_versions || $3::jsonb, updated_in_pulse_at = now() WHERE id = $1")
             .bind(ticket_id)
-            .bind(format!("qdrant:{}:{ticket_id}", self.qdrant_collection))
-            .bind(json!({"embedder": self.embedder_version}))
-            .execute(&self.pool)
+            .bind(format!("qdrant:{}:{ticket_id}", active_index.collection_name))
+            .bind(json!({"embedder": active_index.embedder_version}))
+            .execute(&mut *index_tx)
             .await
             .map_err(|error| format!("store embedding reference: {error}"))?;
+        index_tx
+            .commit()
+            .await
+            .map_err(|error| format!("commit vector index update: {error}"))?;
 
         let ticket = self.fetch_ticket_by_id(ticket_id).await?;
         Ok(TicketDetailResponse {
             ticket,
             prediction,
             latest_decision: None,
+        })
+    }
+
+    pub async fn dataset_provenance(&self) -> Result<DatasetProvenance, String> {
+        let row = sqlx::query(
+            "WITH ticket_provenance AS (SELECT dtl.ticket_id, BOOL_OR(dv.is_synthetic) AS has_synthetic, BOOL_OR(NOT dv.is_synthetic) AS has_real FROM dataset_ticket_links dtl JOIN dataset_versions dv USING (dataset_version) GROUP BY dtl.ticket_id) SELECT COUNT(*) FILTER (WHERE has_synthetic)::bigint AS synthetic_ticket_count, COUNT(*) FILTER (WHERE has_real)::bigint AS real_ticket_count, (SELECT COUNT(*) FROM tickets t LEFT JOIN ticket_provenance p ON p.ticket_id = t.id WHERE p.ticket_id IS NULL)::bigint AS unassigned_ticket_count, COALESCE((SELECT SUM(quarantine_record_count) FROM dataset_versions), 0)::bigint AS quarantined_row_count, (SELECT COUNT(*) FROM dataset_versions)::bigint AS dataset_version_count FROM ticket_provenance",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("read dataset provenance: {error}"))?;
+        Ok(DatasetProvenance {
+            synthetic_ticket_count: row
+                .try_get("synthetic_ticket_count")
+                .map_err(|error| format!("read synthetic dataset count: {error}"))?,
+            real_ticket_count: row
+                .try_get("real_ticket_count")
+                .map_err(|error| format!("read real dataset count: {error}"))?,
+            unassigned_ticket_count: row
+                .try_get("unassigned_ticket_count")
+                .map_err(|error| format!("read unassigned ticket count: {error}"))?,
+            quarantined_row_count: row
+                .try_get("quarantined_row_count")
+                .map_err(|error| format!("read quarantined row count: {error}"))?,
+            dataset_version_count: row
+                .try_get("dataset_version_count")
+                .map_err(|error| format!("read dataset version count: {error}"))?,
         })
     }
 
@@ -800,6 +1084,72 @@ impl PgRepository {
         if request.source_system.trim().is_empty() {
             return Err(ImportError::Invalid("source_system is required".to_owned()));
         }
+        let known_regions = sqlx::query_scalar::<_, String>("SELECT id FROM regions WHERE active")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("read import regions: {error}"))?;
+        for (row_index, item) in request.tickets.iter().enumerate() {
+            let row_number = row_index + 1;
+            if !item.is_object() {
+                return Err(ImportError::Invalid(format!(
+                    "row {row_number}: UNKNOWN_SCHEMA"
+                )));
+            }
+            if json_text(item, "external_ticket_id").is_none() {
+                return Err(import_row_error(
+                    row_number,
+                    "MISSING_REQUIRED_FIELD",
+                    "external_ticket_id",
+                ));
+            }
+            if json_text(item, "original_text").is_none() {
+                return Err(import_row_error(
+                    row_number,
+                    "MISSING_REQUIRED_FIELD",
+                    "original_text",
+                ));
+            }
+            let region_id = json_text(item, "region_id").ok_or_else(|| {
+                import_row_error(row_number, "MISSING_REQUIRED_FIELD", "region_id")
+            })?;
+            if !known_regions.contains(&normalize_region_id(&region_id)) {
+                return Err(import_row_error(row_number, "INVALID_VALUE", "region_id"));
+            }
+            json_datetime(item, "created_at")
+                .map_err(|_| import_row_error(row_number, "INVALID_DATE", "created_at"))?;
+            for field in ["closed_at", "deadline_at"] {
+                json_datetime_optional(item, field)
+                    .map_err(|_| import_row_error(row_number, "INVALID_DATE", field))?;
+            }
+        }
+        for (row_index, item) in request.quarantine.iter().enumerate() {
+            let row_number = row_index + 1;
+            let reason = json_text(item, "reason").unwrap_or_else(|| "UNKNOWN_SCHEMA".to_owned());
+            if !matches!(
+                reason.as_str(),
+                "BAD_CSV_STRUCTURE"
+                    | "INVALID_DATE"
+                    | "MISSING_REQUIRED_FIELD"
+                    | "UNKNOWN_SCHEMA"
+                    | "PII_REVIEW"
+                    | "INVALID_VALUE"
+            ) {
+                return Err(import_row_error(row_number, "INVALID_VALUE", "reason"));
+            }
+            if item
+                .get("row_number")
+                .and_then(Value::as_i64)
+                .is_some_and(|number| !(1..=i32::MAX as i64).contains(&number))
+            {
+                return Err(import_row_error(row_number, "INVALID_VALUE", "row_number"));
+            }
+        }
+        let mut index_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin import vector index update: {error}"))?;
+        let active_index = self.locked_vector_index(&mut index_tx).await?;
         let source_system = request.source_system.trim().to_owned();
         let dataset_version = request.dataset_version.clone().unwrap_or_else(|| {
             format!("{}-import-{}", source_system, Utc::now().timestamp_millis())
@@ -832,7 +1182,7 @@ impl PgRepository {
         .bind(&manifest_uri)
         .bind(&manifest_sha256)
         .bind(&content_sha256)
-        .bind(request.is_synthetic.unwrap_or(false))
+        .bind(request.is_synthetic)
         .bind(request.tickets.len() as i32)
         .bind(request.quarantine.len() as i32)
         .execute(&mut *tx)
@@ -869,7 +1219,7 @@ impl PgRepository {
         if registered_schema != "unified-ticket.v1"
             || registered_uri != manifest_uri
             || registered_manifest_sha256 != manifest_sha256
-            || registered_synthetic != request.is_synthetic.unwrap_or(false)
+            || registered_synthetic != request.is_synthetic
             || registered_count != request.tickets.len() as i32
             || registered_quarantine_count != request.quarantine.len() as i32
             || registered_content
@@ -904,14 +1254,18 @@ impl PgRepository {
         let mut imported_rows = 0usize;
         let mut duplicate_rows = 0usize;
         let mut index_queue: Vec<(i64, String, String, String, String)> = Vec::new();
-        for item in &request.tickets {
-            let external_id = json_text(item, "external_ticket_id")
-                .ok_or_else(|| "ticket external_ticket_id is required".to_owned())?;
-            let text = json_text(item, "original_text")
-                .ok_or_else(|| format!("ticket {external_id} original_text is required"))?;
-            let region_id = normalize_region_id(
-                &json_text(item, "region_id").unwrap_or_else(|| "KZ-ASTANA".to_owned()),
-            );
+        for (row_index, item) in request.tickets.iter().enumerate() {
+            let row_number = row_index + 1;
+            let external_id = json_text(item, "external_ticket_id").ok_or_else(|| {
+                import_row_error(row_number, "MISSING_REQUIRED_FIELD", "external_ticket_id")
+            })?;
+            let text = json_text(item, "original_text").ok_or_else(|| {
+                import_row_error(row_number, "MISSING_REQUIRED_FIELD", "original_text")
+            })?;
+            let region_id =
+                normalize_region_id(&json_text(item, "region_id").ok_or_else(|| {
+                    import_row_error(row_number, "MISSING_REQUIRED_FIELD", "region_id")
+                })?);
             let language =
                 normalize_language(json_text(item, "language").as_deref().unwrap_or("UNKNOWN"));
             let classification = self.classify(&text, Some(&language), request_id).await?;
@@ -929,7 +1283,8 @@ impl PgRepository {
                     json_text(item, "priority").as_deref(),
                 )
                 .await?;
-            let created_at = json_datetime(item, "created_at")?;
+            let created_at = json_datetime(item, "created_at")
+                .map_err(|_| import_row_error(row_number, "INVALID_DATE", "created_at"))?;
             let status =
                 normalize_status(json_text(item, "status").as_deref().unwrap_or("UNKNOWN"));
             let inserted_id: Option<i64> = sqlx::query_scalar(
@@ -963,8 +1318,14 @@ impl PgRepository {
             .bind(json_text(item, "address"))
             .bind(json_text(item, "object"))
             .bind(json_text(item, "channel"))
-            .bind(json_datetime_optional(item, "closed_at")?)
-            .bind(json_datetime_optional(item, "deadline_at")?)
+            .bind(
+                json_datetime_optional(item, "closed_at")
+                    .map_err(|_| import_row_error(row_number, "INVALID_DATE", "closed_at"))?,
+            )
+            .bind(
+                json_datetime_optional(item, "deadline_at")
+                    .map_err(|_| import_row_error(row_number, "INVALID_DATE", "deadline_at"))?,
+            )
             .bind(json_text(item, "resolution_text"))
             .bind(json_text(item, "official_response"))
             .bind(json!({
@@ -1104,18 +1465,29 @@ impl PgRepository {
 
         let mut indexed_rows = 0usize;
         for (ticket_id, region_id, topic_id, text, created_at) in index_queue {
-            let (_, vector) = self.embed(&text, request_id).await?;
-            self.qdrant_upsert(ticket_id, &vector, &topic_id, &region_id, &created_at)
-                .await?;
+            let vector = self.embed(&active_index, &text, request_id).await?;
+            self.qdrant_upsert(
+                &active_index,
+                ticket_id,
+                &vector,
+                &topic_id,
+                &region_id,
+                &created_at,
+            )
+            .await?;
             sqlx::query("UPDATE tickets SET embedding_ref = $2, model_versions = model_versions || $3::jsonb, updated_in_pulse_at = now() WHERE id = $1")
                 .bind(ticket_id)
-                .bind(format!("qdrant:{}:{ticket_id}", self.qdrant_collection))
-                .bind(json!({"embedder": self.embedder_version}))
-                .execute(&self.pool)
+                .bind(format!("qdrant:{}:{ticket_id}", active_index.collection_name))
+                .bind(json!({"embedder": active_index.embedder_version}))
+                .execute(&mut *index_tx)
                 .await
                 .map_err(|error| format!("store imported embedding reference: {error}"))?;
             indexed_rows += 1;
         }
+        index_tx
+            .commit()
+            .await
+            .map_err(|error| format!("commit imported vector index update: {error}"))?;
         Ok(ImportResponse {
             import_run_id: import_run_id.to_string(),
             source_system,
@@ -1125,6 +1497,7 @@ impl PgRepository {
             duplicate_rows,
             quarantined_rows: request.quarantine.len(),
             indexed_rows,
+            is_synthetic: request.is_synthetic,
             source: "postgres+ml+qdrant".to_owned(),
         })
     }
@@ -1132,8 +1505,9 @@ impl PgRepository {
     pub async fn queue_reindex(&self) -> Result<Value, String> {
         let payload = json!({
             "kind": "reindex_qdrant",
-            "collection": self.qdrant_collection,
+            "collection_base": self.qdrant_collection,
             "embedding_dimension": self.embedding_dimension,
+            "distance_metric": self.embedding_distance,
             "embedder_version": self.embedder_version,
         });
         let job_id: i64 = sqlx::query_scalar(
@@ -1148,6 +1522,9 @@ impl PgRepository {
             "job_type": "REINDEX_QDRANT",
             "state": "QUEUED",
             "collection": self.qdrant_collection,
+            "target_collection_base": self.qdrant_collection,
+            "embedding_dimension": self.embedding_dimension,
+            "distance_metric": self.embedding_distance,
             "embedder_version": self.embedder_version,
             "source": "postgres+qdrant+worker",
         }))
@@ -1159,17 +1536,27 @@ impl PgRepository {
             .id
             .parse::<i64>()
             .map_err(|_| "stored ticket has invalid database id".to_owned())?;
-        self.qdrant_delete(numeric_id).await?;
+        let mut index_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin vector deletion: {error}"))?;
+        let active_index = self.locked_vector_index(&mut index_tx).await?;
+        self.qdrant_delete(&active_index, numeric_id).await?;
         sqlx::query(
             "UPDATE tickets SET embedding_ref = NULL, updated_in_pulse_at = now() WHERE id = $1",
         )
         .bind(numeric_id)
-        .execute(&self.pool)
+        .execute(&mut *index_tx)
         .await
         .map_err(|error| format!("clear embedding reference: {error}"))?;
+        index_tx
+            .commit()
+            .await
+            .map_err(|error| format!("commit vector deletion: {error}"))?;
         Ok(json!({
             "ticket_id": ticket.id,
-            "collection": self.qdrant_collection,
+            "collection": active_index.collection_name,
             "state": "DELETED",
             "source": "postgres+qdrant",
         }))
@@ -2628,8 +3015,20 @@ impl PgRepository {
                 };
                 (ticket, "ml+qdrant".to_owned(), None, Some(prediction), None)
             };
-        let (_, vector) = self.embed(&ticket.text, request_id).await?;
-        let hits = self.qdrant_search(&vector, exclude_id).await?;
+        let mut index_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin similarity index read: {error}"))?;
+        let active_index = self.locked_vector_index(&mut index_tx).await?;
+        let vector = self.embed(&active_index, &ticket.text, request_id).await?;
+        let hits = self
+            .qdrant_search(&active_index, &vector, exclude_id)
+            .await?;
+        index_tx
+            .commit()
+            .await
+            .map_err(|error| format!("finish similarity index read: {error}"))?;
         let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
             .ok()
             .map(|value| value.with_timezone(&Utc));
@@ -2787,6 +3186,12 @@ impl PgRepository {
         } else {
             "CONFIRMED"
         };
+        let mut index_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin Qdrant payload update: {error}"))?;
+        let active_index = self.locked_vector_index(&mut index_tx).await?;
         let mut tx = self
             .pool
             .begin()
@@ -2849,12 +3254,21 @@ impl PgRepository {
         // Operator corrections change the deterministic retrieval metadata.
         // Keep the vector itself stable, but update its Qdrant payload so the
         // next similarity decision sees the confirmed topic and region.
+        let numeric_ticket_id = ticket
+            .id
+            .parse::<i64>()
+            .map_err(|_| "invalid database ticket id".to_owned())?;
         self.qdrant_update_payload(
-            ticket.id.parse::<i64>().unwrap_or_default(),
+            &active_index,
+            numeric_ticket_id,
             &confirmed_topic,
             &ticket.region_id,
         )
         .await?;
+        index_tx
+            .commit()
+            .await
+            .map_err(|error| format!("commit Qdrant payload update: {error}"))?;
         let decision = OperatorDecision {
             id: format!("decision-{decision_id}"),
             ticket_id: ticket.id.clone(),
@@ -3386,3 +3800,63 @@ impl From<DbTicket> for Ticket {
 
 #[allow(dead_code)]
 fn _topic_contract_is_kept_for_docs(_topic: &Topic) {}
+
+#[cfg(test)]
+mod vector_index_tests {
+    use super::*;
+
+    #[test]
+    fn qdrant_config_matches_expected_dimension_and_distance() {
+        let info = json!({
+            "result": {
+                "config": {
+                    "params": {
+                        "vectors": {"size": 768, "distance": "Cosine"}
+                    }
+                }
+            }
+        });
+        let index = VectorIndexConfig {
+            embedder_version: "embedder-v2".to_owned(),
+            embedding_dimension: 768,
+            distance_metric: "Cosine".to_owned(),
+            collection_name: "pulse109_embedder_v2_d768".to_owned(),
+            generation: 2,
+        };
+
+        assert!(validate_qdrant_vector_config(&info, &index).is_ok());
+    }
+
+    #[test]
+    fn qdrant_config_rejects_a_mismatched_dimension() {
+        let info = json!({
+            "result": {
+                "config": {
+                    "params": {
+                        "vectors": {"size": 32, "distance": "Cosine"}
+                    }
+                }
+            }
+        });
+        let index = VectorIndexConfig {
+            embedder_version: "embedder-v2".to_owned(),
+            embedding_dimension: 768,
+            distance_metric: "Cosine".to_owned(),
+            collection_name: "pulse109_embedder_v2_d768".to_owned(),
+            generation: 2,
+        };
+
+        assert!(validate_qdrant_vector_config(&info, &index).is_err());
+    }
+
+    #[test]
+    fn row_diagnostic_does_not_include_rejected_content() {
+        let ImportError::Invalid(diagnostic) = import_row_error(4, "INVALID_VALUE", "region_id")
+        else {
+            panic!("row validation should produce an invalid import error");
+        };
+
+        assert_eq!(diagnostic, "row 4: INVALID_VALUE: region_id");
+        assert!(!diagnostic.contains("sensitive-ticket-text"));
+    }
+}

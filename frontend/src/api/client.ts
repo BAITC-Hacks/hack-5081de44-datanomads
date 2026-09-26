@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { Alert, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -229,7 +229,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   const analyticsQuery = queryString(filters)
   const forecastQuery = new URLSearchParams({ horizon: '30', ...(filters.regionId ? { region_id: filters.regionId } : {}), ...(filters.topicId ? { topic_id: filters.topicId } : {}), ...(filters.serviceId ? { service_id: filters.serviceId } : {}), ...(filters.status ? { status: filters.status } : {}), ...(filters.district ? { district: filters.district } : {}), ...(filters.channel ? { channel: filters.channel } : {}) }).toString()
   const alertsQuery = filters.regionId ? `?region_id=${encodeURIComponent(filters.regionId)}` : ''
-  const [ticketResponse, analytics, forecast, alertsResponse, learning, models, taxonomy] = await Promise.all([
+  const [ticketResponse, analytics, forecast, alertsResponse, learning, models, taxonomy, datasetProvenance] = await Promise.all([
     request<{ items: BackendTicket[] }>('/tickets?limit=50'),
     request<BackendAnalytics>(`/analytics?${analyticsQuery}`),
     request<BackendForecast>(`/forecast?${forecastQuery}`),
@@ -237,6 +237,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     request<BackendLearning>('/learning'),
     request<BackendModels>('/models'),
     request<BackendTaxonomy>('/taxonomy'),
+    request<DatasetProvenance>('/datasets/provenance'),
   ])
   const detailResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticket.id)}`)))
   const previewResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendAssistPreview>('/assist/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket_id: ticket.id }) })))
@@ -282,6 +283,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     reportSource: 'postgres',
     forecastStatus: forecast.status,
     forecastModelVersion: forecast.model_version,
+    datasetProvenance,
     filterOptions: {
       regions: taxonomy.regions ?? analytics.by_region.map((region) => ({ id: region.id, label: region.label })),
       topics: taxonomy.topics ?? [],

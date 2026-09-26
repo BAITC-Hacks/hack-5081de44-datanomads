@@ -136,29 +136,6 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
     )
 
 
-async def _qdrant_existing_ids(client: Any, qdrant_url: str, collection: str) -> list[int]:
-    """Read all point ids so a reindex can remove stale vectors safely."""
-
-    point_ids: list[int] = []
-    offset: Any | None = None
-    while True:
-        body: dict[str, Any] = {"limit": 1000, "with_payload": False, "with_vector": False}
-        if offset is not None:
-            body["offset"] = offset
-        response = await client.post(f"{qdrant_url}/collections/{collection}/points/scroll", json=body)
-        response.raise_for_status()
-        result = response.json().get("result") or {}
-        for point in result.get("points") or []:
-            value = point.get("id")
-            try:
-                point_ids.append(int(value))
-            except (TypeError, ValueError):
-                continue
-        offset = result.get("next_page_offset")
-        if offset is None:
-            return point_ids
-
-
 def default_qdrant_collection(embedder_version: str, dimension: int) -> str:
     if embedder_version == "embedder-demo-2026-09-21-001" and dimension == 32:
         return "pulse109_tickets_v1"
@@ -166,8 +143,120 @@ def default_qdrant_collection(embedder_version: str, dimension: int) -> str:
     return f"pulse109_{suffix or 'embedder'}_d{dimension}"
 
 
-async def reindex_qdrant(pool: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    """Rebuild the configured Qdrant collection from PostgreSQL source rows."""
+def qdrant_distance_name(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "cosine":
+        return "Cosine"
+    if normalized == "dot":
+        return "Dot"
+    if normalized in {"euclid", "euclidean"}:
+        return "Euclid"
+    raise ValueError("unsupported vector distance metric")
+
+
+def ml_distance_name(value: str) -> str:
+    return {
+        "Cosine": "cosine",
+        "Dot": "dot",
+        "Euclid": "euclidean",
+    }[qdrant_distance_name(value)]
+
+
+def staging_collection_name(collection_base: str, job_id: int) -> str:
+    slug = "".join(
+        character.lower() if character.isalnum() else "_"
+        for character in collection_base
+    ).strip("_")[:32]
+    prefix = "" if slug.startswith("pulse109_") else "pulse109_"
+    return f"{prefix}{slug or 'embedder'}_job_{job_id}"
+
+
+async def qdrant_vector_config(client: Any, qdrant_url: str, collection: str) -> tuple[int, str]:
+    response = await client.get(f"{qdrant_url}/collections/{collection}")
+    response.raise_for_status()
+    vectors = response.json().get("result", {}).get("config", {}).get("params", {}).get("vectors")
+    if not isinstance(vectors, dict) or "size" not in vectors or "distance" not in vectors:
+        raise RuntimeError("Qdrant collection does not have a single unnamed vector")
+    return int(vectors["size"]), qdrant_distance_name(str(vectors["distance"]))
+
+
+async def create_staging_collection(
+    client: Any,
+    qdrant_url: str,
+    collection: str,
+    dimension: int,
+    distance_metric: str,
+) -> None:
+    check = await client.get(f"{qdrant_url}/collections/{collection}")
+    if check.status_code == 200:
+        raise RuntimeError("Qdrant staging collection already exists")
+    if check.status_code != 404:
+        check.raise_for_status()
+    create = await client.put(
+        f"{qdrant_url}/collections/{collection}",
+        json={"vectors": {"size": dimension, "distance": distance_metric}},
+    )
+    create.raise_for_status()
+    actual_dimension, actual_distance = await qdrant_vector_config(client, qdrant_url, collection)
+    if actual_dimension != dimension or actual_distance != distance_metric:
+        raise RuntimeError("Qdrant staging collection config does not match embedder")
+
+
+async def index_rows(
+    client: Any,
+    qdrant_url: str,
+    ml_service_url: str,
+    collection: str,
+    dimension: int,
+    embedder_version: str,
+    rows: list[Any],
+) -> int:
+    if not rows:
+        return 0
+    embedding_response = await client.post(
+        f"{ml_service_url}/internal/v1/embed",
+        json={
+            "texts": [str(row["original_text"]) for row in rows],
+            "dimension": dimension,
+            "normalize": True,
+            "model_version": embedder_version,
+        },
+    )
+    embedding_response.raise_for_status()
+    result = embedding_response.json()
+    if result.get("model_version") != embedder_version:
+        raise RuntimeError("ML reindex returned a different model version")
+    if result.get("dimension") != dimension:
+        raise RuntimeError("ML reindex returned a different embedding dimension")
+    embeddings = result.get("embeddings") or []
+    if len(embeddings) != len(rows):
+        raise RuntimeError("ML reindex returned a different embedding count")
+    points = []
+    for row, vector in zip(rows, embeddings):
+        if len(vector) != dimension:
+            raise RuntimeError("ML reindex returned an invalid embedding dimension")
+        points.append(
+            {
+                "id": int(row["id"]),
+                "vector": vector,
+                "payload": {
+                    "ticket_id": str(row["id"]),
+                    "topic_id": str(row["topic_id"] or "unknown"),
+                    "region_id": str(row["region_id"] or "unknown"),
+                    "created_at": row["created_at"].isoformat(),
+                },
+            }
+        )
+    upsert = await client.put(
+        f"{qdrant_url}/collections/{collection}/points?wait=true",
+        json={"points": points},
+    )
+    upsert.raise_for_status()
+    return len(points)
+
+
+async def reindex_qdrant(pool: Any, payload: dict[str, Any], job_id: int) -> dict[str, Any]:
+    """Build a versioned collection, then switch PostgreSQL lineage atomically."""
 
     import httpx
 
@@ -175,89 +264,115 @@ async def reindex_qdrant(pool: Any, payload: dict[str, Any]) -> dict[str, Any]:
     ml_service_url = os.environ.get("ML_SERVICE_URL", "http://ml-service:8000").rstrip("/")
     dimension = int(payload.get("embedding_dimension") or os.environ.get("EMBEDDING_DIMENSION", "32"))
     embedder_version = str(payload.get("embedder_version") or os.environ.get("EMBEDDER_VERSION", "baseline"))
-    collection = str(payload.get("collection") or os.environ.get("QDRANT_COLLECTION", "").strip() or default_qdrant_collection(embedder_version, dimension))
-    rows = await pool.fetch(
-        "SELECT id, original_text, topic_id, region_id, created_at FROM tickets WHERE original_text IS NOT NULL ORDER BY id"
+    collection_base = str(
+        payload.get("collection_base")
+        or payload.get("collection")
+        or os.environ.get("QDRANT_COLLECTION", "").strip()
+        or default_qdrant_collection(embedder_version, dimension)
     )
+    distance_metric = qdrant_distance_name(
+        str(payload.get("distance_metric") or os.environ.get("EMBEDDING_DISTANCE_METRIC", "cosine"))
+    )
+    if not 8 <= dimension <= 1024 or not embedder_version.strip():
+        raise ValueError("invalid target embedder configuration")
+    collection = staging_collection_name(collection_base, job_id)
+    max_ticket_id = int(await pool.fetchval("SELECT COALESCE(MAX(id), 0) FROM tickets"))
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        collection_response = await client.get(f"{qdrant_url}/collections/{collection}")
-        if collection_response.status_code == 404:
-            create_response = await client.put(
-                f"{qdrant_url}/collections/{collection}",
-                json={"vectors": {"size": dimension, "distance": "Cosine"}},
-            )
-            create_response.raise_for_status()
-        else:
-            collection_response.raise_for_status()
-
-        existing_ids = await _qdrant_existing_ids(client, qdrant_url, collection)
-        deleted_points = 0
-        for start in range(0, len(existing_ids), 500):
-            chunk = existing_ids[start : start + 500]
-            if not chunk:
-                continue
-            response = await client.post(
-                f"{qdrant_url}/collections/{collection}/points/delete?wait=true",
-                json={"points": chunk},
-            )
-            response.raise_for_status()
-            deleted_points += len(chunk)
+        metadata_response = await client.get(
+            f"{ml_service_url}/internal/v1/models/embedder"
+        )
+        metadata_response.raise_for_status()
+        metadata = metadata_response.json()
+        if (
+            metadata.get("model_version") != embedder_version
+            or metadata.get("dimension") != dimension
+            or metadata.get("distance_metric") != ml_distance_name(distance_metric)
+        ):
+            raise RuntimeError("ML embedder metadata does not match reindex target")
 
         indexed_rows = 0
-        for start in range(0, len(rows), 32):
-            batch = rows[start : start + 32]
-            embedding_response = await client.post(
-                f"{ml_service_url}/internal/v1/embed",
-                json={
-                    "texts": [str(row["original_text"]) for row in batch],
-                    "dimension": dimension,
-                    "normalize": True,
-                    "model_version": embedder_version,
-                },
+        cursor = 0
+        while True:
+            batch = await pool.fetch(
+                "SELECT id, original_text, topic_id, region_id, created_at FROM tickets WHERE original_text IS NOT NULL AND id > $1 AND id <= $2 ORDER BY id LIMIT 32",
+                cursor,
+                max_ticket_id,
             )
-            embedding_response.raise_for_status()
-            embeddings = embedding_response.json().get("embeddings") or []
-            if len(embeddings) != len(batch):
-                raise RuntimeError("ML reindex returned a different embedding count")
-            points = []
-            for row, vector in zip(batch, embeddings):
-                if len(vector) != dimension:
-                    raise RuntimeError(f"ML reindex returned dimension {len(vector)}, expected {dimension}")
-                points.append(
-                    {
-                        "id": int(row["id"]),
-                        "vector": vector,
-                        "payload": {
-                            "ticket_id": str(row["id"]),
-                            "topic_id": str(row["topic_id"] or "unknown"),
-                            "region_id": str(row["region_id"] or "unknown"),
-                            "created_at": row["created_at"].isoformat(),
-                        },
-                    }
+            if not batch:
+                break
+            cursor = int(batch[-1]["id"])
+            if indexed_rows == 0:
+                await create_staging_collection(
+                    client, qdrant_url, collection, dimension, distance_metric
                 )
-            upsert_response = await client.put(
-                f"{qdrant_url}/collections/{collection}/points?wait=true",
-                json={"points": points},
+            indexed_rows += await index_rows(
+                client,
+                qdrant_url,
+                ml_service_url,
+                collection,
+                dimension,
+                embedder_version,
+                list(batch),
             )
-            upsert_response.raise_for_status()
-            await pool.executemany(
-                "UPDATE tickets SET embedding_ref = $2, model_versions = model_versions || $3::jsonb, updated_in_pulse_at = now() WHERE id = $1",
-                [
-                    (
-                        int(row["id"]),
-                        f"qdrant:{collection}:{int(row['id'])}",
-                        json.dumps({"embedder": embedder_version}),
+
+        if indexed_rows == 0:
+            await create_staging_collection(
+                client, qdrant_url, collection, dimension, distance_metric
+            )
+
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                active = await connection.fetchrow(
+                    "SELECT embedder_version, embedding_dimension, distance_metric, collection_name, generation FROM vector_index_state WHERE singleton_id = 1 FOR UPDATE"
+                )
+                if active is None:
+                    raise RuntimeError("active vector index is not configured")
+                last_id = max_ticket_id
+                while True:
+                    tail = await connection.fetch(
+                        "SELECT id, original_text, topic_id, region_id, created_at FROM tickets WHERE original_text IS NOT NULL AND id > $1 ORDER BY id LIMIT 32",
+                        last_id,
                     )
-                    for row in batch
-                ],
-            )
-            indexed_rows += len(batch)
+                    if not tail:
+                        break
+                    last_id = int(tail[-1]["id"])
+                    indexed_rows += await index_rows(
+                        client,
+                        qdrant_url,
+                        ml_service_url,
+                        collection,
+                        dimension,
+                        embedder_version,
+                        list(tail),
+                    )
+                expected_rows = int(
+                    await connection.fetchval(
+                        "SELECT COUNT(*) FROM tickets WHERE original_text IS NOT NULL"
+                    )
+                )
+                if expected_rows != indexed_rows:
+                    raise RuntimeError("ticket count changed during vector reindex")
+                previous_collection = str(active["collection_name"])
+                await connection.execute(
+                    "UPDATE tickets SET embedding_ref = 'qdrant:' || $1 || ':' || id::text, model_versions = jsonb_set(model_versions, '{embedder}', to_jsonb($2::text), true), updated_in_pulse_at = now() WHERE original_text IS NOT NULL",
+                    collection,
+                    embedder_version,
+                )
+                await connection.execute(
+                    "UPDATE vector_index_state SET embedder_version = $1, embedding_dimension = $2, distance_metric = $3, collection_name = $4, generation = generation + 1, updated_at = now() WHERE singleton_id = 1",
+                    embedder_version,
+                    dimension,
+                    distance_metric,
+                    collection,
+                )
 
     return {
         "collection": collection,
+        "previous_collection": previous_collection,
         "embedder_version": embedder_version,
-        "deleted_points": deleted_points,
+        "embedding_dimension": dimension,
+        "distance_metric": distance_metric,
         "indexed_rows": indexed_rows,
         "source": "postgres+ml+qdrant",
     }
@@ -273,7 +388,7 @@ async def process_job(pool: Any, job: Any) -> None:
         payload = dict(raw_payload)
         _, _, _, _, _, trainer, evaluator = make_services()
         if kind == "reindex_qdrant":
-            result = await reindex_qdrant(pool, payload)
+            result = await reindex_qdrant(pool, payload, job_id)
             await complete_job(pool, job_id, result)
             return
         if kind == "train_classifier":

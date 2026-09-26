@@ -13,6 +13,7 @@
     "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
     "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
     "/api/v1/import": { "post": { "summary": "Import validated tickets into PostgreSQL and Qdrant" } },
+    "/api/v1/datasets/provenance": { "get": { "summary": "Read synthetic, real and unassigned dataset counts" } },
     "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Confirm duplicate/repeat relation" } },
     "/api/v1/assist/preview": { "post": { "summary": "Assist preview" } },
     "/api/v1/analytics/overview": { "get": { "summary": "Analytics overview" } },

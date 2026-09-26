@@ -2,7 +2,7 @@ use axum::{
     body::{to_bytes, Body},
     http::Request,
 };
-use pulse109_core::{app, AppState};
+use pulse109_core::{app, AppState, ImportRequest};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
@@ -32,6 +32,34 @@ async fn demo_api_supports_preview_and_manager_analytics() {
         .await
         .unwrap();
     assert_eq!(analytics.status(), 200);
+}
+
+#[tokio::test]
+async fn dataset_provenance_marks_demo_records_as_synthetic() {
+    let response = app(AppState::demo())
+        .oneshot(
+            Request::get("/api/v1/datasets/provenance")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let provenance: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(provenance["synthetic_ticket_count"].as_i64().unwrap() > 0);
+    assert_eq!(provenance["real_ticket_count"], 0);
+}
+
+#[test]
+fn import_request_requires_explicit_synthetic_provenance() {
+    let request = serde_json::from_value::<ImportRequest>(serde_json::json!({
+        "source_system": "example",
+        "tickets": [],
+        "quarantine": []
+    }));
+    assert!(request.is_err());
 }
 
 #[tokio::test]

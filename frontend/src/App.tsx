@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, DashboardData, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
 import type { EChartsOption } from 'echarts'
 
@@ -20,6 +20,27 @@ type Route =
 type IconName = 'inbox' | 'pulse' | 'grid' | 'map' | 'tag' | 'trend' | 'bell' | 'forecast' | 'file' | 'cycle' | 'model' | 'search' | 'settings' | 'help' | 'chevron' | 'arrow' | 'check' | 'edit' | 'external' | 'download' | 'more' | 'clock' | 'close'
 type DrilldownHandler = (dimension: DrilldownDimension, value: string | undefined, label: string) => void
 type DrilldownState = { label: string; items: BackendTicket[]; total: number } | null
+
+function datasetProvenanceNotice(provenance: DatasetProvenance | undefined): string | undefined {
+  if (!provenance) return undefined
+
+  const parts: string[] = []
+  if (provenance.synthetic_ticket_count > 0 && provenance.real_ticket_count > 0) {
+    parts.push(`В подключённых данных есть синтетические записи (${provenance.synthetic_ticket_count}) и реальные записи (${provenance.real_ticket_count}).`)
+  } else if (provenance.synthetic_ticket_count > 0) {
+    parts.push(`Синтетический набор: ${provenance.synthetic_ticket_count} обращений. Это демонстрационные данные, не операционная статистика заказчика.`)
+  } else if (provenance.real_ticket_count > 0) {
+    parts.push(`Реальные записи: ${provenance.real_ticket_count}.`)
+  }
+  if (provenance.unassigned_ticket_count > 0) {
+    parts.push(`Без связи с набором данных: ${provenance.unassigned_ticket_count}.`)
+  }
+  if (provenance.quarantined_row_count > 0) {
+    parts.push(`В карантине: ${provenance.quarantined_row_count}.`)
+  }
+
+  return parts.length > 0 ? parts.join(' ') : undefined
+}
 
 const icons: Record<IconName, string> = {
   inbox: 'M4 5h16v14H4z M4 8h16 M8 12h3',
@@ -188,6 +209,9 @@ function App() {
 
   const title = routeTitles[route]
   const showToast = useCallback((message: string) => setToast(message), [])
+  const provenanceNotice = source === 'api'
+    ? datasetProvenanceNotice(data?.datasetProvenance)
+    : undefined
 
   return (
     <div className="app-shell">
@@ -195,6 +219,12 @@ function App() {
       <main className="main-shell">
         <Topbar onOpenNav={() => setMobileNavOpen(true)} onOpenAlerts={() => navigate('/situation/alerts')} hasAlerts={Boolean(data?.alerts.length)} />
         {source === 'demo' && <div className="demo-banner"><span className="status-dot" /> Демо-данные · API подключится автоматически, когда backend будет доступен <span className="demo-banner-detail">{apiError ? `(${apiError})` : ''}</span></div>}
+        {provenanceNotice && (
+          <div className="demo-banner">
+            <span className="status-dot" />
+            {provenanceNotice}
+          </div>
+        )}
         {source === 'api' && apiError && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
         <div className="page-wrap">
           <PageHeader {...title} route={route} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />

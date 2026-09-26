@@ -91,6 +91,14 @@ export interface LearningCycle {
   decisionNote?: string
 }
 
+export interface DatasetProvenance {
+  synthetic_ticket_count: number
+  real_ticket_count: number
+  unassigned_ticket_count: number
+  quarantined_row_count: number
+  dataset_version_count: number
+}
+
 export interface DashboardData {
   tickets: Ticket[]
   overview: {
@@ -115,6 +123,7 @@ export interface DashboardData {
   reportSource: string
   forecastStatus?: string
   forecastModelVersion?: string
+  datasetProvenance?: DatasetProvenance
   filterOptions: {
     regions: Array<{ id: string; label: string }>
     topics: Array<{ id: string; label: string }>

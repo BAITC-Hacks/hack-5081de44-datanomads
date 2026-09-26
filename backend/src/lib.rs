@@ -472,6 +472,8 @@ pub enum ApiError {
     Conflict(String),
     #[error("internal server error: {0}")]
     Internal(String),
+    #[error("service unavailable: {0}")]
+    Unavailable(String),
 }
 
 impl ApiError {
@@ -483,6 +485,7 @@ impl ApiError {
             Self::NotFound(_) => "NOT_FOUND",
             Self::Conflict(_) => "CONFLICT",
             Self::Internal(_) => "INTERNAL_ERROR",
+            Self::Unavailable(_) => "NOT_READY",
         }
     }
 
@@ -494,6 +497,7 @@ impl ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
@@ -1001,6 +1005,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/docs", get(openapi))
         .route("/api/v1/tickets", get(list_tickets).post(create_ticket))
         .route("/api/v1/import", post(import_tickets))
+        .route("/api/v1/datasets/provenance", get(dataset_provenance))
         .route("/api/v1/tickets/{ticket_id}", get(get_ticket))
         .route(
             "/api/v1/tickets/{ticket_id}/vector",
@@ -1141,7 +1146,10 @@ async fn healthz() -> Json<Value> {
 
 async fn readyz(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     if let Some(repository) = state.repository() {
-        let checks = repository.readiness().await.map_err(ApiError::Internal)?;
+        let checks = repository
+            .readiness()
+            .await
+            .map_err(ApiError::Unavailable)?;
         return Ok(Json(json!({
             "status": "ready",
             "service": SERVICE_NAME,
@@ -1256,7 +1264,7 @@ pub struct ImportRequest {
     pub dataset_version: Option<String>,
     pub manifest_uri: Option<String>,
     pub manifest_sha256: Option<String>,
-    pub is_synthetic: Option<bool>,
+    pub is_synthetic: bool,
     #[serde(default)]
     pub tickets: Vec<Value>,
     #[serde(default)]
@@ -1273,7 +1281,17 @@ pub struct ImportResponse {
     pub duplicate_rows: usize,
     pub quarantined_rows: usize,
     pub indexed_rows: usize,
+    pub is_synthetic: bool,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DatasetProvenance {
+    pub synthetic_ticket_count: i64,
+    pub real_ticket_count: i64,
+    pub unassigned_ticket_count: i64,
+    pub quarantined_row_count: i64,
+    pub dataset_version_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1403,6 +1421,32 @@ async fn create_ticket(
             latest_decision: None,
         }),
     ))
+}
+
+async fn dataset_provenance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DatasetProvenance>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .dataset_provenance()
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
+    let store = state.read_store()?;
+    Ok(Json(DatasetProvenance {
+        synthetic_ticket_count: store.tickets.len() as i64,
+        real_ticket_count: 0,
+        unassigned_ticket_count: 0,
+        quarantined_row_count: 0,
+        dataset_version_count: 1,
+    }))
 }
 
 async fn import_tickets(
@@ -4149,6 +4193,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
             "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
             "/api/v1/import": { "post": { "summary": "Import validated tickets into PostgreSQL and Qdrant" } },
+            "/api/v1/datasets/provenance": { "get": { "summary": "Read synthetic, real and unassigned dataset counts" } },
             "/api/v1/assist/preview": { "post": { "summary": "Preview prediction and related tickets" } },
             "/api/v1/assist/{ticket_id}/confirm": { "post": { "summary": "Confirm prediction" } },
             "/api/v1/assist/{ticket_id}/correct": { "post": { "summary": "Correct prediction" } },

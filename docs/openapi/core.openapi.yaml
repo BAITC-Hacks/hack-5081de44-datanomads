@@ -64,6 +64,20 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/datasets/provenance:
+    get:
+      tags: [import]
+      summary: Read dataset provenance counts
+      description: Aggregate counts label synthetic records and do not include ticket text or other ticket fields.
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Dataset provenance summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DatasetProvenance' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/assist/preview:
     post:
       tags: [assist]
@@ -834,7 +848,7 @@ components:
         dependencies: { type: object, additionalProperties: { type: string } }
     ImportRequest:
       type: object
-      required: [source_system]
+      required: [source_system, is_synthetic]
       properties:
         source_system: { type: string, minLength: 1 }
         source_uri: { type: string }
@@ -846,7 +860,7 @@ components:
         quarantine: { type: array, items: { type: object, additionalProperties: true } }
     ImportResponse:
       type: object
-      required: [import_run_id, source_system, dataset_version, total_rows, imported_rows, duplicate_rows, quarantined_rows, indexed_rows, source]
+      required: [import_run_id, source_system, dataset_version, total_rows, imported_rows, duplicate_rows, quarantined_rows, indexed_rows, is_synthetic, source]
       properties:
         import_run_id: { type: string }
         source_system: { type: string }
@@ -856,7 +870,17 @@ components:
         duplicate_rows: { type: integer }
         quarantined_rows: { type: integer }
         indexed_rows: { type: integer }
+        is_synthetic: { type: boolean }
         source: { type: string }
+    DatasetProvenance:
+      type: object
+      required: [synthetic_ticket_count, real_ticket_count, unassigned_ticket_count, quarantined_row_count, dataset_version_count]
+      properties:
+        synthetic_ticket_count: { type: integer, minimum: 0 }
+        real_ticket_count: { type: integer, minimum: 0 }
+        unassigned_ticket_count: { type: integer, minimum: 0 }
+        quarantined_row_count: { type: integer, minimum: 0 }
+        dataset_version_count: { type: integer, minimum: 0 }
     AssistPreviewRequest:
       type: object
       required: [external_ticket_id, text, region_id]
