@@ -3341,6 +3341,8 @@ fn normalize_topic_id(value: &str) -> String {
         "topic-education" | "education" => "education".to_owned(),
         "topic-transport" | "transport" => "public_transport".to_owned(),
         "topic-environment" | "environment" => "environment".to_owned(),
+        "ecology" => "environment".to_owned(),
+        "waste" => "waste_management".to_owned(),
         "topic-safety" | "street_lighting" | "street-lighting" => "street_lighting".to_owned(),
         "topic-utilities" | "utilities" => "electricity".to_owned(),
         "topic-digital" | "digital" => "telecom".to_owned(),

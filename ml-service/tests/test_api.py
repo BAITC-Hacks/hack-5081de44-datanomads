@@ -53,6 +53,11 @@ def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:
     assert kz.json()["language"] == "KZ"
     assert kz.json()["topic_id"] == "street_lighting"
 
+    waste = client.post("/internal/v1/classify", json={"text": "Не вывозят мусор из контейнера"})
+    environment = client.post("/internal/v1/classify", json={"text": "Загрязнение воздуха и выбросы"})
+    assert waste.json()["topic_id"] == "waste_management"
+    assert environment.json()["topic_id"] == "environment"
+
 
 def test_batch_embedding_is_repeatable_and_normalized() -> None:
     payload = {"texts": ["Нет воды", "Нет воды"], "dimension": 16}
