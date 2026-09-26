@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import csv
+from datetime import date, timedelta
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from scripts.evaluate_forecast_csv import build_report, evaluate_horizon
+
+
+class ForecastBaselineTests(unittest.TestCase):
+    def test_weekly_pattern_is_evaluated_without_future_leakage(self) -> None:
+        series = [10 + (day % 7) for day in range(500)]
+        baseline = evaluate_horizon(series, 90)
+        self.assertEqual(baseline["window_count"], 2)
+        self.assertEqual(baseline["mae"], 0)
+
+        series[370] += 100
+        self.assertGreater(evaluate_horizon(series, 90)["mae"], 0)
+
+    def test_csv_report_contains_only_aggregate_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["creation_date", "full_name"])
+                for offset in range(500):
+                    day = date(2024, 1, 1) + timedelta(days=offset)
+                    writer.writerow([f"{day:%d.%m.%Y} 12:00:00", "Иван Иванов"])
+            report = build_report(path)
+
+        self.assertEqual(report["record_count"], 500)
+        self.assertEqual(report["days_without_records"], 0)
+        self.assertNotIn("Иван Иванов", json.dumps(report, ensure_ascii=False))
+        self.assertNotIn(str(path), json.dumps(report, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    unittest.main()
