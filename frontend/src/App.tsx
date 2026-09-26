@@ -5,6 +5,7 @@ import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint,
 import { DataChart } from './components/DataChart'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
+import { confidenceStateLabel, confidenceStateNotice, normalizeConfidenceState } from './classification'
 
 type Route =
   | '/operator'
@@ -119,12 +120,6 @@ function navigate(route: Route) {
 
 function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`
-}
-
-function confidenceLabel(value: number) {
-  if (value >= 0.9) return 'Высокая'
-  if (value >= 0.75) return 'Средняя'
-  return 'Низкая'
 }
 
 function App() {
@@ -386,6 +381,8 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
   const [topic, setTopic] = useState(ticket.topic)
   const [service, setService] = useState(ticket.service)
   const [priority, setPriority] = useState<Priority>(ticket.priority)
+  const confidenceState = normalizeConfidenceState(ticket.confidenceState, ticket.confidence, ticket.confidenceAvailable !== false)
+  const confidenceAvailable = ticket.confidenceAvailable !== false && confidenceState !== 'UNAVAILABLE'
   const hasTemplate = Boolean(ticket.responseTemplateSource && ticket.responseTemplateSource !== 'UNAVAILABLE')
   const preview = ticket.assistPreview
   const languageNotice = languageReviewNotice(ticket.language)
@@ -408,15 +405,81 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     ]
     return Array.from(new Map(options.map((option) => [option[1], option])).values())
   }, [taxonomy.services, ticket.service])
-  useEffect(() => { setTopic(ticket.topic); setService(ticket.service); setPriority(ticket.priority); setCorrectionOpen(false); setTemplateOpen(false) }, [ticket.id, ticket.topic, ticket.service, ticket.priority])
+  useEffect(() => {
+    setTopic(ticket.topic)
+    setService(ticket.service)
+    setPriority(ticket.priority)
+    setCorrectionOpen(ticket.status === 'new' && (confidenceState === 'LOW_CONFIDENCE' || confidenceState === 'UNAVAILABLE'))
+    setTemplateOpen(false)
+  }, [ticket.id, ticket.topic, ticket.service, ticket.priority, ticket.status, confidenceState])
 
   return <aside className={`ticket-detail ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
     <div className="detail-header"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</div><h2>{ticket.id}</h2></div><button className="icon-button detail-close" aria-label="Закрыть детали" onClick={onClose}><Icon name="close" size={18} /></button></div>
     <div className="detail-scroll">
       <div className="original-text-block"><div className="field-label">Оригинальный текст <span className="language-chip">{languageLabel(ticket.language)}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{ticket.channel} · {ticket.createdAt} · {ticket.region}</div></div>
       {languageNotice && <p className="panel-note" role="status">{languageNotice}</p>}
-      {preview?.needs_review && <p className="panel-note" role="status">{preview.status === 'partial' ? 'Предпросмотр неполный.' : 'Рекомендацию нужно проверить.'} {incompleteStages.length > 0 && `Недоступно: ${incompleteStages.join(', ')}. `}Подтвердите тему, службу и приоритет после ручной проверки. Запрос {preview.request_id} · {preview.latency_ms.toFixed(0)} мс{modelVersions ? ` · ${modelVersions}` : ''}.</p>}
-      <div className="detail-section"><div className="field-label">Модель предложила</div><div className="prediction-row"><div><div className="prediction-topic">{ticket.predictedTopic ?? ticket.topic}</div><div className="confidence-copy">{ticket.confidenceAvailable === false ? 'Нет классификации · проверьте обращение вручную' : `${confidenceLabel(ticket.confidence)} уверенность · модель ${ticket.modelVersion ?? 'версия не указана'}`}</div></div><Confidence value={ticket.confidence} available={ticket.confidenceAvailable !== false} /></div><div className="alternatives"><span className="field-label">Альтернативы</span>{ticket.alternatives.length ? ticket.alternatives.map((alternative) => <div className="alternative-row" key={alternative.topic}><span>{alternative.topic}</span><span>{formatPercent(alternative.confidence)}</span></div>) : <p className="panel-note">Альтернативы недоступны.</p>}</div></div>
+      {preview?.needs_review && (preview.status === 'partial' || incompleteStages.length > 0 || confidenceState === 'CONFIDENT') && <p className="panel-note" role="status">{preview.status === 'partial' ? 'Предпросмотр неполный.' : incompleteStages.length > 0 ? 'Часть функций недоступна.' : 'Рекомендацию нужно проверить.'} {incompleteStages.length > 0 && `Недоступно: ${incompleteStages.join(', ')}. `}Подтвердите тему, службу и приоритет после ручной проверки. Запрос {preview.request_id} · {preview.latency_ms.toFixed(0)} мс{modelVersions ? ` · ${modelVersions}` : ''}.</p>}
+      <div className="detail-section">
+        <div className="field-label">Модель предложила</div>
+        <div className="prediction-row">
+          <div>
+            <div className="prediction-topic">{ticket.predictedTopic ?? ticket.topic}</div>
+            <div className={`classification-state classification-${confidenceState.toLowerCase()}`}>
+              {confidenceStateNotice(confidenceState)}
+            </div>
+          </div>
+          <Confidence value={ticket.confidence} state={confidenceState} available={confidenceAvailable} />
+        </div>
+        {confidenceState === 'UNCERTAIN' && (
+          <div className="alternatives">
+            <span className="field-label">Возможные альтернативы</span>
+            {ticket.alternatives.length ? ticket.alternatives.map((alternative) => (
+              <div className="alternative-row" key={alternative.topic}>
+                <span>{alternative.topic}</span>
+                <span>{formatPercent(alternative.confidence)}</span>
+              </div>
+            )) : <p className="panel-note">Альтернативы не получены. Проверьте тему вручную.</p>}
+          </div>
+        )}
+        <details className="model-meta">
+          <summary>Технические сведения</summary>
+          <span>Оценка модели: {confidenceAvailable ? formatPercent(ticket.confidence) : 'нет данных'}</span>
+          {ticket.modelVersion && <span>Модель: {ticket.modelVersion}</span>}
+        </details>
+      </div>
+      {correctionOpen && (
+        <div className="correction-panel">
+          <div className="correction-heading">
+            <strong>Выберите тему вручную</strong>
+            <button className="icon-button" aria-label="Закрыть форму исправления" onClick={() => setCorrectionOpen(false)}>
+              <Icon name="close" size={15} />
+            </button>
+          </div>
+          <label>Тема
+            <select value={topic} onChange={(event) => setTopic(event.target.value)}>
+              {topicOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}
+              <option value="Другая тема">Другая тема</option>
+            </select>
+          </label>
+          <label>Служба
+            <select value={service} onChange={(event) => setService(event.target.value)}>
+              {serviceOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}
+              <option value="Другая служба">Другая служба</option>
+            </select>
+          </label>
+          <label>Приоритет
+            <select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}>
+              <option>Высокий</option>
+              <option>Средний</option>
+              <option>Низкий</option>
+              <option>Не определён</option>
+            </select>
+          </label>
+          <button className="button button-primary full-width" onClick={() => onDecision(ticket.id, { status: 'corrected', topic, service, priority })}>
+            <Icon name="check" size={16} />Сохранить исправление
+          </button>
+        </div>
+      )}
       <div className="detail-section"><div className="field-label">Маршрутизация</div><div className="routing-grid"><div className="routing-field"><span>Рекомендуемая служба</span><strong>{ticket.service}</strong></div><div className="routing-field"><span>Приоритет</span><PriorityBadge priority={ticket.priority} /></div></div>{ticket.routingReason && <p className="panel-note">Причина: {ticket.routingReason}</p>}</div>
       <div className="detail-section">
         <div className="field-label">Ответ оператору {ticket.status !== 'new' && <span className="language-chip">{ticket.responseTemplateApproved ? 'Утверждённый' : hasTemplate ? 'Демо-черновик' : 'Нет шаблона'}</span>}</div>
@@ -429,14 +492,14 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
         )}
       </div>
       <div className="detail-section"><div className="section-inline-heading"><div className="field-label">Похожие обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span><span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>)}</div></div>
-      {correctionOpen && <div className="correction-panel"><div className="correction-heading"><strong>Исправить решение</strong><button className="icon-button" aria-label="Закрыть форму исправления" onClick={() => setCorrectionOpen(false)}><Icon name="close" size={15} /></button></div><label>Тема<select value={topic} onChange={(event) => setTopic(event.target.value)}>{topicOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая тема">Другая тема</option></select></label><label>Служба<select value={service} onChange={(event) => setService(event.target.value)}>{serviceOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая служба">Другая служба</option></select></label><label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}><option>Высокий</option><option>Средний</option><option>Низкий</option><option>Не определён</option></select></label><button className="button button-primary full-width" onClick={() => onDecision(ticket.id, { status: 'corrected', topic, service, priority })}><Icon name="check" size={16} />Сохранить исправление</button></div>}
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>
 }
 
-function Confidence({ value, compact = false, available = true }: { value: number; compact?: boolean; available?: boolean }) {
-  return <div className={`confidence ${compact ? 'confidence-compact' : ''}`}><div className="confidence-track"><span style={{ width: available ? `${value * 100}%` : '0%' }} /></div><strong>{available ? formatPercent(value) : '—'}</strong>{!compact && <small>{available ? confidenceLabel(value) : 'нет данных'}</small>}</div>
+function Confidence({ value, state, compact = false, available = true }: { value: number; state?: Ticket['confidenceState']; compact?: boolean; available?: boolean }) {
+  const confidenceState = normalizeConfidenceState(state, value, available)
+  return <div className={`confidence ${compact ? 'confidence-compact' : ''}`}><div className="confidence-track"><span style={{ width: available ? `${value * 100}%` : '0%' }} /></div><strong>{available ? formatPercent(value) : '—'}</strong>{!compact && <small>{available ? confidenceStateLabel(confidenceState) : 'нет данных'}</small>}</div>
 }
 
 function PriorityBadge({ priority }: { priority: Priority }) {

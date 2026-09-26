@@ -3800,14 +3800,7 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
         topic_id: row.topic_id.unwrap_or_else(|| "unknown".to_owned()),
         topic_label: row.topic_label,
         confidence,
-        confidence_state: if row.needs_review {
-            "low"
-        } else if confidence >= 0.85 {
-            "high"
-        } else {
-            "medium"
-        }
-        .to_owned(),
+        confidence_state: persisted_confidence_state(&row.prediction, row.needs_review, confidence),
         recommended_service: row.service_name,
         predicted_priority: row.priority,
         routing_reason: row
@@ -3818,6 +3811,25 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
             .to_owned(),
         alternatives,
         created_at: row.created_at.to_rfc3339(),
+    }
+}
+
+fn persisted_confidence_state(prediction: &Value, needs_review: bool, confidence: f32) -> String {
+    const UNCERTAIN_CONFIDENCE_THRESHOLD: f32 = 0.58;
+
+    match prediction
+        .get("confidence_state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        Some("CONFIDENT" | "HIGH") => "confident".to_owned(),
+        Some("UNCERTAIN" | "MEDIUM") => "uncertain".to_owned(),
+        Some("LOW_CONFIDENCE" | "LOW") => "low_confidence".to_owned(),
+        _ if !needs_review => "confident".to_owned(),
+        _ if confidence >= UNCERTAIN_CONFIDENCE_THRESHOLD => "uncertain".to_owned(),
+        _ => "low_confidence".to_owned(),
     }
 }
 
@@ -4317,5 +4329,38 @@ mod vector_index_tests {
 
         assert_eq!(diagnostic, "row 4: INVALID_VALUE: region_id");
         assert!(!diagnostic.contains("sensitive-ticket-text"));
+    }
+}
+
+#[cfg(test)]
+mod persisted_confidence_state_tests {
+    use super::*;
+
+    #[test]
+    fn preserves_persisted_classifier_states_and_reads_legacy_rows() {
+        assert_eq!(
+            persisted_confidence_state(&json!({"confidence_state": "UNCERTAIN"}), true, 0.71),
+            "uncertain"
+        );
+        assert_eq!(
+            persisted_confidence_state(&json!({"confidence_state": "LOW_CONFIDENCE"}), true, 0.42),
+            "low_confidence"
+        );
+        assert_eq!(
+            persisted_confidence_state(&json!({"confidence_state": "CONFIDENT"}), false, 0.79),
+            "confident"
+        );
+        assert_eq!(
+            persisted_confidence_state(&json!({}), true, 0.65),
+            "uncertain"
+        );
+        assert_eq!(
+            persisted_confidence_state(&json!({}), true, 0.42),
+            "low_confidence"
+        );
+        assert_eq!(
+            persisted_confidence_state(&json!({}), false, 0.42),
+            "confident"
+        );
     }
 }

@@ -1,6 +1,7 @@
 export type TicketStatus = 'new' | 'confirmed' | 'corrected'
 export type Priority = 'Высокий' | 'Средний' | 'Низкий' | 'Не определён'
 export type PreviewLanguage = 'RU' | 'KZ' | 'MIXED' | 'UNKNOWN'
+export type ClassificationConfidenceState = 'CONFIDENT' | 'UNCERTAIN' | 'LOW_CONFIDENCE' | 'UNAVAILABLE'
 
 export interface AssistPreviewStage {
   name: string
@@ -42,6 +43,7 @@ export interface Ticket {
   topic: string
   predictedTopic?: string
   confidence: number
+  confidenceState?: ClassificationConfidenceState
   confidenceAvailable?: boolean
   alternatives: TicketAlternative[]
   service: string

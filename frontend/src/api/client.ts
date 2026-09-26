@@ -1,6 +1,7 @@
 import { demoData } from '../data/demo'
 import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
+import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -193,6 +194,8 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   const related = preview?.similar_tickets ?? []
   const topic = latest ? item.topic_label : prediction?.topic_label ?? 'Не определено'
   const alternatives = prediction?.alternatives ?? []
+  const confidenceAvailable = Boolean(prediction && prediction.model_version !== 'unavailable')
+  const confidenceState = normalizeConfidenceState(prediction?.confidence_state, prediction?.confidence ?? 0, confidenceAvailable)
   const text = item.text
   const similar = related.map((candidate) => ({
     id: candidate.ticket_id,
@@ -210,8 +213,9 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     topic,
     predictedTopic: prediction?.topic_label ?? 'Не определено',
     confidence: prediction?.confidence ?? 0,
-    confidenceAvailable: Boolean(prediction && prediction.model_version !== 'unavailable'),
-    alternatives: alternatives.map((alternative) => ({ topic: alternative.topic_label, confidence: alternative.confidence })),
+    confidenceState,
+    confidenceAvailable: confidenceAvailable && confidenceState !== 'UNAVAILABLE',
+    alternatives: classificationAlternatives(confidenceState, prediction?.topic_id ?? '', alternatives).map((alternative) => ({ topic: alternative.topic_label, confidence: alternative.confidence })),
     service: latest?.service ?? (prediction?.recommended_service && !['UNKNOWN', 'unavailable'].includes(prediction.recommended_service) ? prediction.recommended_service : 'Не определена'),
     priority: mapPriority(latest?.priority ?? prediction?.predicted_priority ?? item.priority),
     routingReason: prediction?.routing_reason,

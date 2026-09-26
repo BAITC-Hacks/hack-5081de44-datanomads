@@ -172,7 +172,12 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .source-line { margin-top: 12px; color: #62756d; font-size: 10px; }
 .prediction-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 10px; }
 .prediction-topic { color: #e2f0e8; font-size: 15px; font-weight: 650; }
-.confidence-copy { margin-top: 4px; color: #73867e; font-size: 10px; }
+.classification-state { margin-top: 5px; color: #a9c6b9; font-size: 11px; font-weight: 600; }
+.classification-uncertain { color: #f0cf85; }
+.classification-low_confidence, .classification-unavailable { color: #ffaaa4; }
+.model-meta { margin-top: 12px; color: var(--muted); font-size: 10px; }
+.model-meta summary { width: fit-content; cursor: pointer; }
+.model-meta span { display: block; margin-top: 5px; }
 .prediction-row .confidence { min-width: 95px; }
 .alternatives { margin-top: 19px; padding-top: 13px; border-top: 1px solid rgba(214,236,225,.075); }
 .alternative-row { display: flex; justify-content: space-between; padding-top: 8px; color: #8fa29a; font-size: 11px; }.alternative-row span:last-child { color: #71847c; }
