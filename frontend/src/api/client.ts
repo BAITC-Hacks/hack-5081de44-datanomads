@@ -1,5 +1,6 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, PreviewLanguage, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
+import { mapLanguage } from '../language'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -144,22 +145,6 @@ function mapPriority(value: string): Priority {
   if (value === 'low' || value === 'Низкий') return 'Низкий'
   if (value.toUpperCase() === 'UNKNOWN' || value.toLowerCase() === 'unavailable' || !value.trim()) return 'Не определён'
   return 'Средний'
-}
-
-function mapLanguage(value: string): PreviewLanguage {
-  switch (value.trim().toUpperCase()) {
-    case 'RU':
-    case 'RUS':
-      return 'RU'
-    case 'KZ':
-    case 'KK':
-    case 'KAZ':
-      return 'KZ'
-    case 'MIXED':
-      return 'MIXED'
-    default:
-      return 'UNKNOWN'
-  }
 }
 
 function mapLearningStage(value: string): LearningCycle['stage'] {

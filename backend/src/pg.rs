@@ -255,6 +255,10 @@ fn assist_language_state(value: Option<&str>) -> String {
     }
 }
 
+fn response_template_language_supported(language_state: &str) -> bool {
+    matches!(language_state, "RU" | "KZ")
+}
+
 fn assist_stage(
     name: &str,
     status: &str,
@@ -3404,7 +3408,17 @@ impl PgRepository {
                 prediction.recommended_service.as_str(),
             ));
         let template_started = Instant::now();
-        let response_template = if template_topic.eq_ignore_ascii_case("unknown")
+        let response_template = if !response_template_language_supported(&language_state) {
+            needs_review = true;
+            stages.push(assist_stage(
+                "response_template",
+                "skipped",
+                0.0,
+                None,
+                Some("LANGUAGE_UNSUPPORTED"),
+            ));
+            unavailable_response_template(&language_state)
+        } else if template_topic.eq_ignore_ascii_case("unknown")
             || template_service.eq_ignore_ascii_case("unknown")
         {
             needs_review = true;
@@ -4178,6 +4192,19 @@ fn _topic_contract_is_kept_for_docs(_topic: &Topic) {}
 #[cfg(test)]
 mod assist_preview_tests {
     use super::*;
+
+    #[test]
+    fn response_templates_require_a_known_ru_or_kz_language() {
+        assert!(response_template_language_supported("RU"));
+        assert!(response_template_language_supported("KZ"));
+        assert!(!response_template_language_supported("MIXED"));
+        assert!(!response_template_language_supported("UNKNOWN"));
+        for language in ["MIXED", "UNKNOWN"] {
+            let template = unavailable_response_template(language);
+            assert_eq!(template.source, "UNAVAILABLE");
+            assert!(!template.approved);
+        }
+    }
 
     #[tokio::test]
     async fn ml_failure_returns_unknown_manual_preview_with_request_context() {

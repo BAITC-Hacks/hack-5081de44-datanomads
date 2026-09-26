@@ -35,11 +35,34 @@ async fn demo_api_supports_preview_and_manager_analytics() {
 }
 
 #[tokio::test]
-async fn assist_preview_reports_language_uncertainty_and_correlated_context() {
+async fn assist_preview_preserves_language_states_and_correlated_context() {
     let application = app(AppState::demo());
-    for (language, request_id, trace_id) in [
-        ("MIXED", Some("preview-mixed"), Some("trace-mixed")),
-        ("UNKNOWN", None, None),
+    for (language, request_id, trace_id, partial, template_source, ticket_language) in [
+        (
+            "RU",
+            Some("preview-ru"),
+            Some("trace-ru"),
+            false,
+            "MANUAL_DEMO",
+            "ru",
+        ),
+        (
+            "KZ",
+            Some("preview-kz"),
+            Some("trace-kz"),
+            false,
+            "MANUAL_DEMO",
+            "kk",
+        ),
+        (
+            "MIXED",
+            Some("preview-mixed"),
+            Some("trace-mixed"),
+            true,
+            "UNAVAILABLE",
+            "mixed",
+        ),
+        ("UNKNOWN", None, None, true, "UNAVAILABLE", "unknown"),
     ] {
         let mut request = Request::post("/api/v1/assist/preview")
             .header("content-type", "application/json")
@@ -75,14 +98,21 @@ async fn assist_preview_reports_language_uncertainty_and_correlated_context() {
                 .unwrap();
 
         assert_eq!(preview["orchestration"]["language"], language);
+        assert_eq!(preview["ticket"]["language"], ticket_language);
         assert_eq!(preview["orchestration"]["request_id"], response_request_id);
         assert_eq!(preview["orchestration"]["trace_id"], response_trace_id);
-        assert_eq!(preview["orchestration"]["status"], "partial");
+        assert_eq!(
+            preview["orchestration"]["status"],
+            if partial { "partial" } else { "complete" }
+        );
         assert_eq!(preview["orchestration"]["needs_review"], true);
-        assert_eq!(preview["prediction"]["topic_id"], "UNKNOWN");
-        assert_eq!(preview["prediction"]["confidence"].as_f64(), Some(0.0));
-        assert_eq!(preview["ticket"]["priority"], "UNKNOWN");
-        assert_eq!(preview["response_template"]["source"], "UNAVAILABLE");
+        assert_eq!(preview["response_template"]["source"], template_source);
+        assert_eq!(preview["response_template"]["approved"], false);
+        if partial {
+            assert_eq!(preview["prediction"]["topic_id"], "UNKNOWN");
+            assert_eq!(preview["prediction"]["confidence"].as_f64(), Some(0.0));
+            assert_eq!(preview["ticket"]["priority"], "UNKNOWN");
+        }
         assert!(preview["orchestration"]["latency_ms"].as_f64().unwrap() >= 0.0);
         if let Some(request_id) = request_id {
             assert_eq!(response_request_id, request_id);
@@ -93,6 +123,19 @@ async fn assist_preview_reports_language_uncertainty_and_correlated_context() {
             assert_eq!(response_request_id, response_trace_id);
         }
     }
+
+    let unsupported_language = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/assist/preview")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::from(r#"{"text":"Нет воды","language":"EN"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsupported_language.status(), 400);
 
     let official_before = application
         .clone()
