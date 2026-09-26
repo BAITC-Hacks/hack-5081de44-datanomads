@@ -881,7 +881,7 @@ components:
             body: { type: string }
             language: { type: string, enum: [ru, kz] }
             approved: { type: boolean, description: True only for authoritative templates. }
-            source: { type: string, enum: [AUTHORITATIVE, MANUAL_DEMO] }
+            source: { type: string, enum: [AUTHORITATIVE, MANUAL_DEMO, UNAVAILABLE] }
         source: { type: string }
     Prediction:
       type: object

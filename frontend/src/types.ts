@@ -20,6 +20,7 @@ export interface Ticket {
   modelVersion?: string
   language: 'RU' | 'KZ'
   topic: string
+  predictedTopic?: string
   confidence: number
   alternatives: TicketAlternative[]
   service: string

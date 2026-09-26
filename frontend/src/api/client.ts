@@ -97,6 +97,12 @@ interface BackendTicketDetail {
   latest_decision?: { action: string; confirmed_topic_id: string; service: string; priority: string }
 }
 
+interface BackendDecisionResponse {
+  ticket: BackendTicket
+  prediction: BackendPrediction
+  decision: NonNullable<BackendTicketDetail['latest_decision']>
+}
+
 interface BackendAnalytics {
   source?: string
   overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number; operator_decisions?: number; confirmed_decisions?: number; corrected_decisions?: number; avg_decision_minutes?: number; change_abs?: number; change_pct?: number | null }
@@ -202,6 +208,7 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     modelVersion: prediction?.model_version,
     language: mapLanguage(item.language),
     topic,
+    predictedTopic: prediction?.topic_label ?? item.topic_label,
     confidence: prediction?.confidence ?? .75,
     alternatives: alternatives.map((alternative) => ({ topic: alternative.topic_label, confidence: alternative.confidence })),
     service: latest?.service ?? prediction?.recommended_service ?? 'Служба обработки обращений',
@@ -211,7 +218,7 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     createdAt: item.created_at,
     status,
     similar,
-    responseTemplate: preview?.response_template?.body ?? 'Шаблон ответа не найден в PostgreSQL.',
+    responseTemplate: preview?.response_template?.body ?? 'Шаблон ответа сейчас недоступен. Составьте ответ вручную.',
     responseTemplateApproved: preview?.response_template?.approved,
     responseTemplateSource: preview?.response_template?.source,
     channel: item.source === 'mobile' ? 'Мобильное приложение' : item.source === 'call-center' ? 'Call-центр' : item.source === 'whatsapp' ? 'WhatsApp' : 'eGov',
@@ -336,7 +343,7 @@ export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
 export async function submitDecision(ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }, taxonomy?: Pick<DashboardData['filterOptions'], 'topics' | 'services'>) {
   try {
     const action = decision.status === 'confirmed' ? 'confirm' : 'correct'
-    await request(`/assist/${encodeURIComponent(ticketId)}/${action}`, {
+    const saved = await request<BackendDecisionResponse>(`/assist/${encodeURIComponent(ticketId)}/${action}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -345,8 +352,24 @@ export async function submitDecision(ticketId: string, decision: { status: 'conf
         priority: decision.priority === 'Высокий' ? 'high' : decision.priority === 'Низкий' ? 'low' : decision.priority === 'Средний' ? 'medium' : undefined,
       }),
     })
-    const detail = await request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticketId)}`)
-    return { source: 'api' as const, ticket: mapBackendTicket(detail.ticket, detail, [detail.ticket]) }
+    let preview: BackendAssistPreview | undefined
+    try {
+      preview = await request<BackendAssistPreview>('/assist/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticket_id: ticketId }),
+      })
+    } catch {
+      return {
+        source: 'api' as const,
+        ticket: mapBackendTicket(saved.ticket, { ticket: saved.ticket, prediction: saved.prediction, latest_decision: saved.decision }, [saved.ticket]),
+        warning: 'Решение сохранено, но шаблон ответа пока недоступен.',
+      }
+    }
+    return {
+      source: 'api' as const,
+      ticket: mapBackendTicket(saved.ticket, { ticket: saved.ticket, prediction: saved.prediction, latest_decision: saved.decision }, [saved.ticket], preview),
+    }
   } catch (error) {
     if (!DEMO_ENABLED) throw error
     return { source: 'demo' as const, error: error instanceof Error ? error.message : 'API недоступен' }

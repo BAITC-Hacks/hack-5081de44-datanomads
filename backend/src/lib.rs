@@ -1758,8 +1758,15 @@ async fn assist_preview(
         .filter(|item| item.relation == "repeat")
         .cloned()
         .collect();
+    let template_topic = store
+        .decisions
+        .iter()
+        .rev()
+        .find(|decision| decision.ticket_id == ticket.id)
+        .map(|decision| decision.confirmed_topic_id.as_str())
+        .unwrap_or(&prediction.topic_id);
     Ok(Json(AssistPreviewResponse {
-        response_template: response_template(&ticket.language, &prediction.topic_id),
+        response_template: response_template(&ticket.language, template_topic),
         ticket,
         prediction,
         similar_tickets: related,
@@ -1963,20 +1970,24 @@ async fn apply_decision(
             "unknown topic_id: {topic_id}"
         )));
     }
-    {
-        let ticket = store
-            .tickets
-            .get_mut(&ticket_id)
-            .ok_or_else(|| ApiError::NotFound(format!("ticket {ticket_id} not found")))?;
-        ticket.status = "triaged".to_owned();
-        ticket.updated_at = DEMO_TIMESTAMP.to_owned();
-    }
     let service = request
         .service
         .unwrap_or_else(|| service_for_topic(&topic_id).to_owned());
     let priority = request
         .priority
         .unwrap_or_else(|| prediction.predicted_priority.clone());
+    let confirmed_topic_label = topic_label(&store.topics, &topic_id);
+    {
+        let ticket = store
+            .tickets
+            .get_mut(&ticket_id)
+            .ok_or_else(|| ApiError::NotFound(format!("ticket {ticket_id} not found")))?;
+        ticket.topic_id = topic_id.clone();
+        ticket.topic_label = confirmed_topic_label;
+        ticket.priority = priority.clone();
+        ticket.status = "triaged".to_owned();
+        ticket.updated_at = DEMO_TIMESTAMP.to_owned();
+    }
     let note = request.note;
     let decision_id = format!("decision-{:03}", store.next_decision_number);
     store.next_decision_number += 1;

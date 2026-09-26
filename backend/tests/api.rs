@@ -1,4 +1,7 @@
-use axum::{body::Body, http::Request};
+use axum::{
+    body::{to_bytes, Body},
+    http::Request,
+};
 use pulse109_core::{app, AppState};
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -29,6 +32,56 @@ async fn demo_api_supports_preview_and_manager_analytics() {
         .await
         .unwrap();
     assert_eq!(analytics.status(), 200);
+}
+
+#[tokio::test]
+async fn corrected_decision_updates_template_without_rewriting_prediction() {
+    let application = app(AppState::demo());
+    let corrected = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/assist/ticket-001/correct")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"topic_id":"TOPIC-ROADS","service":"Городская инфраструктура","priority":"medium"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(corrected.status(), 200);
+
+    let detail = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let detail: serde_json::Value =
+        serde_json::from_slice(&to_bytes(detail.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(detail["ticket"]["topic_id"], "TOPIC-ROADS");
+    assert_eq!(detail["prediction"]["topic_id"], "TOPIC-WATER");
+
+    let preview = application
+        .oneshot(
+            Request::post("/api/v1/assist/preview")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"ticket_id":"ticket-001"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), 200);
+    let preview: serde_json::Value =
+        serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        preview["response_template"]["id"],
+        "template-ru-topic-roads"
+    );
 }
 
 #[tokio::test]

@@ -295,9 +295,22 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
     if (!ticket) return
     try {
       const result = await submitDecision(ticketId, decision, taxonomy)
-      const updated = tickets.map((item) => item.id === ticketId ? (result.ticket ?? { ...item, ...decision, priority: (decision.priority as Priority | undefined) ?? item.priority }) : item)
+      const updated = tickets.map((item) => {
+        if (item.id !== ticketId) return item
+        if (result.ticket) return result.ticket
+        return {
+          ...item,
+          ...decision,
+          priority: (decision.priority as Priority | undefined) ?? item.priority,
+          ...(decision.status === 'corrected' ? {
+            responseTemplate: 'Для исправленного решения шаблон недоступен. Составьте ответ вручную.',
+            responseTemplateApproved: false,
+            responseTemplateSource: undefined,
+          } : {}),
+        }
+      })
       onDataChange(updated)
-      onToast(result.source === 'demo' ? `Решение по ${ticketId} изменено только на этом экране` : `Решение по ${ticketId} сохранено`)
+      onToast(result.source === 'demo' ? `Решение по ${ticketId} изменено только на этом экране` : ('warning' in result && result.warning) || `Решение по ${ticketId} сохранено`)
     } catch (error) {
       onToast(`Не удалось сохранить решение: ${error instanceof Error ? error.message : 'ошибка API'}`)
     }
@@ -333,20 +346,21 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
   const [topic, setTopic] = useState(ticket.topic)
   const [service, setService] = useState(ticket.service)
   const [priority, setPriority] = useState<Priority>(ticket.priority)
+  const hasTemplate = Boolean(ticket.responseTemplateSource && ticket.responseTemplateSource !== 'UNAVAILABLE')
   const topicOptions = useMemo(() => {
     const options: Array<[string, string]> = [
       ...taxonomy.topics.map((item) => [item.id, item.label] as [string, string]),
       [ticket.topic, ticket.topic],
       ...ticket.alternatives.map((item) => [item.topic, item.topic] as [string, string]),
     ]
-    return Array.from(new Map(options).values())
+    return Array.from(new Map(options.map((option) => [option[1], option])).values())
   }, [taxonomy.topics, ticket.topic, ticket.alternatives])
   const serviceOptions = useMemo(() => {
     const options: Array<[string, string]> = [
       ...taxonomy.services.map((item) => [item.id, item.label] as [string, string]),
       [ticket.service, ticket.service],
     ]
-    return Array.from(new Map(options).values())
+    return Array.from(new Map(options.map((option) => [option[1], option])).values())
   }, [taxonomy.services, ticket.service])
   useEffect(() => { setTopic(ticket.topic); setService(ticket.service); setPriority(ticket.priority); setCorrectionOpen(false); setTemplateOpen(false) }, [ticket.id, ticket.topic, ticket.service, ticket.priority])
 
@@ -354,9 +368,18 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     <div className="detail-header"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</div><h2>{ticket.id}</h2></div><button className="icon-button detail-close" aria-label="Закрыть детали" onClick={onClose}><Icon name="close" size={18} /></button></div>
     <div className="detail-scroll">
       <div className="original-text-block"><div className="field-label">Оригинальный текст <span className="language-chip">{ticket.language}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{ticket.channel} · {ticket.createdAt} · {ticket.region}</div></div>
-      <div className="detail-section"><div className="field-label">Модель предложила</div><div className="prediction-row"><div><div className="prediction-topic">{ticket.topic}</div><div className="confidence-copy">{confidenceLabel(ticket.confidence)} уверенность · модель {ticket.modelVersion ?? 'deterministic-classifier'}</div></div><Confidence value={ticket.confidence} /></div><div className="alternatives"><span className="field-label">Альтернативы</span>{ticket.alternatives.map((alternative) => <div className="alternative-row" key={alternative.topic}><span>{alternative.topic}</span><span>{formatPercent(alternative.confidence)}</span></div>)}</div></div>
+      <div className="detail-section"><div className="field-label">Модель предложила</div><div className="prediction-row"><div><div className="prediction-topic">{ticket.predictedTopic ?? ticket.topic}</div><div className="confidence-copy">{confidenceLabel(ticket.confidence)} уверенность · модель {ticket.modelVersion ?? 'deterministic-classifier'}</div></div><Confidence value={ticket.confidence} /></div><div className="alternatives"><span className="field-label">Альтернативы</span>{ticket.alternatives.map((alternative) => <div className="alternative-row" key={alternative.topic}><span>{alternative.topic}</span><span>{formatPercent(alternative.confidence)}</span></div>)}</div></div>
       <div className="detail-section"><div className="field-label">Маршрутизация</div><div className="routing-grid"><div className="routing-field"><span>Рекомендуемая служба</span><strong>{ticket.service}</strong></div><div className="routing-field"><span>Приоритет</span><PriorityBadge priority={ticket.priority} /></div></div>{ticket.routingReason && <p className="panel-note">Причина: {ticket.routingReason}</p>}</div>
-      <div className="detail-section"><div className="field-label">Рекомендуемый ответ <span className="language-chip">{ticket.responseTemplateApproved ? 'AUTHORITATIVE' : 'MANUAL DEMO'}</span></div><div className={`response-template ${templateOpen ? 'response-template-open' : ''}`}><p>{ticket.responseTemplate}</p><button className="text-button" onClick={() => setTemplateOpen((value) => !value)}><Icon name="external" size={14} />{templateOpen ? 'Свернуть шаблон' : 'Открыть шаблон'}</button></div></div>
+      <div className="detail-section">
+        <div className="field-label">Ответ оператору {ticket.status !== 'new' && <span className="language-chip">{ticket.responseTemplateApproved ? 'Утверждённый' : hasTemplate ? 'Демо-черновик' : 'Нет шаблона'}</span>}</div>
+        {ticket.status === 'new' ? (
+          <p className="panel-note">Подтвердите или исправьте тему и службу, чтобы увидеть ответ.</p>
+        ) : hasTemplate ? (
+          <div className={`response-template ${templateOpen ? 'response-template-open' : ''}`}><p>{ticket.responseTemplate}</p><button className="text-button" onClick={() => setTemplateOpen((value) => !value)}><Icon name="external" size={14} />{templateOpen ? 'Свернуть шаблон' : 'Открыть шаблон'}</button></div>
+        ) : (
+          <p className="panel-note">{ticket.responseTemplate}</p>
+        )}
+      </div>
       <div className="detail-section"><div className="section-inline-heading"><div className="field-label">Похожие обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span><span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>)}</div></div>
       {correctionOpen && <div className="correction-panel"><div className="correction-heading"><strong>Исправить решение</strong><button className="icon-button" aria-label="Закрыть форму исправления" onClick={() => setCorrectionOpen(false)}><Icon name="close" size={15} /></button></div><label>Тема<select value={topic} onChange={(event) => setTopic(event.target.value)}>{topicOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая тема">Другая тема</option></select></label><label>Служба<select value={service} onChange={(event) => setService(event.target.value)}>{serviceOptions.map(([id, label]) => <option value={label} key={id}>{label}</option>)}<option value="Другая служба">Другая служба</option></select></label><label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}><option>Высокий</option><option>Средний</option><option>Низкий</option></select></label><button className="button button-primary full-width" onClick={() => onDecision(ticket.id, { status: 'corrected', topic, service, priority })}><Icon name="check" size={16} />Сохранить исправление</button></div>}
     </div>

@@ -635,15 +635,23 @@ impl PgRepository {
         service_name: &str,
     ) -> Result<ResponseTemplate, String> {
         let row = sqlx::query(
-            "SELECT rt.id, rt.body, rt.language, rt.approved, COALESCE(tp.name_ru, tp.name_kk, tp.id) AS topic_label FROM response_templates rt LEFT JOIN topics tp ON tp.id = rt.topic_id LEFT JOIN services s ON s.id = rt.service_id WHERE upper(rt.language) = upper($1) AND rt.topic_id = $2 ORDER BY CASE WHEN rt.approved THEN 0 ELSE 1 END, CASE WHEN lower(COALESCE(s.name_ru, '')) = lower($3) THEN 0 ELSE 1 END, rt.version DESC, rt.id DESC LIMIT 1",
+            "SELECT rt.id, rt.body, rt.language, rt.approved, COALESCE(tp.name_ru, tp.name_kk, tp.id) AS topic_label, (rt.service_id IS NULL OR lower(COALESCE(s.name_ru, '')) = lower($3)) AS service_match FROM response_templates rt LEFT JOIN topics tp ON tp.id = rt.topic_id LEFT JOIN services s ON s.id = rt.service_id WHERE upper(rt.language) = upper($1) AND rt.topic_id = $2 ORDER BY service_match DESC, rt.approved DESC, rt.version DESC, rt.id DESC LIMIT 1",
         )
         .bind(normalize_language(language))
         .bind(topic_id)
         .bind(service_name)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|error| format!("fetch response template: {error}"))?
-        .ok_or_else(|| format!("response template not found for {language}/{topic_id}"))?;
+        .map_err(|error| format!("fetch response template: {error}"))?;
+        let Some(row) = row else {
+            return Ok(unavailable_response_template(language));
+        };
+        if !row
+            .try_get::<bool, _>("service_match")
+            .map_err(|error| format!("template service match: {error}"))?
+        {
+            return Ok(unavailable_response_template(language));
+        }
         let approved = row.try_get::<bool, _>("approved").unwrap_or(false);
         Ok(ResponseTemplate {
             id: row
@@ -2571,53 +2579,55 @@ impl PgRepository {
         region_id: Option<&str>,
         request_id: &str,
     ) -> Result<AssistPreviewResponse, String> {
-        let (ticket, source, exclude_id, preview_prediction) = if let Some(ticket_id) = ticket_id {
-            let detail = self.get_ticket(ticket_id).await?;
-            let id = detail.ticket.id.parse::<i64>().ok();
-            (
-                detail.ticket,
-                "postgres-ticket+ml+qdrant".to_owned(),
-                id,
-                None,
-            )
-        } else {
-            let text = text.ok_or_else(|| "text is required".to_owned())?.trim();
-            if text.is_empty() {
-                return Err("text must not be empty".to_owned());
-            }
-            let classification = self.classify(text, language, request_id).await?;
-            let db_topic = normalize_topic_id(&classification.prediction.topic_id);
-            let db_region = normalize_region_id(region_id.unwrap_or("KZ-ASTANA"));
-            let routing = self
-                .resolve_routing(&db_topic, &db_region, None, None)
-                .await?;
-            let prediction = prediction_for_db(
-                0,
-                &classification,
-                &routing.priority,
-                &routing.service_name,
-                &routing.reason,
-            );
-            let ticket = Ticket {
-                id: "preview".to_owned(),
-                external_ref: "preview".to_owned(),
-                text: text.to_owned(),
-                language: normalize_language(
-                    language.unwrap_or(&classification.prediction.language),
+        let (ticket, source, exclude_id, preview_prediction, latest_decision) =
+            if let Some(ticket_id) = ticket_id {
+                let detail = self.get_ticket(ticket_id).await?;
+                let id = detail.ticket.id.parse::<i64>().ok();
+                (
+                    detail.ticket,
+                    "postgres-ticket+ml+qdrant".to_owned(),
+                    id,
+                    None,
+                    detail.latest_decision,
                 )
-                .to_ascii_lowercase(),
-                region_id: db_region.clone(),
-                region_name: db_region,
-                topic_id: db_topic,
-                topic_label: classification.prediction.topic.clone(),
-                priority: routing.priority,
-                status: "preview".to_owned(),
-                source: "preview".to_owned(),
-                created_at: Utc::now().to_rfc3339(),
-                updated_at: Utc::now().to_rfc3339(),
+            } else {
+                let text = text.ok_or_else(|| "text is required".to_owned())?.trim();
+                if text.is_empty() {
+                    return Err("text must not be empty".to_owned());
+                }
+                let classification = self.classify(text, language, request_id).await?;
+                let db_topic = normalize_topic_id(&classification.prediction.topic_id);
+                let db_region = normalize_region_id(region_id.unwrap_or("KZ-ASTANA"));
+                let routing = self
+                    .resolve_routing(&db_topic, &db_region, None, None)
+                    .await?;
+                let prediction = prediction_for_db(
+                    0,
+                    &classification,
+                    &routing.priority,
+                    &routing.service_name,
+                    &routing.reason,
+                );
+                let ticket = Ticket {
+                    id: "preview".to_owned(),
+                    external_ref: "preview".to_owned(),
+                    text: text.to_owned(),
+                    language: normalize_language(
+                        language.unwrap_or(&classification.prediction.language),
+                    )
+                    .to_ascii_lowercase(),
+                    region_id: db_region.clone(),
+                    region_name: db_region,
+                    topic_id: db_topic,
+                    topic_label: classification.prediction.topic.clone(),
+                    priority: routing.priority,
+                    status: "preview".to_owned(),
+                    source: "preview".to_owned(),
+                    created_at: Utc::now().to_rfc3339(),
+                    updated_at: Utc::now().to_rfc3339(),
+                };
+                (ticket, "ml+qdrant".to_owned(), None, Some(prediction), None)
             };
-            (ticket, "ml+qdrant".to_owned(), None, Some(prediction))
-        };
         let (_, vector) = self.embed(&ticket.text, request_id).await?;
         let hits = self.qdrant_search(&vector, exclude_id).await?;
         let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
@@ -2675,13 +2685,21 @@ impl PgRepository {
             .filter(|item| item.relation == "repeat")
             .cloned()
             .collect();
+        let (template_topic, template_service) = latest_decision
+            .as_ref()
+            .map(|decision| {
+                (
+                    decision.confirmed_topic_id.as_str(),
+                    decision.service.as_str(),
+                )
+            })
+            .unwrap_or((
+                prediction.topic_id.as_str(),
+                prediction.recommended_service.as_str(),
+            ));
         Ok(AssistPreviewResponse {
             response_template: self
-                .response_template(
-                    &ticket.language,
-                    &prediction.topic_id,
-                    &prediction.recommended_service,
-                )
+                .response_template(&ticket.language, template_topic, template_service)
                 .await?,
             ticket,
             prediction,
@@ -3090,6 +3108,28 @@ fn response_template_for(language: &str, topic: &str) -> ResponseTemplate {
         language: language.to_ascii_lowercase(),
         approved: false,
         source: "MANUAL_DEMO".to_owned(),
+    }
+}
+
+fn unavailable_response_template(language: &str) -> ResponseTemplate {
+    let kazakh = language.eq_ignore_ascii_case("KZ") || language.eq_ignore_ascii_case("kk");
+    ResponseTemplate {
+        id: "unavailable".to_owned(),
+        title: if kazakh {
+            "Үлгі жоқ"
+        } else {
+            "Нет шаблона"
+        }
+        .to_owned(),
+        body: if kazakh {
+            "Расталған шешімге сәйкес жауап үлгісі жоқ. Жауапты қолмен жазыңыз."
+        } else {
+            "Для подтверждённого решения нет подходящего шаблона. Составьте ответ вручную."
+        }
+        .to_owned(),
+        language: if kazakh { "kz" } else { "ru" }.to_owned(),
+        approved: false,
+        source: "UNAVAILABLE".to_owned(),
     }
 }
 
