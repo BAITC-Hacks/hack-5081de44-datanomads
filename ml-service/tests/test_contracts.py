@@ -102,10 +102,23 @@ class SharedContractTests(unittest.TestCase):
 
     def test_ml_openapi_matches_runtime_manifest_schemas(self) -> None:
         published = yaml.safe_load(ML_OPENAPI.read_text(encoding="utf-8"))
-        runtime = ml_main.app.openapi()["components"]["schemas"]
+        runtime_openapi = ml_main.app.openapi()
+        runtime = runtime_openapi["components"]["schemas"]
         documented = published["components"]["schemas"]
         for schema_name in ("ModelManifestResponse", "ModelMetadata"):
             self.assertEqual(documented[schema_name], runtime[schema_name])
+        for path in ("/internal/v1/classify", "/internal/v1/embed"):
+            runtime_headers = {
+                parameter["name"]
+                for parameter in runtime_openapi["paths"][path]["post"]["parameters"]
+                if parameter["in"] == "header"
+            }
+            documented_headers = {
+                parameter["name"]
+                for parameter in published["paths"][path]["post"]["parameters"]
+                if parameter["in"] == "header"
+            }
+            self.assertEqual(documented_headers, runtime_headers)
 
     def test_schema_errors_do_not_include_rejected_values(self) -> None:
         with self.assertRaises(ContractValidationError) as raised:

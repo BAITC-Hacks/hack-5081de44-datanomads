@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { Alert, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, PreviewLanguage, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -87,8 +87,10 @@ interface BackendSimilar {
 }
 
 interface BackendAssistPreview {
+  prediction?: BackendPrediction
   similar_tickets: BackendSimilar[]
   response_template?: { body: string; approved?: boolean; source?: string }
+  orchestration?: AssistPreviewState
 }
 
 interface BackendTicketDetail {
@@ -140,11 +142,24 @@ interface BackendTaxonomy {
 function mapPriority(value: string): Priority {
   if (value === 'high' || value === 'Высокий') return 'Высокий'
   if (value === 'low' || value === 'Низкий') return 'Низкий'
+  if (value.toUpperCase() === 'UNKNOWN' || value.toLowerCase() === 'unavailable' || !value.trim()) return 'Не определён'
   return 'Средний'
 }
 
-function mapLanguage(value: string): 'RU' | 'KZ' {
-  return value.toLowerCase() === 'kk' || value.toLowerCase() === 'kz' ? 'KZ' : 'RU'
+function mapLanguage(value: string): PreviewLanguage {
+  switch (value.trim().toUpperCase()) {
+    case 'RU':
+    case 'RUS':
+      return 'RU'
+    case 'KZ':
+    case 'KK':
+    case 'KAZ':
+      return 'KZ'
+    case 'MIXED':
+      return 'MIXED'
+    default:
+      return 'UNKNOWN'
+  }
 }
 
 function mapLearningStage(value: string): LearningCycle['stage'] {
@@ -188,10 +203,10 @@ function serviceIdForLabel(label?: string, services: TaxonomyOption[] = []) {
 }
 
 function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, knownTickets: BackendTicket[] = [], preview?: BackendAssistPreview): Ticket {
-  const prediction = detail?.prediction
+  const prediction = detail?.prediction ?? preview?.prediction
   const latest = detail?.latest_decision
   const related = preview?.similar_tickets ?? []
-  const topic = latest ? item.topic_label : prediction?.topic_label ?? item.topic_label
+  const topic = latest ? item.topic_label : prediction?.topic_label ?? 'Не определено'
   const alternatives = prediction?.alternatives ?? []
   const text = item.text
   const similar = related.map((candidate) => ({
@@ -205,13 +220,14 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   return {
     id: item.id,
     originalText: text,
-    modelVersion: prediction?.model_version,
-    language: mapLanguage(item.language),
+    modelVersion: prediction?.model_version === 'unavailable' ? undefined : prediction?.model_version,
+    language: mapLanguage(preview?.orchestration?.language ?? item.language),
     topic,
-    predictedTopic: prediction?.topic_label ?? item.topic_label,
-    confidence: prediction?.confidence ?? .75,
+    predictedTopic: prediction?.topic_label ?? 'Не определено',
+    confidence: prediction?.confidence ?? 0,
+    confidenceAvailable: Boolean(prediction && prediction.model_version !== 'unavailable'),
     alternatives: alternatives.map((alternative) => ({ topic: alternative.topic_label, confidence: alternative.confidence })),
-    service: latest?.service ?? prediction?.recommended_service ?? 'Служба обработки обращений',
+    service: latest?.service ?? (prediction?.recommended_service && !['UNKNOWN', 'unavailable'].includes(prediction.recommended_service) ? prediction.recommended_service : 'Не определена'),
     priority: mapPriority(latest?.priority ?? prediction?.predicted_priority ?? item.priority),
     routingReason: prediction?.routing_reason,
     region: item.region_name,
@@ -221,6 +237,7 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     responseTemplate: preview?.response_template?.body ?? 'Шаблон ответа сейчас недоступен. Составьте ответ вручную.',
     responseTemplateApproved: preview?.response_template?.approved,
     responseTemplateSource: preview?.response_template?.source,
+    assistPreview: preview?.orchestration,
     channel: item.source === 'mobile' ? 'Мобильное приложение' : item.source === 'call-center' ? 'Call-центр' : item.source === 'whatsapp' ? 'WhatsApp' : 'eGov',
   }
 }

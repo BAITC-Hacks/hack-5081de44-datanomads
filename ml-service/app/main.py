@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
@@ -132,7 +132,11 @@ async def root() -> dict[str, str]:
 
 
 @router.post("/classify", response_model=ClassifyResponse, tags=["inference"])
-async def classify(request: ClassifyRequest) -> ClassifyResponse:
+async def classify(
+    request: ClassifyRequest,
+    x_request_id: str | None = Header(default=None, alias="x-request-id"),
+    x_trace_id: str | None = Header(default=None, alias="x-trace-id"),
+) -> ClassifyResponse:
     configured = require_model_runtime("classifier")
     if request.model_version is not None and request.model_version != configured.model_version:
         raise HTTPException(status_code=404, detail="requested model version is not loaded")
@@ -153,7 +157,11 @@ async def classify(request: ClassifyRequest) -> ClassifyResponse:
 
 
 @router.post("/embed", response_model=EmbedResponse, tags=["inference"])
-async def embed(request: EmbedRequest) -> EmbedResponse:
+async def embed(
+    request: EmbedRequest,
+    x_request_id: str | None = Header(default=None, alias="x-request-id"),
+    x_trace_id: str | None = Header(default=None, alias="x-trace-id"),
+) -> EmbedResponse:
     configured = require_model_runtime("embedder")
     if request.model_version is not None and request.model_version != configured.model_version:
         raise HTTPException(status_code=404, detail="requested model version is not loaded")

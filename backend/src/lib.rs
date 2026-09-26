@@ -458,6 +458,15 @@ fn request_id_from_headers(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+fn trace_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-trace-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| request_id_from_headers(headers))
+}
+
 #[derive(Debug, Error)]
 pub enum ApiError {
     #[error("bad request: {0}")]
@@ -650,6 +659,85 @@ fn detect_language(text: &str) -> &'static str {
         "kk"
     } else {
         "ru"
+    }
+}
+
+fn detect_preview_language(text: &str) -> &'static str {
+    let mut has_cyrillic = false;
+    let mut has_kazakh = false;
+    let mut has_russian_specific = false;
+    for character in text.chars() {
+        let lower = character.to_lowercase().next().unwrap_or(character);
+        if ('а'..='я').contains(&lower) || lower == 'ё' {
+            has_cyrillic = true;
+        }
+        if matches!(lower, 'ә' | 'ғ' | 'қ' | 'ң' | 'ө' | 'ұ' | 'ү' | 'һ' | 'і') {
+            has_cyrillic = true;
+            has_kazakh = true;
+        }
+        if matches!(lower, 'ё' | 'э' | 'ъ') {
+            has_russian_specific = true;
+        }
+    }
+    if !has_cyrillic {
+        "UNKNOWN"
+    } else if has_kazakh && has_russian_specific {
+        "MIXED"
+    } else if has_kazakh {
+        "KZ"
+    } else {
+        "RU"
+    }
+}
+
+fn normalize_preview_language(language: Option<&str>, text: &str) -> Result<String, ApiError> {
+    let Some(language) = language.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(detect_preview_language(text).to_owned());
+    };
+    match language.to_ascii_uppercase().as_str() {
+        "RU" | "RUS" => Ok("RU".to_owned()),
+        "KZ" | "KK" | "KAZ" => Ok("KZ".to_owned()),
+        "MIXED" => Ok("MIXED".to_owned()),
+        "UNKNOWN" => Ok("UNKNOWN".to_owned()),
+        _ => Err(ApiError::BadRequest(
+            "language must be RU, KZ, MIXED, or UNKNOWN".to_owned(),
+        )),
+    }
+}
+
+fn unavailable_demo_prediction(ticket: &Ticket) -> Prediction {
+    Prediction {
+        ticket_id: ticket.id.clone(),
+        model_version: "unavailable".to_owned(),
+        topic_id: "UNKNOWN".to_owned(),
+        topic_label: "Не определено".to_owned(),
+        confidence: 0.0,
+        confidence_state: "low".to_owned(),
+        recommended_service: "UNKNOWN".to_owned(),
+        predicted_priority: "UNKNOWN".to_owned(),
+        routing_reason: "Требуется ручная проверка".to_owned(),
+        alternatives: Vec::new(),
+        created_at: ticket.created_at.clone(),
+    }
+}
+
+fn unavailable_demo_response_template(language: &str) -> ResponseTemplate {
+    let kazakh = language == "KZ";
+    ResponseTemplate {
+        id: "unavailable".to_owned(),
+        title: if kazakh {
+            "Жауап үлгісі қолжетімсіз".to_owned()
+        } else {
+            "Шаблон ответа недоступен".to_owned()
+        },
+        body: if kazakh {
+            "Тілді және шешімді қолмен тексеріп, жауапты өзіңіз құрастырыңыз.".to_owned()
+        } else {
+            "Проверьте язык и решение вручную, затем составьте ответ самостоятельно.".to_owned()
+        },
+        language: if kazakh { "kz" } else { "ru" }.to_owned(),
+        approved: false,
+        source: "UNAVAILABLE".to_owned(),
     }
 }
 
@@ -1087,7 +1175,10 @@ pub fn app(state: AppState) -> Router {
                 .allow_origin(tower_http::cors::Any)
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
                 .allow_headers(tower_http::cors::Any)
-                .expose_headers([header::HeaderName::from_static("x-request-id")]),
+                .expose_headers([
+                    header::HeaderName::from_static("x-request-id"),
+                    header::HeaderName::from_static("x-trace-id"),
+                ]),
         )
         .with_state(state)
 }
@@ -1097,7 +1188,7 @@ async fn request_context(mut request: Request, next: Next) -> Response {
         .headers()
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| {
             format!(
@@ -1109,17 +1200,26 @@ async fn request_context(mut request: Request, next: Next) -> Response {
         .headers()
         .get("x-trace-id")
         .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
         .unwrap_or(&request_id)
         .to_owned();
     let started = Instant::now();
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     request.extensions_mut().insert(request_id.clone());
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        request.headers_mut().insert("x-request-id", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        request.headers_mut().insert("x-trace-id", value);
+    }
     let mut response = next.run(request).await;
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&trace_id) {
+        response.headers_mut().insert("x-trace-id", value);
     }
     info!(
         service = SERVICE_NAME,
@@ -1658,6 +1758,30 @@ pub struct AssistPreviewResponse {
     pub repeat_candidates: Vec<SimilarTicket>,
     pub response_template: ResponseTemplate,
     pub source: String,
+    pub orchestration: AssistOrchestration,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssistOrchestration {
+    pub request_id: String,
+    pub trace_id: String,
+    pub status: String,
+    pub needs_review: bool,
+    pub language: String,
+    pub latency_ms: f64,
+    pub model_versions: std::collections::BTreeMap<String, String>,
+    pub stages: Vec<AssistStage>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AssistStage {
+    pub name: String,
+    pub status: String,
+    pub latency_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 // Offline fixture-only related-ticket behavior. Real mode uses Qdrant vector search.
@@ -1693,15 +1817,33 @@ async fn assist_preview(
     headers: HeaderMap,
     Json(request): Json<PreviewRequest>,
 ) -> Result<Json<AssistPreviewResponse>, ApiError> {
+    let started = Instant::now();
     let actor = require_role(
         &headers,
         &state.config,
         &[Role::Operator, Role::Manager, Role::Admin],
     )?;
-    if request.ticket_id.is_none() && request.text.as_deref().is_none_or(str::is_empty) {
+    let request_id = request_id_from_headers(&headers);
+    let trace_id = trace_id_from_headers(&headers);
+    if request.ticket_id.is_none()
+        && request
+            .text
+            .as_deref()
+            .is_none_or(|text| text.trim().is_empty())
+    {
         return Err(ApiError::BadRequest(
             "ticket_id or non-empty text is required".to_owned(),
         ));
+    }
+    if request.ticket_id.is_none() {
+        if let Some(text) = request.text.as_deref() {
+            if text.chars().count() > 10_000 {
+                return Err(ApiError::BadRequest(
+                    "text must be at most 10000 characters".to_owned(),
+                ));
+            }
+            normalize_preview_language(request.language.as_deref(), text)?;
+        }
     }
     if let Some(repository) = state.repository() {
         let response = repository
@@ -1710,7 +1852,8 @@ async fn assist_preview(
                 request.text.as_deref(),
                 request.language.as_deref(),
                 request.region_id.as_deref(),
-                &request_id_from_headers(&headers),
+                &request_id,
+                &trace_id,
             )
             .await
             .map_err(|error| {
@@ -1728,7 +1871,7 @@ async fn assist_preview(
                 "ASSIST_PREVIEW",
                 "ticket",
                 request.ticket_id.as_deref(),
-                Some(&request_id_from_headers(&headers)),
+                Some(&request_id),
                 None,
                 json!({"source": &response.source}),
             )
@@ -1753,7 +1896,14 @@ async fn assist_preview(
                 "text must be at most 10000 characters".to_owned(),
             ));
         }
-        let (topic_id, _, _, _) = demo_topic_for_text(&text);
+        let language_state = normalize_preview_language(request.language.as_deref(), &text)?;
+        let uncertain_language = matches!(language_state.as_str(), "MIXED" | "UNKNOWN");
+        let (topic_id, topic_label, priority) = if uncertain_language {
+            ("UNKNOWN", "Не определено".to_owned(), "UNKNOWN")
+        } else {
+            let (topic_id, _, _, priority) = demo_topic_for_text(&text);
+            (topic_id, topic_label(&store.topics, topic_id), priority)
+        };
         let region_id = normalize_region_id(request.region_id.unwrap_or_else(|| "R01".to_owned()));
         let region = store
             .regions
@@ -1761,12 +1911,13 @@ async fn assist_preview(
             .find(|region| region.id == region_id)
             .cloned()
             .ok_or_else(|| ApiError::BadRequest(format!("unknown region_id: {region_id}")))?;
-        let language = request
-            .language
-            .unwrap_or_else(|| detect_language(&text).to_owned());
-        if language != "ru" && language != "kk" {
-            return Err(ApiError::BadRequest("language must be ru or kk".to_owned()));
+        let language = match language_state.as_str() {
+            "RU" => "ru",
+            "KZ" => "kk",
+            "MIXED" => "mixed",
+            _ => "unknown",
         }
+        .to_owned();
         (
             Ticket {
                 id: "preview-001".to_owned(),
@@ -1776,8 +1927,8 @@ async fn assist_preview(
                 region_id: region.id,
                 region_name: region.name,
                 topic_id: topic_id.to_owned(),
-                topic_label: topic_label(&store.topics, topic_id),
-                priority: priority_for_topic(topic_id).to_owned(),
+                topic_label,
+                priority: priority.to_owned(),
                 status: "preview".to_owned(),
                 source: "preview".to_owned(),
                 created_at: DEMO_TIMESTAMP.to_owned(),
@@ -1786,12 +1937,29 @@ async fn assist_preview(
             "deterministic-demo".to_owned(),
         )
     };
-    let prediction = store
-        .predictions
-        .get(&ticket.id)
-        .cloned()
-        .unwrap_or_else(|| prediction_for_ticket(&ticket, &store.topics));
-    let related = demo_related_tickets(&store, &ticket, &prediction);
+    let language_started = Instant::now();
+    let language_state = normalize_preview_language(Some(&ticket.language), &ticket.text)
+        .unwrap_or_else(|_| "UNKNOWN".to_owned());
+    let language_latency_ms = language_started.elapsed().as_secs_f64() * 1000.0;
+    let uncertain_language = matches!(language_state.as_str(), "MIXED" | "UNKNOWN");
+    let classification_started = Instant::now();
+    let prediction = if uncertain_language {
+        unavailable_demo_prediction(&ticket)
+    } else {
+        store
+            .predictions
+            .get(&ticket.id)
+            .cloned()
+            .unwrap_or_else(|| prediction_for_ticket(&ticket, &store.topics))
+    };
+    let classification_latency_ms = classification_started.elapsed().as_secs_f64() * 1000.0;
+    let related_started = Instant::now();
+    let related = if uncertain_language {
+        Vec::new()
+    } else {
+        demo_related_tickets(&store, &ticket, &prediction)
+    };
+    let retrieval_latency_ms = related_started.elapsed().as_secs_f64() * 1000.0;
     let duplicate_candidates = related
         .iter()
         .filter(|item| item.score >= 0.8)
@@ -1809,14 +1977,133 @@ async fn assist_preview(
         .find(|decision| decision.ticket_id == ticket.id)
         .map(|decision| decision.confirmed_topic_id.as_str())
         .unwrap_or(&prediction.topic_id);
+    let template_started = Instant::now();
+    let response_template = if uncertain_language {
+        unavailable_demo_response_template(&language_state)
+    } else {
+        response_template(&ticket.language, template_topic)
+    };
+    let template_latency_ms = template_started.elapsed().as_secs_f64() * 1000.0;
+    let mut model_versions = std::collections::BTreeMap::new();
+    if !uncertain_language {
+        model_versions.insert("classifier".to_owned(), prediction.model_version.clone());
+    }
+    let has_human_decision = store
+        .decisions
+        .iter()
+        .any(|decision| decision.ticket_id == ticket.id);
+    let stages = vec![
+        AssistStage {
+            name: "language".to_owned(),
+            status: if language_state == "UNKNOWN" {
+                "unknown"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: language_latency_ms,
+            model_version: None,
+            error_code: (language_state == "UNKNOWN").then(|| "LANGUAGE_UNKNOWN".to_owned()),
+        },
+        AssistStage {
+            name: "classification".to_owned(),
+            status: if uncertain_language {
+                "unavailable"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: classification_latency_ms,
+            model_version: (!uncertain_language).then(|| prediction.model_version.clone()),
+            error_code: uncertain_language.then(|| "LANGUAGE_UNCERTAIN".to_owned()),
+        },
+        AssistStage {
+            name: "routing".to_owned(),
+            status: if uncertain_language {
+                "skipped"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: 0.0,
+            model_version: None,
+            error_code: uncertain_language.then(|| "CLASSIFICATION_UNAVAILABLE".to_owned()),
+        },
+        AssistStage {
+            name: "priority".to_owned(),
+            status: if uncertain_language {
+                "skipped"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: 0.0,
+            model_version: None,
+            error_code: uncertain_language.then(|| "CLASSIFICATION_UNAVAILABLE".to_owned()),
+        },
+        AssistStage {
+            name: "retrieval".to_owned(),
+            status: if uncertain_language {
+                "skipped"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: retrieval_latency_ms,
+            model_version: None,
+            error_code: uncertain_language.then(|| "CLASSIFICATION_UNAVAILABLE".to_owned()),
+        },
+        AssistStage {
+            name: "duplicate_repeat".to_owned(),
+            status: if uncertain_language {
+                "skipped"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: 0.0,
+            model_version: None,
+            error_code: uncertain_language.then(|| "RETRIEVAL_UNAVAILABLE".to_owned()),
+        },
+        AssistStage {
+            name: "response_template".to_owned(),
+            status: if uncertain_language {
+                "unavailable"
+            } else {
+                "completed"
+            }
+            .to_owned(),
+            latency_ms: template_latency_ms,
+            model_version: None,
+            error_code: uncertain_language.then(|| "LANGUAGE_UNCERTAIN".to_owned()),
+        },
+    ];
+    let partial = stages
+        .iter()
+        .any(|stage| matches!(stage.status.as_str(), "unavailable" | "skipped" | "unknown"));
+    let needs_review = !has_human_decision
+        || uncertain_language
+        || prediction.confidence < 0.85
+        || response_template.source != "AUTHORITATIVE"
+        || partial;
     Ok(Json(AssistPreviewResponse {
-        response_template: response_template(&ticket.language, template_topic),
+        response_template,
         ticket,
         prediction,
         similar_tickets: related,
         duplicate_candidates,
         repeat_candidates,
         source,
+        orchestration: AssistOrchestration {
+            request_id,
+            trace_id,
+            status: if partial { "partial" } else { "complete" }.to_owned(),
+            needs_review,
+            language: language_state,
+            latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+            model_versions,
+            stages,
+        },
     }))
 }
 

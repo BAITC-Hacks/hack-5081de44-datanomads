@@ -11,13 +11,25 @@ from app.main import app
 class ASGIClient:
     """Sync facade over httpx ASGITransport (works across httpx releases)."""
 
-    async def _request(self, method: str, url: str, json: dict | None = None) -> httpx.Response:
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        json: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.request(method, url, json=json)
+            return await client.request(method, url, json=json, headers=headers)
 
-    def request(self, method: str, url: str, json: dict | None = None) -> httpx.Response:
-        return asyncio.run(self._request(method, url, json))
+    def request(
+        self,
+        method: str,
+        url: str,
+        json: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        return asyncio.run(self._request(method, url, json, headers))
 
     def get(self, url: str) -> httpx.Response:
         return self.request("GET", url)
@@ -52,6 +64,45 @@ def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:
     assert kz.status_code == 200
     assert kz.json()["language"] == "KZ"
     assert kz.json()["topic_id"] == "street_lighting"
+
+
+def test_mixed_unknown_and_low_confidence_classifications_require_review() -> None:
+    for text, language in (("әлеуметтік мәселе", "MIXED"), ("ticket 123", "UNKNOWN")):
+        response = client.post(
+            "/internal/v1/classify",
+            json={"text": text, "language": language},
+        )
+        assert response.status_code == 200
+        prediction = response.json()["predictions"][0]
+        assert prediction["language"] == language
+        assert prediction["needs_review"] is True
+
+    low_confidence = client.post(
+        "/internal/v1/classify",
+        json={"text": "unrecognized text", "language": "RU"},
+    )
+    assert low_confidence.status_code == 200
+    prediction = low_confidence.json()["predictions"][0]
+    assert prediction["confidence_state"] == "LOW_CONFIDENCE"
+    assert prediction["needs_review"] is True
+
+
+def test_inference_trace_headers_are_documented_and_request_id_is_preserved() -> None:
+    header_values = {"x-request-id": "assist-preview-17", "x-trace-id": "trace-17"}
+    response = client.request(
+        "POST",
+        "/internal/v1/classify",
+        json={"text": "Нет воды", "request_id": header_values["x-request-id"]},
+        headers=header_values,
+    )
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == header_values["x-request-id"]
+
+    openapi = app.openapi()
+    for path in ("/internal/v1/classify", "/internal/v1/embed"):
+        parameters = openapi["paths"][path]["post"]["parameters"]
+        documented = {parameter["name"] for parameter in parameters}
+        assert {"x-request-id", "x-trace-id"}.issubset(documented)
 
 
 def test_batch_embedding_is_repeatable_and_normalized() -> None:

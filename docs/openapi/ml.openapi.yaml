@@ -53,6 +53,17 @@ paths:
       - inference
       summary: Classify
       operationId: classify_internal_v1_classify_post
+      parameters:
+      - name: x-request-id
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: x-trace-id
+        in: header
+        required: false
+        schema:
+          type: string
       requestBody:
         content:
           application/json:
@@ -78,6 +89,17 @@ paths:
       - inference
       summary: Embed
       operationId: embed_internal_v1_embed_post
+      parameters:
+      - name: x-request-id
+        in: header
+        required: false
+        schema:
+          type: string
+      - name: x-trace-id
+        in: header
+        required: false
+        schema:
+          type: string
       requestBody:
         content:
           application/json:

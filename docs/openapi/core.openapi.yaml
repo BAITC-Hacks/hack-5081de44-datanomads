@@ -83,6 +83,15 @@ paths:
       tags: [assist]
       summary: Build an operator assist preview
       security: [{ pulseRole: [] }, {}]
+      parameters:
+        - name: x-request-id
+          in: header
+          required: false
+          schema: { type: string }
+        - name: x-trace-id
+          in: header
+          required: false
+          schema: { type: string }
       requestBody:
         required: true
         content:
@@ -883,15 +892,15 @@ components:
         dataset_version_count: { type: integer, minimum: 0 }
     AssistPreviewRequest:
       type: object
-      required: [external_ticket_id, text, region_id]
+      description: Provide either ticket_id or text.
       properties:
-        external_ticket_id: { type: string }
+        ticket_id: { type: string }
         text: { type: string, minLength: 1, maxLength: 10000 }
+        language: { type: string, enum: [RU, KZ, MIXED, UNKNOWN] }
         region_id: { type: string }
-        available_metadata: { type: object, additionalProperties: true }
     AssistPreviewResponse:
       type: object
-      required: [ticket, prediction, similar_tickets, duplicate_candidates, repeat_candidates, response_template, source]
+      required: [ticket, prediction, similar_tickets, duplicate_candidates, repeat_candidates, response_template, source, orchestration]
       properties:
         ticket: { $ref: '#/components/schemas/Ticket' }
         prediction: { $ref: '#/components/schemas/Prediction' }
@@ -907,6 +916,28 @@ components:
             approved: { type: boolean, description: True only for authoritative templates. }
             source: { type: string, enum: [AUTHORITATIVE, MANUAL_DEMO, UNAVAILABLE] }
         source: { type: string }
+        orchestration: { $ref: '#/components/schemas/AssistOrchestration' }
+    AssistOrchestration:
+      type: object
+      required: [request_id, trace_id, status, needs_review, language, latency_ms, model_versions, stages]
+      properties:
+        request_id: { type: string }
+        trace_id: { type: string }
+        status: { type: string, enum: [complete, partial] }
+        needs_review: { type: boolean }
+        language: { type: string, enum: [RU, KZ, MIXED, UNKNOWN] }
+        latency_ms: { type: number, minimum: 0 }
+        model_versions: { type: object, additionalProperties: { type: string } }
+        stages: { type: array, items: { $ref: '#/components/schemas/AssistStage' } }
+    AssistStage:
+      type: object
+      required: [name, status, latency_ms]
+      properties:
+        name: { type: string, enum: [language, classification, routing, priority, retrieval, duplicate_repeat, response_template] }
+        status: { type: string, enum: [completed, partial, unavailable, skipped, unknown] }
+        latency_ms: { type: number, minimum: 0 }
+        model_version: { type: string }
+        error_code: { type: string }
     Prediction:
       type: object
       required: [ticket_id, model_version, topic_id, topic_label, confidence, confidence_state, recommended_service, predicted_priority, routing_reason, alternatives, created_at]

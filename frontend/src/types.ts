@@ -1,5 +1,25 @@
 export type TicketStatus = 'new' | 'confirmed' | 'corrected'
-export type Priority = 'Высокий' | 'Средний' | 'Низкий'
+export type Priority = 'Высокий' | 'Средний' | 'Низкий' | 'Не определён'
+export type PreviewLanguage = 'RU' | 'KZ' | 'MIXED' | 'UNKNOWN'
+
+export interface AssistPreviewStage {
+  name: string
+  status: 'completed' | 'partial' | 'unavailable' | 'skipped' | 'unknown'
+  latency_ms: number
+  model_version?: string
+  error_code?: string
+}
+
+export interface AssistPreviewState {
+  request_id: string
+  trace_id: string
+  status: 'complete' | 'partial'
+  needs_review: boolean
+  language: PreviewLanguage
+  latency_ms: number
+  model_versions: Record<string, string>
+  stages: AssistPreviewStage[]
+}
 
 export interface TicketAlternative {
   topic: string
@@ -18,10 +38,11 @@ export interface Ticket {
   id: string
   originalText: string
   modelVersion?: string
-  language: 'RU' | 'KZ'
+  language: PreviewLanguage
   topic: string
   predictedTopic?: string
   confidence: number
+  confidenceAvailable?: boolean
   alternatives: TicketAlternative[]
   service: string
   priority: Priority
@@ -33,6 +54,7 @@ export interface Ticket {
   responseTemplate: string
   responseTemplateApproved?: boolean
   responseTemplateSource?: string
+  assistPreview?: AssistPreviewState
   channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp'
 }
 

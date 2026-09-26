@@ -7,13 +7,13 @@
 
 use crate::{
     Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery,
-    AnalyticsResponse, AssistPreviewResponse, CloseLearningCycleRequest,
-    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
-    ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
-    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
-    ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest, ResponseTemplate,
-    SimilarTicket, Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint,
-    Topic,
+    AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
+    CloseLearningCycleRequest, CreateLearningCycleRequest, DatasetProvenance, DecisionRequest,
+    DecisionResponse, ForecastQuery, ForecastResponse, ImportRequest, ImportResponse,
+    LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview,
+    MetricBucket, ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
+    ResponseTemplate, SimilarTicket, Ticket, TicketDetailResponse, TicketListResponse, TicketQuery,
+    TimeSeriesPoint, Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row};
-use std::env;
+use std::{env, time::Instant};
 
 const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
@@ -238,6 +238,52 @@ struct VectorIndexConfig {
 impl VectorIndexConfig {
     fn dimension(&self) -> usize {
         self.embedding_dimension as usize
+    }
+}
+
+fn assist_language_state(value: Option<&str>) -> String {
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "RU" | "RUS" => "RU".to_owned(),
+        "KZ" | "KK" | "KAZ" => "KZ".to_owned(),
+        "MIXED" => "MIXED".to_owned(),
+        _ => "UNKNOWN".to_owned(),
+    }
+}
+
+fn assist_stage(
+    name: &str,
+    status: &str,
+    latency_ms: f64,
+    model_version: Option<String>,
+    error_code: Option<&str>,
+) -> AssistStage {
+    AssistStage {
+        name: name.to_owned(),
+        status: status.to_owned(),
+        latency_ms,
+        model_version,
+        error_code: error_code.map(ToOwned::to_owned),
+    }
+}
+
+fn unavailable_assist_prediction(ticket: &Ticket) -> Prediction {
+    Prediction {
+        ticket_id: ticket.id.clone(),
+        model_version: "unavailable".to_owned(),
+        topic_id: "unknown".to_owned(),
+        topic_label: "Не определено".to_owned(),
+        confidence: 0.0,
+        confidence_state: "low".to_owned(),
+        recommended_service: "UNKNOWN".to_owned(),
+        predicted_priority: "UNKNOWN".to_owned(),
+        routing_reason: "Требуется ручная проверка".to_owned(),
+        alternatives: Vec::new(),
+        created_at: ticket.created_at.clone(),
     }
 }
 
@@ -565,11 +611,13 @@ impl PgRepository {
         text: &str,
         language: Option<&str>,
         request_id: &str,
+        trace_id: &str,
     ) -> Result<MlClassificationWithModel, String> {
         let response = self
             .client
             .post(format!("{}/internal/v1/classify", self.ml_service_url))
             .header("x-request-id", request_id)
+            .header("x-trace-id", trace_id)
             .json(&json!({
                 "text": text,
                 "language": language,
@@ -600,11 +648,13 @@ impl PgRepository {
         index: &VectorIndexConfig,
         text: &str,
         request_id: &str,
+        trace_id: &str,
     ) -> Result<Vec<f32>, String> {
         let response = self
             .client
             .post(format!("{}/internal/v1/embed", self.ml_service_url))
             .header("x-request-id", request_id)
+            .header("x-trace-id", trace_id)
             .json(&json!({
                 "text": text,
                 "dimension": index.dimension(),
@@ -728,6 +778,8 @@ impl PgRepository {
         index: &VectorIndexConfig,
         vector: &[f32],
         exclude_id: Option<i64>,
+        request_id: &str,
+        trace_id: &str,
     ) -> Result<Vec<QdrantHit>, String> {
         self.ensure_qdrant_collection(index, false).await?;
         let result = self
@@ -736,6 +788,8 @@ impl PgRepository {
                 "{}/collections/{}/points/search",
                 self.qdrant_url, index.collection_name
             ))
+            .header("x-request-id", request_id)
+            .header("x-trace-id", trace_id)
             .json(&json!({
                 "vector": vector,
                 "limit": 5,
@@ -778,6 +832,32 @@ impl PgRepository {
             });
         }
         Ok(hits)
+    }
+
+    async fn search_assist_candidates(
+        &self,
+        text: &str,
+        exclude_id: Option<i64>,
+        request_id: &str,
+        trace_id: &str,
+    ) -> Result<(VectorIndexConfig, Vec<QdrantHit>), String> {
+        let mut index_tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin similarity index read: {error}"))?;
+        let active_index = self.locked_vector_index(&mut index_tx).await?;
+        let vector = self
+            .embed(&active_index, text, request_id, trace_id)
+            .await?;
+        let hits = self
+            .qdrant_search(&active_index, &vector, exclude_id, request_id, trace_id)
+            .await?;
+        index_tx
+            .commit()
+            .await
+            .map_err(|error| format!("finish similarity index read: {error}"))?;
+        Ok((active_index, hits))
     }
 
     async fn resolve_routing(
@@ -929,7 +1009,9 @@ impl PgRepository {
         source: Option<&str>,
         request_id: &str,
     ) -> Result<TicketDetailResponse, String> {
-        let classification = self.classify(text, language, request_id).await?;
+        let classification = self
+            .classify(text, language, request_id, request_id)
+            .await?;
         let db_topic = normalize_topic_id(&classification.prediction.topic_id);
         let db_region = normalize_region_id(region_id.unwrap_or("KZ-ASTANA"));
         let db_language =
@@ -1020,7 +1102,9 @@ impl PgRepository {
             .await
             .map_err(|error| format!("commit ticket transaction: {error}"))?;
 
-        let vector = self.embed(&active_index, text, request_id).await?;
+        let vector = self
+            .embed(&active_index, text, request_id, request_id)
+            .await?;
         self.qdrant_upsert(
             &active_index,
             ticket_id,
@@ -1268,7 +1352,9 @@ impl PgRepository {
                 })?);
             let language =
                 normalize_language(json_text(item, "language").as_deref().unwrap_or("UNKNOWN"));
-            let classification = self.classify(&text, Some(&language), request_id).await?;
+            let classification = self
+                .classify(&text, Some(&language), request_id, request_id)
+                .await?;
             let topic_id = normalize_topic_id(
                 json_text(item, "topic_id")
                     .filter(|value| value != "unknown" && !value.is_empty())
@@ -1465,7 +1551,9 @@ impl PgRepository {
 
         let mut indexed_rows = 0usize;
         for (ticket_id, region_id, topic_id, text, created_at) in index_queue {
-            let vector = self.embed(&active_index, &text, request_id).await?;
+            let vector = self
+                .embed(&active_index, &text, request_id, request_id)
+                .await?;
             self.qdrant_upsert(
                 &active_index,
                 ticket_id,
@@ -2965,115 +3053,334 @@ impl PgRepository {
         language: Option<&str>,
         region_id: Option<&str>,
         request_id: &str,
+        trace_id: &str,
     ) -> Result<AssistPreviewResponse, String> {
-        let (ticket, source, exclude_id, preview_prediction, latest_decision) =
+        let started = Instant::now();
+        let mut stages = Vec::new();
+        let mut model_versions = std::collections::BTreeMap::new();
+        let mut needs_review = false;
+        let (ticket, source, exclude_id, latest_decision, prediction, language_state) =
             if let Some(ticket_id) = ticket_id {
                 let detail = self.get_ticket(ticket_id).await?;
-                let id = detail.ticket.id.parse::<i64>().ok();
+                let language_state = assist_language_state(Some(&detail.ticket.language));
+                let ticket_id = detail.ticket.id.parse::<i64>().ok();
+                let prediction = detail.prediction;
+                let has_decision = detail.latest_decision.is_some();
+                let classification_is_available = prediction.model_version != "unavailable"
+                    && !prediction.topic_id.eq_ignore_ascii_case("unknown");
+                let route_is_known = classification_is_available
+                    && prediction.recommended_service != "UNKNOWN"
+                    && prediction.predicted_priority != "UNKNOWN";
+                if classification_is_available {
+                    model_versions
+                        .insert("classifier".to_owned(), prediction.model_version.clone());
+                }
+                stages.push(assist_stage(
+                    "language",
+                    if language_state == "UNKNOWN" {
+                        "unknown"
+                    } else {
+                        "completed"
+                    },
+                    0.0,
+                    None,
+                    (language_state == "UNKNOWN").then_some("LANGUAGE_UNKNOWN"),
+                ));
+                stages.push(assist_stage(
+                    "classification",
+                    if classification_is_available {
+                        "completed"
+                    } else {
+                        "unavailable"
+                    },
+                    0.0,
+                    classification_is_available.then(|| prediction.model_version.clone()),
+                    (!classification_is_available).then_some("ML_CLASSIFIER_UNAVAILABLE"),
+                ));
+                stages.push(assist_stage(
+                    "routing",
+                    if route_is_known {
+                        "completed"
+                    } else {
+                        "unknown"
+                    },
+                    0.0,
+                    None,
+                    (!route_is_known).then_some("ROUTING_UNAVAILABLE"),
+                ));
+                stages.push(assist_stage(
+                    "priority",
+                    if route_is_known {
+                        "completed"
+                    } else {
+                        "unknown"
+                    },
+                    0.0,
+                    None,
+                    (!route_is_known).then_some("ROUTING_UNAVAILABLE"),
+                ));
+                needs_review = !has_decision
+                    || !classification_is_available
+                    || !route_is_known
+                    || prediction.confidence < 0.85
+                    || matches!(language_state.as_str(), "MIXED" | "UNKNOWN");
                 (
                     detail.ticket,
                     "postgres-ticket+ml+qdrant".to_owned(),
-                    id,
-                    None,
+                    ticket_id,
                     detail.latest_decision,
+                    prediction,
+                    language_state,
                 )
             } else {
                 let text = text.ok_or_else(|| "text is required".to_owned())?.trim();
                 if text.is_empty() {
                     return Err("text must not be empty".to_owned());
                 }
-                let classification = self.classify(text, language, request_id).await?;
-                let db_topic = normalize_topic_id(&classification.prediction.topic_id);
-                let db_region = normalize_region_id(region_id.unwrap_or("KZ-ASTANA"));
-                let routing = self
-                    .resolve_routing(&db_topic, &db_region, None, None)
-                    .await?;
-                let prediction = prediction_for_db(
-                    0,
-                    &classification,
-                    &routing.priority,
-                    &routing.service_name,
-                    &routing.reason,
-                );
-                let ticket = Ticket {
+                if text.chars().count() > 10_000 {
+                    return Err("text must be at most 10000 characters".to_owned());
+                }
+                let normalized_region = normalize_region_id(region_id.unwrap_or("KZ-ASTANA"));
+                let created_at = Utc::now().to_rfc3339();
+                let mut ticket = Ticket {
                     id: "preview".to_owned(),
                     external_ref: "preview".to_owned(),
                     text: text.to_owned(),
-                    language: normalize_language(
-                        language.unwrap_or(&classification.prediction.language),
-                    )
-                    .to_ascii_lowercase(),
-                    region_id: db_region.clone(),
-                    region_name: db_region,
-                    topic_id: db_topic,
-                    topic_label: classification.prediction.topic.clone(),
-                    priority: routing.priority,
+                    language: "UNKNOWN".to_owned(),
+                    region_id: normalized_region.clone(),
+                    region_name: normalized_region,
+                    topic_id: "unknown".to_owned(),
+                    topic_label: "Не определено".to_owned(),
+                    priority: "UNKNOWN".to_owned(),
                     status: "preview".to_owned(),
                     source: "preview".to_owned(),
-                    created_at: Utc::now().to_rfc3339(),
-                    updated_at: Utc::now().to_rfc3339(),
+                    created_at: created_at.clone(),
+                    updated_at: created_at.clone(),
                 };
-                (ticket, "ml+qdrant".to_owned(), None, Some(prediction), None)
+                let classification_started = Instant::now();
+                let classification = self.classify(text, language, request_id, trace_id).await;
+                let classification_latency_ms =
+                    classification_started.elapsed().as_secs_f64() * 1000.0;
+                let mut language_state = assist_language_state(language);
+                let prediction = match classification {
+                    Ok(classification) => {
+                        language_state =
+                            assist_language_state(Some(&classification.prediction.language));
+                        model_versions.insert(
+                            "classifier".to_owned(),
+                            classification.model_version.clone(),
+                        );
+                        stages.push(assist_stage(
+                            "language",
+                            if language_state == "UNKNOWN" {
+                                "unknown"
+                            } else {
+                                "completed"
+                            },
+                            0.0,
+                            None,
+                            (language_state == "UNKNOWN").then_some("LANGUAGE_UNKNOWN"),
+                        ));
+                        stages.push(assist_stage(
+                            "classification",
+                            "completed",
+                            classification_latency_ms,
+                            Some(classification.model_version.clone()),
+                            None,
+                        ));
+                        needs_review |= classification.prediction.needs_review
+                            || matches!(language_state.as_str(), "MIXED" | "UNKNOWN");
+                        ticket.language = language_state.clone();
+                        ticket.topic_id = normalize_topic_id(&classification.prediction.topic_id);
+                        ticket.topic_label = classification.prediction.topic.clone();
+                        let routing_started = Instant::now();
+                        let routing = self
+                            .resolve_routing(&ticket.topic_id, &ticket.region_id, None, None)
+                            .await;
+                        let routing_latency_ms = routing_started.elapsed().as_secs_f64() * 1000.0;
+                        match routing {
+                            Ok(routing) => {
+                                ticket.priority = routing.priority.clone();
+                                stages.push(assist_stage(
+                                    "routing",
+                                    "completed",
+                                    routing_latency_ms,
+                                    None,
+                                    None,
+                                ));
+                                stages.push(assist_stage("priority", "completed", 0.0, None, None));
+                                prediction_for_db(
+                                    0,
+                                    &classification,
+                                    &routing.priority,
+                                    &routing.service_name,
+                                    &routing.reason,
+                                )
+                            }
+                            Err(_) => {
+                                needs_review = true;
+                                ticket.priority = "UNKNOWN".to_owned();
+                                stages.push(assist_stage(
+                                    "routing",
+                                    "unavailable",
+                                    routing_latency_ms,
+                                    None,
+                                    Some("ROUTING_UNAVAILABLE"),
+                                ));
+                                stages.push(assist_stage(
+                                    "priority",
+                                    "skipped",
+                                    0.0,
+                                    None,
+                                    Some("ROUTING_UNAVAILABLE"),
+                                ));
+                                prediction_for_db(
+                                    0,
+                                    &classification,
+                                    "UNKNOWN",
+                                    "UNKNOWN",
+                                    "Ручная проверка маршрутизации",
+                                )
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        ticket.language = language_state.clone();
+                        let language_error = if language.is_none() {
+                            Some("LANGUAGE_UNAVAILABLE")
+                        } else if language_state == "UNKNOWN" {
+                            Some("LANGUAGE_UNKNOWN")
+                        } else {
+                            None
+                        };
+                        stages.push(assist_stage(
+                            "language",
+                            if language_state == "UNKNOWN" {
+                                "unknown"
+                            } else {
+                                "completed"
+                            },
+                            0.0,
+                            None,
+                            language_error,
+                        ));
+                        stages.push(assist_stage(
+                            "classification",
+                            "unavailable",
+                            classification_latency_ms,
+                            None,
+                            Some("ML_CLASSIFIER_UNAVAILABLE"),
+                        ));
+                        stages.push(assist_stage(
+                            "routing",
+                            "skipped",
+                            0.0,
+                            None,
+                            Some("CLASSIFICATION_UNAVAILABLE"),
+                        ));
+                        stages.push(assist_stage(
+                            "priority",
+                            "skipped",
+                            0.0,
+                            None,
+                            Some("CLASSIFICATION_UNAVAILABLE"),
+                        ));
+                        needs_review = true;
+                        unavailable_assist_prediction(&ticket)
+                    }
+                };
+                (
+                    ticket,
+                    "ml+qdrant".to_owned(),
+                    None,
+                    None,
+                    prediction,
+                    language_state,
+                )
             };
-        let mut index_tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| format!("begin similarity index read: {error}"))?;
-        let active_index = self.locked_vector_index(&mut index_tx).await?;
-        let vector = self.embed(&active_index, &ticket.text, request_id).await?;
-        let hits = self
-            .qdrant_search(&active_index, &vector, exclude_id)
-            .await?;
-        index_tx
-            .commit()
-            .await
-            .map_err(|error| format!("finish similarity index read: {error}"))?;
+        let retrieval_started = Instant::now();
+        let retrieval = self
+            .search_assist_candidates(&ticket.text, exclude_id, request_id, trace_id)
+            .await;
+        let retrieval_latency_ms = retrieval_started.elapsed().as_secs_f64() * 1000.0;
         let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
             .ok()
             .map(|value| value.with_timezone(&Utc));
-        let current_topic_id = preview_prediction
-            .as_ref()
-            .map(|value| value.topic_id.clone())
-            .unwrap_or_else(|| ticket.topic_id.clone());
-        let similar = hits
-            .into_iter()
-            .map(|hit| SimilarTicket {
-                ticket_id: hit.id.to_string(),
-                score: hit.score,
-                relation: {
-                    let same_topic = hit.topic_id == current_topic_id;
-                    let same_region = hit.region_id == ticket.region_id;
-                    let within_time_window = match (current_created_at, hit.created_at) {
-                        (Some(current), Some(candidate)) => {
-                            (current - candidate).num_days().unsigned_abs() <= 30
+        let mut similar = Vec::new();
+        match retrieval {
+            Ok((active_index, hits)) => {
+                model_versions.insert("embedder".to_owned(), active_index.embedder_version.clone());
+                stages.push(assist_stage(
+                    "retrieval",
+                    "completed",
+                    retrieval_latency_ms,
+                    Some(active_index.embedder_version),
+                    None,
+                ));
+                let current_topic = if ticket.topic_id.eq_ignore_ascii_case("unknown") {
+                    None
+                } else {
+                    Some(ticket.topic_id.as_str())
+                };
+                let relation_started = Instant::now();
+                similar = hits
+                    .into_iter()
+                    .map(|hit| {
+                        let relation = {
+                            let same_topic =
+                                current_topic.is_some_and(|topic_id| hit.topic_id == topic_id);
+                            let same_region = hit.region_id == ticket.region_id;
+                            let within_time_window = match (current_created_at, hit.created_at) {
+                                (Some(current), Some(candidate)) => {
+                                    (current - candidate).num_days().unsigned_abs() <= 30
+                                }
+                                _ => false,
+                            };
+                            if hit.score >= 0.90 && same_topic && same_region && within_time_window
+                            {
+                                "duplicate"
+                            } else if hit.score >= 0.78 && same_topic && within_time_window {
+                                "repeat"
+                            } else {
+                                "similar"
+                            }
+                            .to_owned()
+                        };
+                        SimilarTicket {
+                            ticket_id: hit.id.to_string(),
+                            score: hit.score,
+                            relation,
+                            topic_id: hit.topic_id,
+                            region_id: hit.region_id,
                         }
-                        _ => false,
-                    };
-                    if hit.score >= 0.90 && same_topic && same_region && within_time_window {
-                        "duplicate"
-                    } else if hit.score >= 0.78 && same_topic && within_time_window {
-                        "repeat"
-                    } else {
-                        "similar"
-                    }
-                    .to_owned()
-                },
-                topic_id: hit.topic_id,
-                region_id: hit.region_id,
-            })
-            .collect::<Vec<_>>();
-        let prediction = if let Some(prediction) = preview_prediction {
-            prediction
-        } else {
-            self.fetch_prediction(
-                ticket
-                    .id
-                    .parse::<i64>()
-                    .map_err(|_| "stored ticket has invalid database id".to_owned())?,
-            )
-            .await?
-        };
+                    })
+                    .collect();
+                stages.push(assist_stage(
+                    "duplicate_repeat",
+                    "completed",
+                    relation_started.elapsed().as_secs_f64() * 1000.0,
+                    None,
+                    None,
+                ));
+            }
+            Err(_) => {
+                needs_review = true;
+                stages.push(assist_stage(
+                    "retrieval",
+                    "unavailable",
+                    retrieval_latency_ms,
+                    None,
+                    Some("RETRIEVAL_UNAVAILABLE"),
+                ));
+                stages.push(assist_stage(
+                    "duplicate_repeat",
+                    "skipped",
+                    0.0,
+                    None,
+                    Some("RETRIEVAL_UNAVAILABLE"),
+                ));
+            }
+        }
         let duplicate_candidates = similar
             .iter()
             .filter(|item| item.relation == "duplicate")
@@ -3096,16 +3403,83 @@ impl PgRepository {
                 prediction.topic_id.as_str(),
                 prediction.recommended_service.as_str(),
             ));
-        Ok(AssistPreviewResponse {
-            response_template: self
+        let template_started = Instant::now();
+        let response_template = if template_topic.eq_ignore_ascii_case("unknown")
+            || template_service.eq_ignore_ascii_case("unknown")
+        {
+            needs_review = true;
+            stages.push(assist_stage(
+                "response_template",
+                "skipped",
+                0.0,
+                None,
+                Some("ROUTING_UNAVAILABLE"),
+            ));
+            unavailable_response_template(&language_state)
+        } else {
+            match self
                 .response_template(&ticket.language, template_topic, template_service)
-                .await?,
+                .await
+            {
+                Ok(template) if template.source != "UNAVAILABLE" => {
+                    stages.push(assist_stage(
+                        "response_template",
+                        "completed",
+                        template_started.elapsed().as_secs_f64() * 1000.0,
+                        None,
+                        None,
+                    ));
+                    template
+                }
+                Ok(template) => {
+                    needs_review = true;
+                    stages.push(assist_stage(
+                        "response_template",
+                        "unavailable",
+                        template_started.elapsed().as_secs_f64() * 1000.0,
+                        None,
+                        Some("NO_COMPATIBLE_TEMPLATE"),
+                    ));
+                    template
+                }
+                Err(_) => {
+                    needs_review = true;
+                    stages.push(assist_stage(
+                        "response_template",
+                        "unavailable",
+                        template_started.elapsed().as_secs_f64() * 1000.0,
+                        None,
+                        Some("TEMPLATE_UNAVAILABLE"),
+                    ));
+                    unavailable_response_template(&language_state)
+                }
+            }
+        };
+        let partial = stages
+            .iter()
+            .any(|stage| matches!(stage.status.as_str(), "unavailable" | "skipped" | "unknown"));
+        needs_review |= partial
+            || matches!(language_state.as_str(), "MIXED" | "UNKNOWN")
+            || latest_decision.is_none()
+            || response_template.source != "AUTHORITATIVE";
+        Ok(AssistPreviewResponse {
+            response_template,
             ticket,
             prediction,
             similar_tickets: similar,
             duplicate_candidates,
             repeat_candidates,
             source,
+            orchestration: AssistOrchestration {
+                request_id: request_id.to_owned(),
+                trace_id: trace_id.to_owned(),
+                status: if partial { "partial" } else { "complete" }.to_owned(),
+                needs_review,
+                language: language_state,
+                latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+                model_versions,
+                stages,
+            },
         })
     }
 
@@ -3800,6 +4174,64 @@ impl From<DbTicket> for Ticket {
 
 #[allow(dead_code)]
 fn _topic_contract_is_kept_for_docs(_topic: &Topic) {}
+
+#[cfg(test)]
+mod assist_preview_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ml_failure_returns_unknown_manual_preview_with_request_context() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://pulse:pulse@127.0.0.1:1/pulse")
+            .unwrap();
+        let repository = PgRepository {
+            pool,
+            qdrant_url: "http://127.0.0.1:1".to_owned(),
+            ml_service_url: "http://127.0.0.1:1".to_owned(),
+            qdrant_collection: "pulse109_test".to_owned(),
+            embedding_dimension: DEFAULT_EMBEDDING_DIMENSION,
+            embedding_distance: "Cosine".to_owned(),
+            embedder_version: DEFAULT_EMBEDDER_VERSION.to_owned(),
+            forecast_model_version: DEFAULT_FORECAST_MODEL_VERSION.to_owned(),
+            client: Client::new(),
+        };
+
+        let preview = repository
+            .assist_preview(
+                None,
+                Some("Проверить освещение на улице"),
+                Some("RU"),
+                Some("KZ-ASTANA"),
+                "assist-request-test",
+                "assist-trace-test",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(preview.orchestration.status, "partial");
+        assert!(preview.orchestration.needs_review);
+        assert_eq!(preview.orchestration.request_id, "assist-request-test");
+        assert_eq!(preview.orchestration.trace_id, "assist-trace-test");
+        assert_eq!(preview.orchestration.language, "RU");
+        assert_eq!(preview.prediction.topic_id, "unknown");
+        assert_eq!(preview.prediction.confidence, 0.0);
+        assert_eq!(preview.prediction.recommended_service, "UNKNOWN");
+        assert_eq!(preview.prediction.predicted_priority, "UNKNOWN");
+        assert_eq!(preview.response_template.source, "UNAVAILABLE");
+        assert!(preview.similar_tickets.is_empty());
+        assert!(preview.duplicate_candidates.is_empty());
+        assert!(preview.repeat_candidates.is_empty());
+        assert!(preview.orchestration.stages.iter().any(|stage| {
+            stage.name == "classification"
+                && stage.error_code.as_deref() == Some("ML_CLASSIFIER_UNAVAILABLE")
+        }));
+        assert!(preview.orchestration.stages.iter().any(|stage| {
+            stage.name == "retrieval"
+                && stage.error_code.as_deref() == Some("RETRIEVAL_UNAVAILABLE")
+        }));
+    }
+}
 
 #[cfg(test)]
 mod vector_index_tests {

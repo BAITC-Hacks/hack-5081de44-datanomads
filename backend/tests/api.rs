@@ -35,6 +35,119 @@ async fn demo_api_supports_preview_and_manager_analytics() {
 }
 
 #[tokio::test]
+async fn assist_preview_reports_language_uncertainty_and_correlated_context() {
+    let application = app(AppState::demo());
+    for (language, request_id, trace_id) in [
+        ("MIXED", Some("preview-mixed"), Some("trace-mixed")),
+        ("UNKNOWN", None, None),
+    ] {
+        let mut request = Request::post("/api/v1/assist/preview")
+            .header("content-type", "application/json")
+            .header("x-pulse-role", "OPERATOR");
+        if let Some(request_id) = request_id {
+            request = request.header("x-request-id", request_id);
+        }
+        if let Some(trace_id) = trace_id {
+            request = request.header("x-trace-id", trace_id);
+        }
+        let response = application
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(format!(
+                        r#"{{"text":"Проверить обращение вручную","language":"{language}"}}"#
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let response_request_id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let response_trace_id = response.headers()["x-trace-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let preview: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+
+        assert_eq!(preview["orchestration"]["language"], language);
+        assert_eq!(preview["orchestration"]["request_id"], response_request_id);
+        assert_eq!(preview["orchestration"]["trace_id"], response_trace_id);
+        assert_eq!(preview["orchestration"]["status"], "partial");
+        assert_eq!(preview["orchestration"]["needs_review"], true);
+        assert_eq!(preview["prediction"]["topic_id"], "UNKNOWN");
+        assert_eq!(preview["prediction"]["confidence"].as_f64(), Some(0.0));
+        assert_eq!(preview["ticket"]["priority"], "UNKNOWN");
+        assert_eq!(preview["response_template"]["source"], "UNAVAILABLE");
+        assert!(preview["orchestration"]["latency_ms"].as_f64().unwrap() >= 0.0);
+        if let Some(request_id) = request_id {
+            assert_eq!(response_request_id, request_id);
+        }
+        if let Some(trace_id) = trace_id {
+            assert_eq!(response_trace_id, trace_id);
+        } else {
+            assert_eq!(response_request_id, response_trace_id);
+        }
+    }
+
+    let official_before = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let official_before: serde_json::Value = serde_json::from_slice(
+        &to_bytes(official_before.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let preview = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/assist/preview")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"text":"Проверить обращение вручную","language":"UNKNOWN"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), 200);
+    let official_after = application
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let official_after: serde_json::Value = serde_json::from_slice(
+        &to_bytes(official_after.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(official_before["ticket"], official_after["ticket"]);
+    assert_eq!(official_before["prediction"], official_after["prediction"]);
+    assert_eq!(
+        official_before["latest_decision"],
+        official_after["latest_decision"]
+    );
+}
+
+#[tokio::test]
 async fn dataset_provenance_marks_demo_records_as_synthetic() {
     let response = app(AppState::demo())
         .oneshot(
