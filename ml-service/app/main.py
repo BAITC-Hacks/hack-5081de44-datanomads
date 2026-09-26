@@ -67,7 +67,7 @@ registry, classifier, embedder, forecaster, anomaly_detector, trainer, evaluator
 app = FastAPI(
     title="Pulse 109 ML Service",
     version=__version__,
-    description="Local deterministic baseline for classification, retrieval embeddings, forecast and anomaly APIs.",
+    description="Local classification, retrieval embeddings, forecast and anomaly APIs.",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -105,14 +105,14 @@ async def request_logging(request: Request, call_next: Any) -> JSONResponse:
 
 @app.get("/healthz", response_model=HealthResponse, tags=["health"])
 async def healthz() -> HealthResponse:
-    return HealthResponse(status="ok", service="pulse109-ml", version=__version__, model_versions=MODEL_VERSIONS)
+    return HealthResponse(status="ok", service="pulse109-ml", version=__version__, model_versions={**MODEL_VERSIONS, "classifier": classifier.model_version})
 
 
 @app.get("/readyz", response_model=HealthResponse, tags=["health"])
 async def readyz() -> HealthResponse:
     if not registry.manifest.models:
         raise HTTPException(status_code=503, detail="model manifest is not loaded")
-    return HealthResponse(status="ready", service="pulse109-ml", version=__version__, model_versions=MODEL_VERSIONS)
+    return HealthResponse(status="ready", service="pulse109-ml", version=__version__, model_versions={**MODEL_VERSIONS, "classifier": classifier.model_version})
 
 
 @app.get("/", tags=["health"])

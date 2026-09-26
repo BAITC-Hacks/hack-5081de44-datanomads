@@ -72,6 +72,7 @@ def detect_language(text: str, requested: str | None = None) -> str:
 class ClassifierService:
     def __init__(self, topics: Iterable[Topic] = TOPICS) -> None:
         self.topics = tuple(topics)
+        self.model_version = MODEL_VERSIONS["classifier"]
 
     @staticmethod
     def _topic_name(topic: Topic, language: str) -> str:
@@ -138,7 +139,7 @@ class ClassifierService:
             confidence_state=state,
             needs_review=state != "CONFIDENT",
             alternatives=alternatives,
-            model_version=MODEL_VERSIONS["classifier"],
+            model_version=self.model_version,
         )
 
 
@@ -518,7 +519,14 @@ class EvaluationService:
 
 def make_services() -> tuple[ModelRegistry, ClassifierService, EmbeddingService, ForecastService, AnomalyService, TrainingService, EvaluationService]:
     registry = ModelRegistry()
-    classifier = ClassifierService()
+    model_dir = os.environ.get("PULSE_CLASSIFIER_MODEL_DIR")
+    if model_dir:
+        from .trained_classifier import TrainedClassifierService
+
+        classifier = TrainedClassifierService(Path(model_dir))
+        registry.manifest.models["classifier"] = classifier.metadata
+    else:
+        classifier = ClassifierService()
     embedding = EmbeddingService()
     forecast = ForecastService()
     anomaly = AnomalyService()

@@ -9,6 +9,12 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+ARG WITH_MODEL=false
+RUN if [ "$WITH_MODEL" = "true" ]; then \
+      pip install --no-cache-dir torch==2.7.0 --index-url https://download.pytorch.org/whl/cpu && \
+      pip install --no-cache-dir 'transformers>=4.45,<5'; \
+    fi
+
 COPY app ./app
 COPY artifacts ./artifacts
 
