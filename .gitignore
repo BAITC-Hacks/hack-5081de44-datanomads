@@ -18,6 +18,7 @@ venv/
 !.env.example
 data/processed/
 data/quarantine/*.jsonl
+data/sdg/generated/
 
 # Local logs and reports
 *.log

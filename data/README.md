@@ -59,6 +59,28 @@ python scripts/generate_demo_data.py --check
 python -m unittest discover -s data/tests -v
 ```
 
+## Synthetic classifier candidate
+
+`scripts/generate_synthetic_classifier.py` builds a separate classifier corpus
+from 160 manually written RU/KZ scenarios in `sdg/classifier_scenarios.tsv`:
+20,000 train, 2,000 validation and 4,000 test rows, balanced across 16 topics
+and both languages. Exact text duplicates and obvious PII patterns are rejected.
+All paraphrases of one scenario stay in one split.
+
+```bash
+python3 scripts/generate_synthetic_classifier.py
+```
+
+Files appear in ignored `data/sdg/generated/classifier_v1/`, with a manifest,
+checksums and `review_status=PENDING`. This is a reproducible **synthetic
+candidate**, not a reviewed gold set or evidence of performance on real 109
+appeals. The 26,000 rows come from only 160 base situations; increasing their
+number further without adding distinct situations is unlikely to help. Before
+choosing a model, compare 2k/5k/20k training subsets on the same held-out
+scenario groups, review a sample of RU/KZ text and create an independent
+evaluation set. This corpus is for classification; retrieval training still
+needs separately defined positive and hard-negative pairs.
+
 Import a real (uncommitted) source export:
 
 ```bash
