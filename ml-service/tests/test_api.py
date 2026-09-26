@@ -102,6 +102,32 @@ def test_anomaly_flags_latest_spike() -> None:
     assert body["anomalies"][-1]["index"] == 6
 
 
+def test_versioned_model_manifest_preserves_demo_fields_and_checks_explicit_version() -> None:
+    manifest = client.get("/internal/v1/models")
+    assert manifest.status_code == 200
+    body = manifest.json()
+    assert body["manifest_version"] == "1"
+    assert body["schema_version"] == "model-manifest.v1"
+    classifier = body["models"]["classifier"]
+    assert classifier["model_version"] == "classifier-demo-2026-09-21-001"
+    assert classifier["dataset_version"] == "demo-ru-kz-v1"
+    assert classifier["artifact_checksum"] is None
+    assert classifier["demo_artifact_id"].startswith("demo-baseline:")
+    assert classifier["artifact_kind"] == "DETERMINISTIC_BASELINE"
+    assert classifier["synthetic"] is True
+
+    accepted = client.post(
+        "/internal/v1/classify",
+        json={"text": "Нет воды", "model_version": classifier["model_version"]},
+    )
+    rejected = client.post(
+        "/internal/v1/classify",
+        json={"text": "Нет воды", "model_version": "candidate-not-loaded"},
+    )
+    assert accepted.status_code == 200
+    assert rejected.status_code == 404
+
+
 def test_training_evaluation_and_manifest(monkeypatch) -> None:
     training = client.post(
         "/internal/v1/training/classifier",

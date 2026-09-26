@@ -1,0 +1,14 @@
+{
+  "contract_package_version": "pulse109-contracts.v1",
+  "schemas": {
+    "UnifiedTicket": "schemas/v1/unified-ticket.schema.json",
+    "DatasetManifest": "schemas/v1/dataset-manifest.schema.json",
+    "ClassifierManifest": "schemas/v1/classifier-manifest.schema.json",
+    "EmbedderManifest": "schemas/v1/embedder-manifest.schema.json",
+    "ModelEvaluation": "schemas/v1/model-evaluation.schema.json",
+    "LearningFeedbackExport": "schemas/v1/learning-feedback-export.schema.json",
+    "CandidateEvaluation": "schemas/v1/candidate-evaluation.schema.json",
+    "ModelManifest": "schemas/v1/model-manifest.schema.json",
+    "ModelMetadata": "schemas/v1/model-metadata.schema.json"
+  }
+}

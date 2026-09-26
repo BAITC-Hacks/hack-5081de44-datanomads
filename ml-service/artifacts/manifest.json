@@ -1,17 +1,20 @@
 {
+  "schema_version": "model-manifest.v1",
   "manifest_version": "1",
   "service": "pulse109-ml",
   "models": {
     "classifier": {
+      "schema_version": "classifier-manifest.v1",
       "model_version": "classifier-demo-2026-09-21-001",
       "model_family": "deterministic-keyword-demo",
       "base_model": "local-no-download",
       "dataset_version": "demo-ru-kz-v1",
       "created_at": "2026-09-21T00:00:00Z",
+      "status": "DEMO_BASELINE",
+      "artifact_kind": "DETERMINISTIC_BASELINE",
+      "artifact_uri": null,
       "metrics": {
-        "status": "demo_baseline",
-        "macro_f1": null,
-        "note": "Do not present synthetic demo output as production quality metrics."
+        "macro_f1": null
       },
       "languages": ["RU", "KZ"],
       "labels": [
@@ -38,16 +41,22 @@
         "source": "demo_taxonomy",
         "online_retraining": false
       },
-      "artifact_checksum": "sha256:demo-classifier-2026-09-21-001"
+      "artifact_checksum": null,
+      "demo_artifact_id": "demo-baseline:classifier-demo-2026-09-21-001",
+      "synthetic": true,
+      "implementation": "DETERMINISTIC_KEYWORD_BASELINE"
     },
     "embedder": {
+      "schema_version": "embedder-manifest.v1",
       "model_version": "embedder-demo-2026-09-21-001",
       "model_family": "deterministic-hashing-embedding",
       "base_model": "local-no-download",
       "dataset_version": "demo-ru-kz-v1",
       "created_at": "2026-09-21T00:00:00Z",
+      "status": "DEMO_BASELINE",
+      "artifact_kind": "DETERMINISTIC_BASELINE",
+      "artifact_uri": null,
       "metrics": {
-        "status": "demo_baseline",
         "default_dimension": 32
       },
       "languages": ["RU", "KZ"],
@@ -56,17 +65,27 @@
         "deterministic": true,
         "normalization": "l2"
       },
-      "artifact_checksum": "sha256:demo-embedder-2026-09-21-001"
+      "artifact_checksum": null,
+      "demo_artifact_id": "demo-baseline:embedder-demo-2026-09-21-001",
+      "synthetic": true,
+      "implementation": "DETERMINISTIC_HASHING_EMBEDDING",
+      "dimension": 32,
+      "distance_metric": "cosine",
+      "normalized": true,
+      "preprocessing": {"tokenizer": "unicode_word_and_character_trigrams", "normalization": "l2"}
     },
     "forecast": {
+      "schema_version": "model-metadata.v1",
       "model_version": "forecast-statsforecast-seasonal-naive-2026-09-24-001",
       "model_family": "seasonal_naive",
       "base_model": "statsforecast==2.1.1/SeasonalNaive",
       "dataset_version": "demo-time-series-v1",
       "created_at": "2026-09-21T00:00:00Z",
+      "status": "DEMO_BASELINE",
+      "artifact_kind": "DETERMINISTIC_BASELINE",
+      "artifact_uri": null,
       "metrics": {
-        "status": "baseline",
-        "backtest": "rolling_origin_computed_per_request"
+        "forecast_horizons": [30, 60, 90]
       },
       "languages": [],
       "labels": [],
@@ -74,16 +93,22 @@
         "default_season_length": 7,
         "horizons": [30, 60, 90]
       },
-      "artifact_checksum": "sha256:demo-forecast-statsforecast-seasonal-naive-2026-09-24-001"
+      "artifact_checksum": null,
+      "demo_artifact_id": "demo-baseline:forecast-statsforecast-seasonal-naive-2026-09-24-001",
+      "synthetic": true,
+      "implementation": "SEASONAL_NAIVE"
     },
     "anomaly": {
+      "schema_version": "model-metadata.v1",
       "model_version": "anomaly-robust-zscore-2026-09-21-001",
       "model_family": "rolling_median_mad",
       "base_model": "local-no-download",
       "dataset_version": "demo-time-series-v1",
       "created_at": "2026-09-21T00:00:00Z",
+      "status": "DEMO_BASELINE",
+      "artifact_kind": "DETERMINISTIC_BASELINE",
+      "artifact_uri": null,
       "metrics": {
-        "status": "baseline",
         "threshold": 3.0
       },
       "languages": [],
@@ -92,7 +117,10 @@
         "default_window": 7,
         "robust_scale": "mad"
       },
-      "artifact_checksum": "sha256:demo-anomaly-robust-zscore-2026-09-21-001"
+      "artifact_checksum": null,
+      "demo_artifact_id": "demo-baseline:anomaly-robust-zscore-2026-09-21-001",
+      "synthetic": true,
+      "implementation": "ROLLING_MEDIAN_MAD"
     }
   }
 }

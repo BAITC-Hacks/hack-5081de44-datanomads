@@ -1,0 +1,10 @@
+{
+  "schema_version": "learning-feedback-export.v1",
+  "cycle_id": "demo-cycle-001",
+  "dataset_version": "demo-2026-09-21.v1",
+  "production_model_version": "classifier-demo-2026-09-21-001",
+  "exported_at": "2026-09-21T00:00:00Z",
+  "record_count": 0,
+  "records": [],
+  "synthetic": true
+}

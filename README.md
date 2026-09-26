@@ -85,6 +85,8 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
 - [`docs/architecture.md`](docs/architecture.md) — сервисные границы и потоки;
 - [`docs/data-contract.md`](docs/data-contract.md) — UnifiedTicket, import и
   quality gate;
+- [`docs/contracts.md`](docs/contracts.md) — versioned Data/ML artifact contracts
+  and standalone validation;
 - [`docs/vko-109-data-audit.md`](docs/vko-109-data-audit.md) — границы
   предоставленной реальной выгрузки Восточно-Казахстанской области;
 - [`docs/privacy.md`](docs/privacy.md) — PII, RBAC, logs и LLM boundary;

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/model-metadata.v1.json",
+  "title": "Pulse 109 ModelMetadata v1",
+  "$defs": {
+    "metricValue": {
+      "anyOf": [
+        {"type": "number"},
+        {"type": "null"},
+        {"type": "array", "items": {"$ref": "#/$defs/metricValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/metricValue"}}
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "model_version", "model_family", "base_model", "dataset_version", "created_at", "status", "artifact_kind", "artifact_checksum", "synthetic"],
+  "properties": {
+    "schema_version": {"enum": ["model-metadata.v1", "classifier-manifest.v1", "embedder-manifest.v1"]},
+    "model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "model_family": {"type": "string", "minLength": 1, "maxLength": 200},
+    "base_model": {"type": ["string", "null"]},
+    "dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "created_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["CANDIDATE", "PRODUCTION", "REJECTED", "ARCHIVED", "DEMO_BASELINE"]},
+    "artifact_kind": {"enum": ["TRAINED_ARTIFACT", "DETERMINISTIC_BASELINE"]},
+    "artifact_uri": {"type": ["string", "null"], "minLength": 1},
+    "artifact_checksum": {"type": ["string", "null"], "minLength": 1},
+    "demo_artifact_id": {"type": ["string", "null"], "pattern": "^demo-baseline:[A-Za-z0-9._:-]+$"},
+    "evaluation_version": {"type": ["string", "null"]},
+    "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/metricValue"}},
+    "languages": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "labels": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "training_config": {"type": "object"},
+    "synthetic": {"type": "boolean"},
+    "implementation": {"type": "string", "minLength": 1},
+    "provenance": {"type": "object"},
+    "dimension": {"type": "integer", "minimum": 1, "maximum": 65536},
+    "distance_metric": {"enum": ["cosine", "dot", "euclidean"]},
+    "normalized": {"type": "boolean"},
+    "preprocessing": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"artifact_kind": {"const": "TRAINED_ARTIFACT"}}, "required": ["artifact_kind"]},
+      "then": {
+        "required": ["artifact_uri"],
+        "properties": {
+          "artifact_uri": {"type": "string", "minLength": 1},
+          "artifact_checksum": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+          "demo_artifact_id": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_kind": {"const": "DETERMINISTIC_BASELINE"}}, "required": ["artifact_kind"]},
+      "then": {
+        "properties": {
+          "artifact_checksum": {"type": "null"},
+          "demo_artifact_id": {"type": "string", "pattern": "^demo-baseline:[A-Za-z0-9._:-]+$"},
+          "synthetic": {"const": true},
+          "status": {"const": "DEMO_BASELINE"}
+        },
+        "required": ["implementation", "demo_artifact_id"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/dataset-manifest.v1.json",
+  "title": "Pulse 109 DatasetManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "dataset_id",
+    "dataset_version",
+    "generated_at",
+    "schema_version",
+    "synthetic",
+    "seed",
+    "purpose",
+    "record_count",
+    "quarantine_record_count",
+    "source_systems",
+    "region_ids",
+    "topic_ids",
+    "languages",
+    "coverage",
+    "files",
+    "pii_policy"
+  ],
+  "properties": {
+    "manifest_version": {"const": "dataset-manifest.v1"},
+    "dataset_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "schema_version": {"const": "unified-ticket.v1"},
+    "synthetic": {"type": "boolean"},
+    "seed": {"type": "integer"},
+    "purpose": {"type": "string", "minLength": 1},
+    "record_count": {"type": "integer", "minimum": 0},
+    "quarantine_record_count": {"type": "integer", "minimum": 0},
+    "source_systems": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "region_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "topic_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "languages": {"type": "array", "items": {"enum": ["RU", "KZ", "OTHER", "UNKNOWN"]}, "uniqueItems": true},
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language_counts", "region_count", "source_system_count", "topic_count"],
+      "properties": {
+        "language_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "region_count": {"type": "integer", "minimum": 0},
+        "source_system_count": {"type": "integer", "minimum": 0},
+        "topic_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "records", "sha256"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1},
+          "records": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "pii_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_pii_in_normalized_fixture", "text_redaction_tokens", "vector_payload_fields"],
+      "properties": {
+        "raw_pii_in_normalized_fixture": {"type": "boolean"},
+        "text_redaction_tokens": {"type": "array", "items": {"type": "string"}},
+        "vector_payload_fields": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/model-manifest.v1.json",
+  "title": "Pulse 109 ModelManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_version", "service", "models"],
+  "properties": {
+    "schema_version": {"const": "model-manifest.v1"},
+    "manifest_version": {"type": "string", "minLength": 1},
+    "service": {"const": "pulse109-ml"},
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classifier", "embedder", "forecast", "anomaly"],
+      "properties": {
+        "classifier": {"$ref": "https://pulse109.local/schema/classifier-manifest.v1.json"},
+        "embedder": {"$ref": "https://pulse109.local/schema/embedder-manifest.v1.json"},
+        "forecast": {"$ref": "https://pulse109.local/schema/model-metadata.v1.json"},
+        "anomaly": {"$ref": "https://pulse109.local/schema/model-metadata.v1.json"}
+      }
+    }
+  }
+}

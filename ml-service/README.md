@@ -26,9 +26,11 @@
 
 Это честный deterministic demo baseline, а не утверждение о качестве на
 реальном dataset 109. `artifacts/manifest.json` явно содержит
-`dataset_version`, `model_version`, `metrics`, labels и checksum-поле. Реальные
-fine-tuned artifacts могут быть подключены через тот же контракт после
-подготовки versioned dataset.
+`schema_version`, `dataset_version`, `model_version`, `artifact_kind`,
+`synthetic`, `metrics`, labels и checksum-поле. Demo identifier не является
+криптографическим checksum. Trained artifact обязан иметь `sha256:<64 hex>` и
+artifact URI. Реальные fine-tuned artifacts используют те же versioned
+contracts; runtime остаётся unready, пока для них нет serving adapter.
 
 ## Локальный запуск
 
@@ -37,6 +39,7 @@ cd ml-service
 python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+python -m contracts.validate --check-demo
 uvicorn app.main:app --reload
 ```
 

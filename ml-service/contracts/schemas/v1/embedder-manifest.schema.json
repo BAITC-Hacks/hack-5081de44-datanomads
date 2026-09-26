@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/embedder-manifest.v1.json",
+  "title": "Pulse 109 EmbedderManifest v1",
+  "allOf": [
+    {"$ref": "https://pulse109.local/schema/model-metadata.v1.json"},
+    {
+      "type": "object",
+      "required": ["schema_version", "dimension", "distance_metric", "normalized", "preprocessing"],
+      "properties": {
+        "schema_version": {"const": "embedder-manifest.v1"},
+        "dimension": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "distance_metric": {"enum": ["cosine", "dot", "euclidean"]},
+        "normalized": {"type": "boolean"},
+        "preprocessing": {"type": "object", "minProperties": 1}
+      }
+    }
+  ]
+}

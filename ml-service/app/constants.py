@@ -132,4 +132,11 @@ MODEL_VERSIONS: dict[str, str] = {
     "anomaly": "anomaly-robust-zscore-2026-09-21-001",
 }
 
+DEMO_IMPLEMENTATIONS: dict[str, str] = {
+    "classifier": "DETERMINISTIC_KEYWORD_BASELINE",
+    "embedder": "DETERMINISTIC_HASHING_EMBEDDING",
+    "forecast": "SEASONAL_NAIVE",
+    "anomaly": "ROLLING_MEDIAN_MAD",
+}
+
 SUPPORTED_LANGUAGES = ("RU", "KZ", "MIXED", "UNKNOWN")

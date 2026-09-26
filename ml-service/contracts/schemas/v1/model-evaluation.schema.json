@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/model-evaluation.v1.json",
+  "title": "Pulse 109 ModelEvaluation v1",
+  "$defs": {
+    "metricValue": {
+      "anyOf": [
+        {"type": "number"},
+        {"type": "null"},
+        {"type": "array", "items": {"$ref": "#/$defs/metricValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/metricValue"}}
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evaluation_id", "model_type", "model_version", "dataset_version", "evaluation_version", "split_version", "evaluation_type", "status", "sample_count", "metrics", "critical_regressions", "created_at", "synthetic"],
+  "properties": {
+    "schema_version": {"const": "model-evaluation.v1"},
+    "evaluation_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "model_type": {"enum": ["classifier", "embedder", "forecast", "anomaly"]},
+    "model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "evaluation_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "split_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "evaluation_type": {"enum": ["OFFLINE", "SHADOW", "BACKTEST"]},
+    "status": {"enum": ["COMPLETED", "INSUFFICIENT_DATA", "FAILED"]},
+    "sample_count": {"type": "integer", "minimum": 0},
+    "metrics": {"type": "object", "additionalProperties": {"$ref": "#/$defs/metricValue"}},
+    "critical_regressions": {"type": "array", "items": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_.:-]{0,199}$"}},
+    "created_at": {"type": "string", "format": "date-time"},
+    "evaluator": {"type": ["string", "null"]},
+    "synthetic": {"type": "boolean"}
+  }
+}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -20,8 +21,11 @@ from typing import Any, Iterable
 
 import numpy as np
 from statsforecast.models import SeasonalNaive
+from pydantic import ValidationError
 
-from .constants import MODEL_VERSIONS, TOPICS, TOPIC_BY_ID, Topic
+from contracts import ContractValidationError, validate_document
+
+from .constants import DEMO_IMPLEMENTATIONS, MODEL_VERSIONS, TOPICS, TOPIC_BY_ID, Topic
 from .schemas import (
     Alternative,
     AnomalyPoint,
@@ -37,6 +41,9 @@ from .schemas import (
     TrainingRequest,
     TrainingResponse,
 )
+
+
+logger = logging.getLogger("pulse109.ml.registry")
 
 
 _TOKEN_RE = re.compile(r"[\wа-яёәғқңөұүһі]+", flags=re.IGNORECASE | re.UNICODE)
@@ -70,8 +77,13 @@ def detect_language(text: str, requested: str | None = None) -> str:
 
 
 class ClassifierService:
-    def __init__(self, topics: Iterable[Topic] = TOPICS) -> None:
+    def __init__(
+        self,
+        topics: Iterable[Topic] = TOPICS,
+        model_version: str = MODEL_VERSIONS["classifier"],
+    ) -> None:
         self.topics = tuple(topics)
+        self.model_version = model_version
 
     @staticmethod
     def _topic_name(topic: Topic, language: str) -> str:
@@ -138,7 +150,7 @@ class ClassifierService:
             confidence_state=state,
             needs_review=state != "CONFIDENT",
             alternatives=alternatives,
-            model_version=MODEL_VERSIONS["classifier"],
+            model_version=self.model_version,
         )
 
 
@@ -150,7 +162,8 @@ class EmbeddingService:
     without downloading a multi-hundred-megabyte model.
     """
 
-    model_version = MODEL_VERSIONS["embedder"]
+    def __init__(self, model_version: str = MODEL_VERSIONS["embedder"]) -> None:
+        self.model_version = model_version
 
     @staticmethod
     def _tokens(text: str) -> list[str]:
@@ -183,7 +196,8 @@ def _safe_float(value: float) -> float:
 
 
 class ForecastService:
-    model_version = MODEL_VERSIONS["forecast"]
+    def __init__(self, model_version: str = MODEL_VERSIONS["forecast"]) -> None:
+        self.model_version = model_version
 
     @staticmethod
     def _forecast_values(values: list[float], horizon: int, season_length: int) -> list[float]:
@@ -276,7 +290,8 @@ class ForecastService:
 
 
 class AnomalyService:
-    model_version = MODEL_VERSIONS["anomaly"]
+    def __init__(self, model_version: str = MODEL_VERSIONS["anomaly"]) -> None:
+        self.model_version = model_version
 
     def detect(
         self,
@@ -352,37 +367,62 @@ def _classification_metrics(actual: list[str], predicted: list[str]) -> dict[str
 
 
 class ModelRegistry:
-    def __init__(self) -> None:
-        self.path = Path(__file__).resolve().parents[1] / "artifacts" / "manifest.json"
-        self.manifest = self._load()
+    def __init__(self, path: Path | None = None, runtime_mode: str | None = None) -> None:
+        default_path = Path(__file__).resolve().parents[1] / "artifacts" / "manifest.json"
+        self.path = path or Path(os.environ.get("PULSE_MODEL_MANIFEST_PATH", default_path))
+        self.runtime_mode = (runtime_mode or os.environ.get("PULSE_ENV", "demo")).strip().lower()
+        self.manifest: ModelManifestResponse | None = None
+        self.load_error: str | None = None
+        self._load()
 
-    def _load(self) -> ModelManifestResponse:
+    def _load(self) -> None:
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-            return ModelManifestResponse.model_validate(payload)
-        except (OSError, ValueError, TypeError):
-            # A valid service must remain ready even when a mounted artifact is
-            # missing; this fallback is intentionally explicit and inspectable.
-            now = "2026-09-21T00:00:00Z"
-            models = {
-                key: ModelMetadata(
-                    model_version=version,
-                    model_family="deterministic-demo-baseline",
-                    base_model="local-no-download",
-                    dataset_version="demo-ru-kz-v1",
-                    created_at=now,
-                    metrics={},
-                    languages=["RU", "KZ"],
-                    labels=[topic.topic_id for topic in TOPICS],
-                    training_config={"deterministic": True},
-                    artifact_checksum=hashlib.sha256(version.encode()).hexdigest(),
-                )
-                for key, version in MODEL_VERSIONS.items()
-            }
-            return ModelManifestResponse(manifest_version="1", service="pulse109-ml", models=models)
+            validate_document(payload, "ModelManifest")
+            manifest = ModelManifestResponse.model_validate(payload)
+        except (OSError, ValueError, TypeError, ContractValidationError, ValidationError):
+            self.load_error = "MODEL_MANIFEST_UNAVAILABLE_OR_INVALID"
+            logger.error(
+                "model_manifest_unavailable_or_invalid",
+                extra={"error_code": self.load_error},
+            )
+            return
+
+        self.manifest = manifest
+        models = manifest.models
+        if self.runtime_mode in {"demo", "development", "test"}:
+            for model_type, implementation in DEMO_IMPLEMENTATIONS.items():
+                model = models[model_type]
+                if model.artifact_kind != "DETERMINISTIC_BASELINE":
+                    self.load_error = "MODEL_RUNTIME_ADAPTER_NOT_CONFIGURED"
+                    break
+                if model.status != "DEMO_BASELINE" or model.implementation != implementation:
+                    self.load_error = "MODEL_MANIFEST_RUNTIME_MISMATCH"
+                    break
+        elif self.runtime_mode in {"production", "prod"}:
+            # The repository currently ships only deterministic runtime adapters.
+            # A valid trained manifest must not make those baselines look trained.
+            self.load_error = "MODEL_RUNTIME_ADAPTER_NOT_CONFIGURED"
+        else:
+            self.load_error = "INVALID_PULSE_ENV"
+
+        if self.load_error is not None:
+            logger.error(
+                "model_runtime_not_ready",
+                extra={"error_code": self.load_error},
+            )
+
+    @property
+    def ready(self) -> bool:
+        return self.manifest is not None and self.load_error is None
+
+    def model_versions(self) -> dict[str, str]:
+        if self.manifest is None:
+            return {}
+        return {key: model.model_version for key, model in self.manifest.models.items()}
 
     def get(self, model_type: str) -> ModelMetadata:
-        if model_type not in self.manifest.models:
+        if self.manifest is None or model_type not in self.manifest.models:
             raise KeyError(model_type)
         return self.manifest.models[model_type]
 
@@ -518,10 +558,11 @@ class EvaluationService:
 
 def make_services() -> tuple[ModelRegistry, ClassifierService, EmbeddingService, ForecastService, AnomalyService, TrainingService, EvaluationService]:
     registry = ModelRegistry()
-    classifier = ClassifierService()
-    embedding = EmbeddingService()
-    forecast = ForecastService()
-    anomaly = AnomalyService()
+    versions = registry.model_versions()
+    classifier = ClassifierService(model_version=versions.get("classifier", MODEL_VERSIONS["classifier"]))
+    embedding = EmbeddingService(model_version=versions.get("embedder", MODEL_VERSIONS["embedder"]))
+    forecast = ForecastService(model_version=versions.get("forecast", MODEL_VERSIONS["forecast"]))
+    anomaly = AnomalyService(model_version=versions.get("anomaly", MODEL_VERSIONS["anomaly"]))
     training = TrainingService(registry)
     evaluation = EvaluationService(registry, classifier, forecast, anomaly)
     return registry, classifier, embedding, forecast, anomaly, training, evaluation

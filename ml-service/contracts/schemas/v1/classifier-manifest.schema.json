@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/classifier-manifest.v1.json",
+  "title": "Pulse 109 ClassifierManifest v1",
+  "allOf": [
+    {"$ref": "https://pulse109.local/schema/model-metadata.v1.json"},
+    {
+      "type": "object",
+      "required": ["schema_version", "languages", "labels"],
+      "properties": {
+        "schema_version": {"const": "classifier-manifest.v1"},
+        "languages": {"type": "array", "minItems": 1, "items": {"enum": ["RU", "KZ", "MIXED", "UNKNOWN"]}, "uniqueItems": true},
+        "labels": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    }
+  ]
+}

@@ -33,24 +33,32 @@ Baseline manifest поставляется в image по `/app/artifacts/manifes
 Минимальный контракт `manifest.yaml`:
 
 ```yaml
+schema_version: classifier-manifest.v1
 model_version: classifier-2026-09-21-001
-model_family: classifier
+model_family: xlm-roberta-classifier
 base_model: FacebookAI/xlm-roberta-base
 dataset_version: dataset-2026-09-21-001
 created_at: 2026-09-21T12:00:00Z
-status: candidate # candidate | production | rejected | archived
-languages: [ru, kz]
+status: CANDIDATE
+artifact_kind: TRAINED_ARTIFACT
+artifact_uri: file:///app/trained-artifacts/classifier/model
+languages: [RU, KZ]
 labels: [water_supply, outdoor_lighting, roads, other]
-training_config: training-config.yaml
-metrics: metrics.json
-artifact_checksum: sha256:<hex>
+training_config: {}
+metrics: {macro_f1: 0.87}
+artifact_checksum: sha256:<64 lowercase hex characters>
+synthetic: false
 evaluation_version: evaluation-2026-09-21-001
 ```
 
 Фактические labels и base model отражают конкретный benchmark; пример выше —
-контракт, а не заявление о достигнутом качестве. Для embedding дополнительно
-фиксируются dimension, distance и preprocessing. Для forecast — horizon,
-frequency и backtest window.
+контракт, а не заявление о достигнутом качестве. `classifier-manifest.v1` и
+`embedder-manifest.v1` используют свои schema versions. Для embedding
+дополнительно фиксируются dimension, distance и preprocessing. Для forecast —
+horizon, frequency и backtest window. Trained artifact checksum всегда имеет
+форму `sha256:<64 lowercase hex characters>`; deterministic demo baseline
+помечается `DETERMINISTIC_BASELINE`, `DEMO_BASELINE`, `synthetic: true`,
+`artifact_checksum: null` и отдельным `demo_artifact_id`.
 
 ## Метаданные PostgreSQL
 

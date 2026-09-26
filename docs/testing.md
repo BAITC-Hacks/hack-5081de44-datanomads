@@ -53,6 +53,9 @@ empty/error states, keyboard navigation, mobile layout и отсутствие �
 ### ML
 
 ```bash
+cd ml-service
+python -m contracts.validate --check-demo
+cd ..
 python -m pytest ml-service/tests
 ```
 

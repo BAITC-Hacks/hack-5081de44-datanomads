@@ -977,6 +977,10 @@ components:
       title: HealthResponse
     ModelManifestResponse:
       properties:
+        schema_version:
+          type: string
+          const: model-manifest.v1
+          title: Schema Version
         manifest_version:
           type: string
           title: Manifest Version
@@ -991,12 +995,20 @@ components:
       additionalProperties: true
       type: object
       required:
+      - schema_version
       - manifest_version
       - service
       - models
       title: ModelManifestResponse
     ModelMetadata:
       properties:
+        schema_version:
+          type: string
+          enum:
+          - model-metadata.v1
+          - classifier-manifest.v1
+          - embedder-manifest.v1
+          title: Schema Version
         model_version:
           type: string
           title: Model Version
@@ -1004,7 +1016,9 @@ components:
           type: string
           title: Model Family
         base_model:
-          type: string
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Base Model
         dataset_version:
           type: string
@@ -1012,6 +1026,26 @@ components:
         created_at:
           type: string
           title: Created At
+        status:
+          type: string
+          enum:
+          - CANDIDATE
+          - PRODUCTION
+          - REJECTED
+          - ARCHIVED
+          - DEMO_BASELINE
+          title: Status
+        artifact_kind:
+          type: string
+          enum:
+          - TRAINED_ARTIFACT
+          - DETERMINISTIC_BASELINE
+          title: Artifact Kind
+        artifact_uri:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Artifact Uri
         metrics:
           type: object
           title: Metrics
@@ -1029,17 +1063,68 @@ components:
           type: object
           title: Training Config
         artifact_checksum:
-          type: string
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Artifact Checksum
+        demo_artifact_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Demo Artifact Id
+        evaluation_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Evaluation Version
+        synthetic:
+          type: boolean
+          title: Synthetic
+        implementation:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Implementation
+        provenance:
+          type: object
+          title: Provenance
+        dimension:
+          anyOf:
+          - type: integer
+            maximum: 65536.0
+            minimum: 1.0
+          - type: 'null'
+          title: Dimension
+        distance_metric:
+          anyOf:
+          - type: string
+            enum:
+            - cosine
+            - dot
+            - euclidean
+          - type: 'null'
+          title: Distance Metric
+        normalized:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Normalized
+        preprocessing:
+          type: object
+          title: Preprocessing
       additionalProperties: true
       type: object
       required:
+      - schema_version
       - model_version
       - model_family
       - base_model
       - dataset_version
       - created_at
+      - status
+      - artifact_kind
       - artifact_checksum
+      - synthetic
       title: ModelMetadata
     TimeSeriesPoint:
       properties:

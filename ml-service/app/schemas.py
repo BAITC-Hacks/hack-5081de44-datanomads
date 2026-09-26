@@ -278,19 +278,33 @@ class EvaluationResponse(APIModel):
 
 
 class ModelMetadata(APIModel):
+    schema_version: Literal["model-metadata.v1", "classifier-manifest.v1", "embedder-manifest.v1"]
     model_version: str
     model_family: str
-    base_model: str
+    base_model: str | None
     dataset_version: str
     created_at: str
+    status: Literal["CANDIDATE", "PRODUCTION", "REJECTED", "ARCHIVED", "DEMO_BASELINE"]
+    artifact_kind: Literal["TRAINED_ARTIFACT", "DETERMINISTIC_BASELINE"]
+    artifact_uri: str | None = None
     metrics: dict[str, Any] = Field(default_factory=dict)
     languages: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
     training_config: dict[str, Any] = Field(default_factory=dict)
-    artifact_checksum: str
+    artifact_checksum: str | None
+    demo_artifact_id: str | None = None
+    evaluation_version: str | None = None
+    synthetic: bool
+    implementation: str | None = None
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    dimension: int | None = Field(default=None, ge=1, le=65536)
+    distance_metric: Literal["cosine", "dot", "euclidean"] | None = None
+    normalized: bool | None = None
+    preprocessing: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelManifestResponse(APIModel):
+    schema_version: Literal["model-manifest.v1"]
     manifest_version: str
     service: str
     models: dict[str, ModelMetadata]

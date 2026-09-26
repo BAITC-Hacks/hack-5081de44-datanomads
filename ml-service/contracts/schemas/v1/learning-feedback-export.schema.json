@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/learning-feedback-export.v1.json",
+  "title": "Pulse 109 LearningFeedback export v1",
+  "$defs": {
+    "prediction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topic_id": {"type": ["string", "null"]},
+        "service_id": {"type": ["string", "null"]},
+        "priority": {"type": ["string", "null"]},
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "confidence_state": {"enum": ["CONFIDENT", "UNCERTAIN", "LOW_CONFIDENCE", null]},
+        "model_version": {"type": "string", "minLength": 1, "maxLength": 200}
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topic_id": {"type": ["string", "null"]},
+        "service_id": {"type": ["string", "null"]},
+        "priority": {"type": ["string", "null"]}
+      },
+      "anyOf": [
+        {"required": ["topic_id"]},
+        {"required": ["service_id"]},
+        {"required": ["priority"]}
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "cycle_id", "dataset_version", "production_model_version", "exported_at", "record_count", "records", "synthetic"],
+  "properties": {
+    "schema_version": {"const": "learning-feedback-export.v1"},
+    "cycle_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "production_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "exported_at": {"type": "string", "format": "date-time"},
+    "record_count": {"type": "integer", "minimum": 0},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["feedback_id", "ticket_id", "production_prediction", "operator_confirmed_decision", "accepted_or_corrected", "validation_status", "feedback_created_at"],
+        "properties": {
+          "feedback_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "ticket_id": {"type": "string", "minLength": 1, "maxLength": 200},
+          "production_prediction": {"$ref": "#/$defs/prediction"},
+          "operator_confirmed_decision": {"$ref": "#/$defs/decision"},
+          "accepted_or_corrected": {"type": "boolean"},
+          "validation_status": {"const": "VALIDATED"},
+          "feedback_created_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "synthetic": {"type": "boolean"}
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "schema_version": "candidate-evaluation.v1",
+  "cycle_id": "demo-cycle-001",
+  "candidate_model_version": "classifier-candidate-demo-001",
+  "production_model_version": "classifier-demo-2026-09-21-001",
+  "candidate_dataset_version": "demo-2026-09-21.v1",
+  "evaluation_version": "demo-candidate-evaluation.v1",
+  "policy_version": "demo-policy.v1",
+  "offline_evaluation": {
+    "schema_version": "model-evaluation.v1",
+    "evaluation_id": "demo-evaluation-001",
+    "model_type": "classifier",
+    "model_version": "classifier-candidate-demo-001",
+    "dataset_version": "demo-2026-09-21.v1",
+    "evaluation_version": "demo-candidate-evaluation.v1",
+    "split_version": "demo-split.v1",
+    "evaluation_type": "OFFLINE",
+    "status": "INSUFFICIENT_DATA",
+    "sample_count": 0,
+    "metrics": {},
+    "critical_regressions": [],
+    "created_at": "2026-09-21T00:00:00Z",
+    "evaluator": "demo_fixture",
+    "synthetic": true
+  },
+  "shadow_evaluation": {
+    "sample_count": 0,
+    "agreement_with_confirmed": null,
+    "correction_rate_delta": null,
+    "critical_regressions": [],
+    "blind_ab": "DISABLED"
+  },
+  "decision": "INSUFFICIENT_EVIDENCE",
+  "evaluated_at": "2026-09-21T00:00:00Z",
+  "synthetic": true
+}
