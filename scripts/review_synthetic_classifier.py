@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 
 from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
-from scripts.pulse_sdg import DEFAULT_SEEDS, LANGUAGES, STYLES, clean_text, read_seeds, source_checksum
+from scripts.pulse_sdg import DEFAULT_SEEDS, LANGUAGES, STYLES, candidate_text_key, clean_text, read_seeds, source_checksum
 
 
 TOPICS = {topic["id"] for topic in TOPIC_DEFINITIONS}
@@ -96,7 +96,7 @@ def _candidates(path: Path, scenario_path: Path) -> tuple[dict[str, dict], dict[
             raise ValueError(f"candidate line {line_number}: variant_id does not match content")
         if candidate_id in candidates:
             raise ValueError(f"candidate line {line_number}: duplicate variant_id")
-        normalized_text = row["text"].casefold()
+        normalized_text = candidate_text_key(row["text"])
         if normalized_text in seen_texts:
             raise ValueError(f"candidate line {line_number}: duplicate text")
         seen_texts.add(normalized_text)

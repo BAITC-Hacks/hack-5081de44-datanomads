@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -189,6 +190,10 @@ def clean_text(value: object) -> str | None:
     return text
 
 
+def candidate_text_key(text: str) -> str:
+    return unicodedata.normalize("NFC", text.casefold())
+
+
 def export_candidates(
     rows: list[dict], seeds: dict[str, dict], output: Path, model_id: str,
     scenario_checksum: str, generator_seed: int,
@@ -212,7 +217,7 @@ def export_candidates(
             if text is None:
                 counts["invalid_text"] += 1
                 continue
-            duplicate_key = text.casefold()
+            duplicate_key = candidate_text_key(text)
             if duplicate_key in seen_texts:
                 counts["exact_duplicate"] += 1
                 continue

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
+import unicodedata
 
 from scripts.pulse_sdg import DEFAULT_SEEDS, export_candidates, read_seeds, source_checksum
 from scripts.review_synthetic_classifier import CHECKS, export_approved, prepare, read_reviews
@@ -41,6 +43,20 @@ class SyntheticClassifierReviewTests(unittest.TestCase):
         row["review_reason"] = reason
         if decision == "APPROVED":
             row["checks"] = {check: True for check in CHECKS}
+
+    def test_review_rejects_canonically_equivalent_candidate_text(self) -> None:
+        rows = [json.loads(line) for line in self.candidates.read_text(encoding="utf-8").splitlines()]
+        text = "Возле остановки ёлка, фонарь не горит вечером."
+        for index, candidate in enumerate(rows):
+            candidate["text"] = text if index == 0 else unicodedata.normalize("NFD", text)
+            payload = (f"{candidate['scenario_id']}\0{candidate['language']}\0"
+                       f"{candidate['style']}\0{candidate['text']}")
+            candidate["variant_id"] = f"{candidate['scenario_id']}_{hashlib.sha256(payload.encode()).hexdigest()[:16]}"
+        self.candidates.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate text"):
+            prepare(self.candidates, DEFAULT_SEEDS, Path(self.temporary.name) / "other.jsonl")
 
     def test_queue_stays_pending_and_cannot_export(self) -> None:
         seed = read_seeds(DEFAULT_SEEDS)["light_001"]

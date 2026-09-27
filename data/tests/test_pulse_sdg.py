@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import unicodedata
 
 from scripts.pulse_sdg import (
     DEFAULT_SEEDS, GENERATION_SEED_FIELDS, PROMPT_VERSION, export_candidates,
@@ -12,6 +13,21 @@ from scripts.pulse_sdg import (
 
 
 class PilotSdgTests(unittest.TestCase):
+    def test_export_deduplicates_canonically_equivalent_text(self) -> None:
+        seeds = read_seeds(DEFAULT_SEEDS)
+        seed = seeds["light_001"]
+        text = "Возле остановки ёлка, фонарь не горит вечером."
+        rows = [
+            {**seed, "language": "RU", "style": "short", "appeal_text": text},
+            {**seed, "language": "RU", "style": "neutral",
+             "appeal_text": unicodedata.normalize("NFD", text)},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "candidates.jsonl"
+            counts = export_candidates(rows, seeds, output, "local-test-model", source_checksum(DEFAULT_SEEDS), 109)
+            self.assertEqual(len(output.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertEqual(counts["exact_duplicate"], 1)
+
     def test_generation_projection_contains_only_scalar_seed_columns(self) -> None:
         seeds = read_seeds(DEFAULT_SEEDS)
         with tempfile.TemporaryDirectory() as directory:
