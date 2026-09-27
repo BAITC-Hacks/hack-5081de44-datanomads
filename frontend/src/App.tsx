@@ -703,12 +703,12 @@ function RoutingProvenance({ provenance, fallbackReason }: { provenance?: RulePr
 
 function CleanRegionsPage({ regions, onDrilldown }: { regions: RegionMetric[]; onDrilldown: DrilldownHandler }) {
   if (!regions.length) return <div className="analytics-page"><NoData message="Нет данных по регионам." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Нагрузка по регионам" /><div className="region-table region-table-full"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{regions.map((region) => <button className="region-table-row region-table-row-full drilldown-row" key={region.name} onClick={() => onDrilldown('region', region.id, `Регион: ${region.name}`)}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{region.change == null ? '—' : String(region.change) + '%'}</span><span>{region.risk ?? 'нет данных'}</span></button>)}</div></section></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Нагрузка по регионам" /><div className="region-table"><div className="region-table-head"><span>Регион</span><span>Текущий период</span><span>Предыдущий период</span><span>Изменение</span></div>{regions.map((region) => <button className="region-table-row drilldown-row" key={region.name} onClick={() => onDrilldown('region', region.id, `Регион: ${region.name}`)}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{region.previousTickets?.toLocaleString('ru-RU') ?? '—'}</span><span>{formatAnalyticsChange(region.changeAbs, region.change)}</span></button>)}</div></section></div>
 }
 
 function CleanTopicsPage({ topics, onDrilldown }: { topics: TopicMetric[]; onDrilldown: DrilldownHandler }) {
   if (!topics.length) return <div className="analytics-page"><NoData message="Нет данных по темам." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Распределение по темам" /><div className="topic-bars">{topics.map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value) + '%', background: topic.color }} /></div></button>)}</div></section></div>
+  return <div className="analytics-page"><section className="panel"><PanelHeading title="Распределение по темам" /><div className="topic-bars">{topics.map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}% · {topic.tickets?.toLocaleString('ru-RU') ?? '—'}</strong></div>{topic.previousTickets != null && <small className="topic-period-context">Предыдущий период: {topic.previousTickets.toLocaleString('ru-RU')} · изменение {formatAnalyticsChange(topic.changeAbs, topic.change)}</small>}<div className="bar-track"><span style={{ width: String(topic.value) + '%', background: topic.color }} /></div></button>)}</div></section></div>
 }
 
 function chartBaseOption(dates: string[]): EChartsOption {
@@ -1063,8 +1063,8 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
   }
   return <div className="analytics-page">
     <div className="metrics-grid">
-      <MetricCard label="Обращений в выборке" value={String(total)} change="текущий срез" detail="по выбранным фильтрам" tone="mint" icon="inbox" />
-      <MetricCard label="Высокий приоритет" value={String(highPriority)} change="текущий срез" detail="по выбранным фильтрам" tone="rose" icon="pulse" />
+      <MetricCard label="Обращений в выборке" value={total.toLocaleString('ru-RU')} change={formatAnalyticsChange(data.overview.changeAbs, data.overview.changePct)} detail={data.overview.previousTotalTickets == null ? 'сравнение недоступно' : `предыдущий период: ${data.overview.previousTotalTickets.toLocaleString('ru-RU')}`} tone="mint" icon="inbox" onClick={() => onDrilldown('overview', 'all', 'Все обращения')} />
+      <MetricCard label="Высокий приоритет" value={String(highPriority)} change="текущий срез" detail="по выбранным фильтрам" tone="rose" icon="pulse" onClick={() => onDrilldown('overview', 'high_priority', 'Высокий приоритет')} />
       <MetricCard label="Решения оператора" value={String(data.overview.operatorDecisions)} change={`${data.overview.confirmedDecisions} подтверждено · ${data.overview.correctedDecisions} исправлено`} detail="по данным решений" tone="amber" icon="clock" />
       <MetricCard label="Аномальные сигналы" value={String(data.alerts.length)} change="обнаружено системой" detail="текущий срез" tone="blue" icon="bell" />
     </div>
@@ -1083,8 +1083,8 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
     <div className="analytics-grid overview-grid">
       <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} />{data.timeSeries.length ? <div className="region-table"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля</span></div>{data.timeSeries.slice(-7).map((point) => <button className="region-table-row drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div> : <NoData message="За выбранный период нет обращений." />}</section>
       <section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} />{data.topics.length ? <div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value * 2.7) + '%', background: topic.color }} /></div></button>)}</div> : <NoData message="Нет данных по темам." />}</section>
-      <section className="panel"><PanelHeading title="Сигналы" action="Открыть все" onClick={() => onNavigate('/situation/alerts')} />{data.alerts.length ? <div className="alert-list">{data.alerts.map((alert) => <AlertListItem alert={alert} key={alert.id} />)}</div> : <NoData message="Нет подключённых сигналов." />}</section>
-      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="Все регионы" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Обращения</span><span>Динамика</span><span>Состояние</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} onDrilldown={onDrilldown} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
+      <section className="panel"><PanelHeading title="Сигналы" action="Открыть все" onClick={() => onNavigate('/situation/alerts')} />{data.alerts.length ? <div className="alert-list">{data.alerts.map((alert) => <AlertListItem alert={alert} key={alert.id} onDrilldown={onDrilldown} />)}</div> : <NoData message="Нет подключённых сигналов." />}</section>
+      <section className="panel span-two region-panel"><PanelHeading title="Регионы" action="Все регионы" onClick={() => onNavigate('/situation/regions')} />{data.regions.length ? <div className="region-table"><div className="region-table-head"><span>Регион</span><span>Текущий период</span><span>Предыдущий период</span><span>Изменение</span></div>{data.regions.map((region) => <RegionRow region={region} key={region.name} onDrilldown={onDrilldown} />)}</div> : <NoData message="Нет данных по регионам." />}</section>
       <section className="panel query-panel">
         <div className="eyebrow"><span className="eyebrow-line" />Спросить данные</div>
         <h3>Ответ по обращениям</h3>
@@ -1100,8 +1100,8 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
   </div>
 }
 
-function MetricCard({ label, value, change, detail, tone, icon }: { label: string; value: string; change: string; detail: string; tone: string; icon: IconName }) {
-  return <article className={`metric-card metric-${tone}`}><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon name={icon} size={17} /></span></div><div className="metric-value">{value}</div><div className="metric-bottom"><span className="metric-change">{change}</span><span>{detail}</span></div></article>
+function MetricCard({ label, value, change, detail, tone, icon, onClick }: { label: string; value: string; change: string; detail: string; tone: string; icon: IconName; onClick?: () => void }) {
+  return <article className={`metric-card metric-${tone}${onClick ? ' drilldown-row' : ''}`} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined} onClick={onClick} onKeyDown={onClick ? (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onClick() } } : undefined}><div className="metric-top"><span>{label}</span><span className="metric-icon"><Icon name={icon} size={17} /></span></div><div className="metric-value">{value}</div><div className="metric-bottom"><span className="metric-change">{change}</span><span>{detail}</span></div></article>
 }
 
 function NoData({ message }: { message: string }) {
@@ -1112,15 +1112,22 @@ function PanelHeading({ title, action, onClick }: { title: string; action?: stri
   return <div className="panel-heading"><h2>{title}</h2>{action && <button className="text-button" onClick={onClick}>{action}<Icon name="arrow" size={14} /></button>}</div>
 }
 
-function AlertListItem({ alert }: { alert: Alert }) {
-  return <div className="alert-list-item"><span className={`alert-dot alert-${alert.severity}`} /><div><strong>{alert.title}</strong><span>{alert.region} · {alert.affectedTickets} обращений</span></div><Icon name="arrow" size={14} /></div>
+function AlertListItem({ alert, onDrilldown }: { alert: Alert; onDrilldown: DrilldownHandler }) {
+  return <button className="alert-list-item drilldown-row" onClick={() => onDrilldown('alert', alert.id, `Оповещение: ${alert.title}`)}><span className={`alert-dot alert-${alert.severity}`} /><span><strong>{alert.title}</strong><span>{alert.region} · {alert.affectedTickets} обращений</span></span><Icon name="arrow" size={14} /></button>
 }
 
 function RegionRow({ region, onDrilldown }: { region: RegionMetric; onDrilldown?: DrilldownHandler }) {
-  const change = region.change == null ? '—' : String(region.change) + '%'
-  const risk = region.risk ?? 'нет данных'
-  if (!onDrilldown) return <div className="region-table-row"><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{change}</span><span>{risk}</span></div>
-  return <button className="region-table-row drilldown-row" onClick={() => onDrilldown('region', region.id, `Регион: ${region.name}`)}><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{change}</span><span>{risk}</span></button>
+  const row = <><strong>{region.name}</strong><span>{region.tickets.toLocaleString('ru-RU')}</span><span>{region.previousTickets?.toLocaleString('ru-RU') ?? '—'}</span><span>{formatAnalyticsChange(region.changeAbs, region.change)}</span></>
+  if (!onDrilldown) return <div className="region-table-row">{row}</div>
+  return <button className="region-table-row drilldown-row" onClick={() => onDrilldown('region', region.id, `Регион: ${region.name}`)}>{row}</button>
+}
+
+function formatAnalyticsChange(changeAbs: number | undefined, changePct: number | undefined): string {
+  if (changeAbs == null) return '—'
+  const absolute = `${changeAbs > 0 ? '+' : ''}${changeAbs.toLocaleString('ru-RU')}`
+  if (changePct == null) return absolute
+  const percent = `${changePct > 0 ? '+' : ''}${changePct.toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`
+  return `${absolute} (${percent})`
 }
 
 

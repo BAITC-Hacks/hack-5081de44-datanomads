@@ -2723,7 +2723,7 @@ impl PgRepository {
             .push_bind(previous_since)
             .push(" AND t.created_at <= now() LEFT JOIN LATERAL (SELECT confidence FROM ticket_predictions WHERE ticket_id = t.id ORDER BY created_at DESC LIMIT 1) p ON TRUE WHERE TRUE");
         push_analytics_filters(&mut region_query, query, "t");
-        region_query.push(" GROUP BY r.id, r.name_ru, r.name_en ORDER BY tickets DESC, r.id");
+        region_query.push(" GROUP BY r.id, r.name_ru, r.name_en ORDER BY label, r.id");
         let region_rows = region_query
             .build()
             .fetch_all(&self.pool)
@@ -2795,14 +2795,14 @@ impl PgRepository {
             .collect::<Vec<_>>();
 
         let mut series_query = QueryBuilder::<Postgres>::new(
-            "SELECT to_char(date_trunc('day', t.created_at), 'YYYY-MM-DD') AS date, COUNT(*)::bigint AS tickets, COUNT(*) FILTER (WHERE t.status IN ('RESOLVED', 'CLOSED'))::bigint AS resolved FROM tickets t WHERE t.created_at >= ",
+            "SELECT to_char(date_trunc('day', t.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS date, COUNT(*)::bigint AS tickets, COUNT(*) FILTER (WHERE t.status IN ('RESOLVED', 'CLOSED'))::bigint AS resolved FROM tickets t WHERE t.created_at >= ",
         );
         series_query
             .push_bind(current_since)
             .push(" AND t.created_at <= now()");
         push_analytics_filters(&mut series_query, query, "t");
         series_query.push(
-            " GROUP BY date_trunc('day', t.created_at) ORDER BY date_trunc('day', t.created_at)",
+            " GROUP BY date_trunc('day', t.created_at AT TIME ZONE 'UTC') ORDER BY date_trunc('day', t.created_at AT TIME ZONE 'UTC')",
         );
         let series_rows = series_query
             .build()
@@ -2822,10 +2822,10 @@ impl PgRepository {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        let time_series = (0..days)
+        let time_series = (0..=days)
             .map(|offset| {
                 let date =
-                    (current_since.date_naive() + chrono::Duration::days(offset + 1)).to_string();
+                    (current_since.date_naive() + chrono::Duration::days(offset)).to_string();
                 series.get(&date).cloned().unwrap_or(TimeSeriesPoint {
                     date,
                     tickets: 0,

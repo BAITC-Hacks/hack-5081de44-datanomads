@@ -75,6 +75,65 @@ def expect(condition: bool, message: str) -> None:
         raise AcceptanceError(message)
 
 
+def postgres_ticket_counts(
+    repo_root: Path,
+    *,
+    region_id: str,
+    topic_id: str | None = None,
+    status: str | None = None,
+    channel: str | None = None,
+) -> tuple[int, int]:
+    query = """
+        SELECT
+          COUNT(*) FILTER (
+            WHERE t.created_at >= now() - INTERVAL '30 days'
+              AND t.created_at <= now()
+          ),
+          COUNT(*) FILTER (
+            WHERE t.created_at >= now() - INTERVAL '60 days'
+              AND t.created_at < now() - INTERVAL '30 days'
+          )
+        FROM tickets t
+        WHERE t.region_id = :'region'
+          AND (NULLIF(:'topic', '') IS NULL OR t.topic_id = NULLIF(:'topic', ''))
+          AND (NULLIF(:'status', '') IS NULL OR t.status = UPPER(NULLIF(:'status', '')))
+          AND (NULLIF(:'channel', '') IS NULL OR t.channel = NULLIF(:'channel', ''));
+    """
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "sh",
+            "-lc",
+            'exec psql -XAtq -F "|" -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"',
+            "pulse109-e2e-db-check",
+            "-v",
+            f"region={region_id}",
+            "-v",
+            f"topic={topic_id or ''}",
+            "-v",
+            f"status={status or ''}",
+            "-v",
+            f"channel={channel or ''}",
+        ],
+        cwd=repo_root,
+        input=query,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    try:
+        current, previous = result.stdout.strip().split("|")
+        return int(current), int(previous)
+    except ValueError as error:
+        raise AcceptanceError(
+            f"PostgreSQL returned invalid current/previous ticket counts: {result.stdout!r}"
+        ) from error
+
+
 def read_sse_event(response: Any) -> bytes:
     lines = []
     while line := response.readline():
@@ -237,9 +296,60 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     )
     expect(status == 201 and "relation:REPEAT:CONFIRMED" == relation.get("feedback_type"), f"relation feedback failed: {relation}")
 
-    query = urlencode({"dimension": "region", "value": region, "range": "30d", "limit": "2"})
-    status, _, drilldown = json_request(base_url, "GET", f"/api/v1/analytics/drilldown?{query}", role="MANAGER", timeout=timeout)
-    expect(status == 200 and drilldown.get("total", 0) >= 3, f"analytics drilldown failed: {drilldown}")
+    repo_root = Path(__file__).resolve().parent.parent
+    region_filters = {
+        "range": "30d",
+        "region_id": region,
+        "status": "OPEN",
+        "channel": "e2e",
+    }
+    analytics_query = urlencode(region_filters)
+    status, _, analytics = json_request(base_url, "GET", f"/api/v1/analytics?{analytics_query}", role="MANAGER", timeout=timeout)
+    expect(status == 200, f"regional analytics failed: {analytics}")
+    region_total = int(analytics.get("overview", {}).get("total_tickets", -1))
+    database_region_total, database_previous_region_total = postgres_ticket_counts(
+        repo_root, region_id=region, status="OPEN", channel="e2e"
+    )
+    region_previous_total = int(analytics.get("overview", {}).get("previous_total_tickets", -1))
+    expect(
+        region_total == database_region_total
+        and region_previous_total == database_previous_region_total,
+        f"regional analytics differs from PostgreSQL: API={region_total}/{region_previous_total} "
+        f"DB={database_region_total}/{database_previous_region_total}",
+    )
+    region_bucket = next((item for item in analytics.get("by_region", []) if item.get("id") == region), None)
+    expect(region_bucket is not None and region_bucket.get("tickets") == region_total, f"regional aggregate differs from the overview slice: {region_bucket} vs {region_total}")
+    time_series_total = sum(int(point.get("tickets", 0)) for point in analytics.get("time_series", []))
+    expect(time_series_total == region_total, f"regional time series differs from the overview slice: {time_series_total} vs {region_total}")
+
+    drilldown_filters = {**region_filters, "dimension": "overview", "value": "all", "limit": "100"}
+    drilldown_query = urlencode(drilldown_filters)
+    status, _, drilldown = json_request(base_url, "GET", f"/api/v1/analytics/drilldown?{drilldown_query}", role="MANAGER", timeout=timeout)
+    expect(status == 200 and drilldown.get("total") == region_total, f"regional drilldown differs from the aggregate slice: {drilldown}")
+
+    selected_topic = next((item.get("id") for item in analytics.get("by_topic", []) if item.get("tickets", 0) > 0), None)
+    expect(isinstance(selected_topic, str), f"regional analytics has no topic with tickets: {analytics.get('by_topic')}")
+    topic_analytics_query = urlencode({**region_filters, "topic_id": selected_topic})
+    status, _, topic_analytics = json_request(base_url, "GET", f"/api/v1/analytics?{topic_analytics_query}", role="MANAGER", timeout=timeout)
+    expect(status == 200, f"region and topic analytics failed: {topic_analytics}")
+    topic_total = int(topic_analytics.get("overview", {}).get("total_tickets", -1))
+    database_topic_total, database_previous_topic_total = postgres_ticket_counts(
+        repo_root,
+        region_id=region,
+        topic_id=selected_topic,
+        status="OPEN",
+        channel="e2e",
+    )
+    topic_previous_total = int(topic_analytics.get("overview", {}).get("previous_total_tickets", -1))
+    expect(
+        topic_total == database_topic_total
+        and topic_previous_total == database_previous_topic_total,
+        f"region/topic analytics differs from PostgreSQL: API={topic_total}/{topic_previous_total} "
+        f"DB={database_topic_total}/{database_previous_topic_total}",
+    )
+    topic_drilldown_query = urlencode({**region_filters, "topic_id": selected_topic, "dimension": "topic", "value": selected_topic, "limit": "100"})
+    status, _, topic_drilldown = json_request(base_url, "GET", f"/api/v1/analytics/drilldown?{topic_drilldown_query}", role="MANAGER", timeout=timeout)
+    expect(status == 200 and topic_drilldown.get("total") == topic_total, f"region/topic drilldown differs from its aggregate slice: {topic_drilldown}")
     for text in ("Сколько обращений за 30 дней?", "Какой тренд?", "Сравни регионы", "Топ тем", "Где всплески?", "Дай прогноз"):
         status, _, result = json_request(base_url, "POST", "/api/v1/analytics/query", body={"text": text, "filters": {"range": "30d"}}, role="MANAGER", timeout=timeout)
         expect(status == 200 and result.get("intent"), f"QueryIntent failed for {text!r}: {result}")

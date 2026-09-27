@@ -50,6 +50,117 @@ async fn demo_api_supports_preview_and_manager_analytics() {
 }
 
 #[tokio::test]
+async fn demo_analytics_uses_one_filtered_slice_for_comparison_and_drilldown() {
+    let application = app(AppState::demo());
+    let analytics = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/analytics?range=7d")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(analytics.status(), 200);
+    let analytics: serde_json::Value =
+        serde_json::from_slice(&to_bytes(analytics.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(analytics["source"], "deterministic-demo");
+    assert_eq!(analytics["overview"]["total_tickets"], 4);
+    assert_eq!(analytics["overview"]["previous_total_tickets"], 8);
+    assert_eq!(analytics["overview"]["change_abs"], -4);
+    assert_eq!(analytics["overview"]["change_pct"], -50.0);
+    assert_eq!(analytics["by_region"].as_array().unwrap().len(), 20);
+    for dimension in ["by_region", "by_topic", "time_series"] {
+        let total = analytics[dimension]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["tickets"].as_u64().unwrap())
+            .sum::<u64>();
+        assert_eq!(total, 4, "{dimension} should match the overview slice");
+    }
+
+    let service = "service_id=%D0%A6%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9+%D0%B0%D0%BA%D0%B8%D0%BC%D0%B0%D1%82";
+    let service_only = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/analytics?range=7d&{service}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(service_only.status(), 200);
+    let service_only: serde_json::Value = serde_json::from_slice(
+        &to_bytes(service_only.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(service_only["overview"]["total_tickets"], 1);
+
+    let rejected_status = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/analytics?range=7d&{service}&status=OPEN"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected_status.status(), 200);
+    let rejected_status: serde_json::Value = serde_json::from_slice(
+        &to_bytes(rejected_status.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rejected_status["overview"]["total_tickets"], 0);
+
+    let filters = format!("range=7d&region_id=R10&topic_id=TOPIC-DIGITAL&{service}&status=TRIAGED");
+    let selected = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/analytics?{filters}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected.status(), 200);
+    let selected: serde_json::Value =
+        serde_json::from_slice(&to_bytes(selected.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(selected["overview"]["total_tickets"], 1);
+    assert_eq!(selected["by_region"][0]["id"], "R10");
+    assert_eq!(selected["by_region"][0]["tickets"], 1);
+    assert_eq!(selected["by_topic"][0]["id"], "TOPIC-DIGITAL");
+    assert_eq!(selected["by_topic"][0]["tickets"], 1);
+
+    let drilldown = application
+        .oneshot(
+            Request::get(format!(
+                "/api/v1/analytics/drilldown?{filters}&dimension=region&value=R10"
+            ))
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(drilldown.status(), 200);
+    let drilldown: serde_json::Value =
+        serde_json::from_slice(&to_bytes(drilldown.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(drilldown["total"], 1);
+    assert_eq!(drilldown["items"][0]["id"], "ticket-010");
+}
+
+#[tokio::test]
 async fn learning_feedback_rejects_a_cycle_outside_collect() {
     let application = app(AppState::demo());
     let response = application

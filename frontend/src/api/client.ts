@@ -151,7 +151,7 @@ interface BackendDecisionResponse {
 
 interface BackendAnalytics {
   source?: string
-  overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number; operator_decisions?: number; confirmed_decisions?: number; corrected_decisions?: number; avg_decision_minutes?: number | null; change_abs?: number; change_pct?: number | null }
+  overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number; operator_decisions?: number; confirmed_decisions?: number; corrected_decisions?: number; avg_decision_minutes?: number | null; previous_total_tickets?: number; change_abs?: number; change_pct?: number | null }
   runtime_metrics?: {
     operator_decision_time_minutes: number | null
     operator_decision_time_samples: number
@@ -411,8 +411,8 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   const detailResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticket.id)}`)))
   const previewResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendAssistPreview>('/assist/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket_id: ticket.id }) })))
   const tickets = ticketResponse.items.map((ticket, index) => mapBackendTicket(ticket, detailResults[index], ticketResponse.items, previewResults[index]))
-  const regions: RegionMetric[] = analytics.by_region.filter((region) => region.tickets > 0).map((region) => ({ id: region.id, name: region.label, tickets: region.tickets, change: region.change_pct }))
-  const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), change: topic.change_pct, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
+  const regions: RegionMetric[] = analytics.by_region.map((region) => ({ id: region.id, name: region.label, tickets: region.tickets, previousTickets: region.change_abs == null ? undefined : Math.max(0, region.tickets - region.change_abs), changeAbs: region.change_abs, change: region.change_pct }))
+  const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0 || (topic.change_abs != null && topic.change_abs < 0)).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), tickets: topic.tickets, previousTickets: topic.change_abs == null ? undefined : Math.max(0, topic.tickets - topic.change_abs), changeAbs: topic.change_abs, change: topic.change_pct, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
   const alerts: Alert[] = alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity.toLowerCase() === 'critical' ? 'critical' : alert.severity.toLowerCase() === 'high' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status.toLowerCase() === 'acknowledged' ? 'В работе' : alert.status.toLowerCase() === 'closed' ? 'Закрыт' : 'Новый' }))
   const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date, forecast: point.tickets }))
   const cycle = learning.active_cycle ?? learning.items?.[0]
@@ -459,6 +459,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
       confirmedDecisions: analytics.overview.confirmed_decisions ?? 0,
       correctedDecisions: analytics.overview.corrected_decisions ?? 0,
       changeAbs: analytics.overview.change_abs ?? 0,
+      previousTotalTickets: analytics.overview.previous_total_tickets,
       avgDecisionMinutes: analytics.overview.avg_decision_minutes ?? undefined,
       changePct: analytics.overview.change_pct ?? undefined,
     },

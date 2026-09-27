@@ -3588,43 +3588,45 @@ async fn analytics(
             .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
+    let generated_at = demo_analytics_as_of(&store)?;
+    let days = analytics_range_days(query.range.as_deref());
+    let current_since = generated_at - Duration::days(days);
+    let previous_since = current_since - Duration::days(days);
     let filtered: Vec<&Ticket> = store
         .tickets
         .values()
         .filter(|ticket| {
-            query
-                .region_id
-                .as_deref()
-                .is_none_or(|value| ticket.region_id == value)
-                && query
-                    .topic_id
-                    .as_deref()
-                    .is_none_or(|value| ticket.topic_id == value)
+            ticket_matches_analytics_filters(ticket, &query)
+                && ticket_created_at(ticket).is_some_and(|created_at| {
+                    created_at >= current_since && created_at <= generated_at
+                })
         })
         .collect();
-    let avg_confidence = if filtered.is_empty() {
-        0.0
-    } else {
-        filtered
-            .iter()
-            .filter_map(|ticket| store.predictions.get(&ticket.id))
-            .map(|prediction| prediction.confidence)
-            .sum::<f32>()
-            / filtered.len() as f32
-    };
+    let previous: Vec<&Ticket> = store
+        .tickets
+        .values()
+        .filter(|ticket| {
+            ticket_matches_analytics_filters(ticket, &query)
+                && ticket_created_at(ticket).is_some_and(|created_at| {
+                    created_at >= previous_since && created_at < current_since
+                })
+        })
+        .collect();
+    let avg_confidence = average_ticket_confidence(&filtered, &store);
     let open_tickets = filtered
         .iter()
-        .filter(|ticket| ticket.status == "open")
+        .filter(|ticket| is_open_ticket_status(&ticket.status))
         .count();
     let resolved = filtered
         .iter()
-        .filter(|ticket| ticket.status == "resolved")
+        .filter(|ticket| is_resolved_ticket_status(&ticket.status))
         .count();
     let high_priority = filtered
         .iter()
-        .filter(|ticket| ticket.priority == "high")
+        .filter(|ticket| is_high_priority(&ticket.priority))
         .count();
     let runtime_metrics = demo_runtime_metrics(&store, &filtered);
+    let total_change = filtered.len() as i64 - previous.len() as i64;
     let overview = json!({
         "total_tickets": filtered.len(),
         "open_tickets": open_tickets,
@@ -3635,11 +3637,19 @@ async fn analytics(
         "corrected_decisions": store.decisions.iter().filter(|decision| decision.action == "correct" && filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
         "avg_decision_minutes": runtime_metrics.operator_decision_time_minutes,
         "average_confidence": avg_confidence,
+        "previous_total_tickets": previous.len(),
+        "change_abs": total_change,
+        "change_pct": analytics_percent_change(filtered.len(), previous.len()),
     });
     let by_region = store
         .regions
         .iter()
-        .filter(|region| query.region_id.as_deref().is_none_or(|id| id == region.id))
+        .filter(|region| {
+            query
+                .region_id
+                .as_deref()
+                .is_none_or(|id| id.trim() == region.id)
+        })
         .map(|region| {
             metric_bucket(
                 region.id.clone(),
@@ -3649,6 +3659,10 @@ async fn analytics(
                     .filter(|ticket| ticket.region_id == region.id)
                     .copied()
                     .collect(),
+                previous
+                    .iter()
+                    .filter(|ticket| ticket.region_id == region.id)
+                    .count(),
                 &store,
             )
         })
@@ -3656,7 +3670,12 @@ async fn analytics(
     let by_topic = store
         .topics
         .iter()
-        .filter(|topic| query.topic_id.as_deref().is_none_or(|id| id == topic.id))
+        .filter(|topic| {
+            query
+                .topic_id
+                .as_deref()
+                .is_none_or(|id| id.trim() == topic.id)
+        })
         .map(|topic| {
             metric_bucket(
                 topic.id.clone(),
@@ -3666,55 +3685,24 @@ async fn analytics(
                     .filter(|ticket| ticket.topic_id == topic.id)
                     .copied()
                     .collect(),
+                previous
+                    .iter()
+                    .filter(|ticket| ticket.topic_id == topic.id)
+                    .count(),
                 &store,
             )
         })
         .collect();
+    let time_series = demo_time_series(&filtered, current_since, generated_at);
     Ok(Json(AnalyticsResponse {
-        generated_at: DEMO_TIMESTAMP.to_owned(),
+        generated_at: generated_at.to_rfc3339(),
         source: "deterministic-demo".to_owned(),
-        range: query.range.unwrap_or_else(|| "7d".to_owned()),
+        range: query.range.clone().unwrap_or_else(|| format!("{days}d")),
         overview,
         runtime_metrics,
         by_region,
         by_topic,
-        time_series: vec![
-            TimeSeriesPoint {
-                date: "2026-09-15".to_owned(),
-                tickets: 7,
-                resolved: 4,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-16".to_owned(),
-                tickets: 9,
-                resolved: 5,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-17".to_owned(),
-                tickets: 8,
-                resolved: 6,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-18".to_owned(),
-                tickets: 12,
-                resolved: 7,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-19".to_owned(),
-                tickets: 11,
-                resolved: 8,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-20".to_owned(),
-                tickets: 14,
-                resolved: 9,
-            },
-            TimeSeriesPoint {
-                date: "2026-09-21".to_owned(),
-                tickets: 10,
-                resolved: 6,
-            },
-        ],
+        time_series,
     }))
 }
 
@@ -3755,24 +3743,59 @@ async fn analytics_drilldown(
             .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
-    let value = query.value.as_deref();
+    let generated_at = demo_analytics_as_of(&store)?;
+    let days = analytics_range_days(query.filters.range.as_deref());
+    let current_since = generated_at - Duration::days(days);
+    let value = query.value.as_deref().unwrap_or_default().trim();
+    let selected_date = if dimension == "date" {
+        Some(
+            NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|error| {
+                ApiError::BadRequest(format!("invalid drilldown date: {error}"))
+            })?,
+        )
+    } else {
+        None
+    };
+    let selected_alert_ticket_ids = if dimension == "alert" {
+        Some(
+            store
+                .alerts
+                .get(value)
+                .map(|alert| {
+                    alert
+                        .linked_ticket_ids
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+                .unwrap_or_default(),
+        )
+    } else {
+        None
+    };
     let mut items = store
         .tickets
         .values()
         .filter(|ticket| {
-            query
-                .filters
-                .region_id
-                .as_deref()
-                .is_none_or(|filter| ticket.region_id == filter)
-                && query
-                    .filters
-                    .topic_id
-                    .as_deref()
-                    .is_none_or(|filter| ticket.topic_id == filter)
+            ticket_matches_analytics_filters(ticket, &query.filters)
+                && ticket_created_at(ticket).is_some_and(|created_at| {
+                    created_at >= current_since
+                        && created_at <= generated_at
+                        && selected_date.is_none_or(|date| created_at.date_naive() == date)
+                })
                 && match dimension.as_str() {
-                    "region" => value.is_none_or(|filter| ticket.region_id == filter),
-                    "topic" => value.is_none_or(|filter| ticket.topic_id == filter),
+                    "region" => ticket.region_id == value.trim(),
+                    "topic" => ticket.topic_id == value.trim(),
+                    "alert" => selected_alert_ticket_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(ticket.id.as_str())),
+                    "overview" => match value.to_ascii_lowercase().as_str() {
+                        "high_priority" => is_high_priority(&ticket.priority),
+                        "open" => is_open_ticket_status(&ticket.status),
+                        "resolved" => is_resolved_ticket_status(&ticket.status),
+                        "" | "all" => true,
+                        _ => false,
+                    },
                     _ => true,
                 }
         })
@@ -4592,7 +4615,127 @@ async fn events(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
         .into_response())
 }
 
-fn metric_bucket(id: String, label: String, tickets: Vec<&Ticket>, store: &Store) -> MetricBucket {
+fn demo_analytics_as_of(store: &Store) -> Result<DateTime<Utc>, ApiError> {
+    let fixture_time = DateTime::parse_from_rfc3339(DEMO_TIMESTAMP)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            ApiError::Internal(format!("invalid configured demo timestamp: {error}"))
+        })?;
+    let latest_ticket_time = store
+        .tickets
+        .values()
+        .filter_map(ticket_created_at)
+        .filter(|created_at| *created_at <= Utc::now())
+        .max()
+        .unwrap_or(fixture_time);
+    Ok(fixture_time.max(latest_ticket_time))
+}
+
+fn analytics_range_days(range: Option<&str>) -> i64 {
+    range
+        .map(str::trim)
+        .map(|value| value.trim_end_matches('d'))
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(30)
+        .clamp(1, 366)
+}
+
+fn ticket_created_at(ticket: &Ticket) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&ticket.created_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn ticket_matches_analytics_filters(ticket: &Ticket, query: &AnalyticsQuery) -> bool {
+    query
+        .region_id
+        .as_deref()
+        .is_none_or(|value| ticket.region_id == value.trim())
+        && query
+            .topic_id
+            .as_deref()
+            .is_none_or(|value| ticket.topic_id == value.trim())
+        && query.service_id.as_deref().is_none_or(|value| {
+            service_for_topic(&ticket.topic_id).eq_ignore_ascii_case(value.trim())
+        })
+        && query
+            .status
+            .as_deref()
+            .is_none_or(|value| ticket.status.eq_ignore_ascii_case(value.trim()))
+        // The memory fixture has no district or channel columns. Keep those
+        // filters from returning misleading, unfiltered aggregates.
+        && query.district.is_none()
+        && query.channel.is_none()
+}
+
+fn average_ticket_confidence(tickets: &[&Ticket], store: &Store) -> f32 {
+    if tickets.is_empty() {
+        return 0.0;
+    }
+    tickets
+        .iter()
+        .filter_map(|ticket| store.predictions.get(&ticket.id))
+        .map(|prediction| prediction.confidence)
+        .sum::<f32>()
+        / tickets.len() as f32
+}
+
+fn is_open_ticket_status(status: &str) -> bool {
+    matches!(
+        status.to_ascii_uppercase().as_str(),
+        "OPEN" | "IN_PROGRESS" | "TRIAGED"
+    )
+}
+
+fn is_resolved_ticket_status(status: &str) -> bool {
+    matches!(status.to_ascii_uppercase().as_str(), "RESOLVED" | "CLOSED")
+}
+
+fn is_high_priority(priority: &str) -> bool {
+    matches!(priority.to_ascii_lowercase().as_str(), "high" | "critical")
+}
+
+fn analytics_percent_change(current: usize, previous: usize) -> Option<f32> {
+    (previous > 0).then(|| ((current as f32 - previous as f32) / previous as f32) * 100.0)
+}
+
+fn demo_time_series(
+    tickets: &[&Ticket],
+    period_start: DateTime<Utc>,
+    as_of: DateTime<Utc>,
+) -> Vec<TimeSeriesPoint> {
+    let mut daily_counts = BTreeMap::<NaiveDate, (u32, u32)>::new();
+    for ticket in tickets {
+        if let Some(created_at) = ticket_created_at(ticket) {
+            let counts = daily_counts.entry(created_at.date_naive()).or_default();
+            counts.0 += 1;
+            if is_resolved_ticket_status(&ticket.status) {
+                counts.1 += 1;
+            }
+        }
+    }
+
+    let mut points = Vec::new();
+    let mut date = period_start.date_naive();
+    while date <= as_of.date_naive() {
+        let (tickets, resolved) = daily_counts.get(&date).copied().unwrap_or_default();
+        points.push(TimeSeriesPoint {
+            date: date.to_string(),
+            tickets,
+            resolved,
+        });
+        date += Duration::days(1);
+    }
+    points
+}
+
+fn metric_bucket(
+    id: String,
+    label: String,
+    tickets: Vec<&Ticket>,
+    previous_count: usize,
+    store: &Store,
+) -> MetricBucket {
     let avg_confidence = if tickets.is_empty() {
         0.0
     } else {
@@ -4609,11 +4752,11 @@ fn metric_bucket(id: String, label: String, tickets: Vec<&Ticket>, store: &Store
         tickets: tickets.len(),
         high_priority: tickets
             .iter()
-            .filter(|ticket| ticket.priority == "high")
+            .filter(|ticket| is_high_priority(&ticket.priority))
             .count(),
         avg_confidence,
-        change_abs: None,
-        change_pct: None,
+        change_abs: Some(tickets.len() as i64 - previous_count as i64),
+        change_pct: analytics_percent_change(tickets.len(), previous_count),
     }
 }
 

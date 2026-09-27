@@ -106,14 +106,18 @@ export interface RegionMetric {
   id?: string
   name: string
   tickets: number
+  previousTickets?: number
+  changeAbs?: number
   change?: number
-  risk?: 'stable' | 'watch' | 'critical'
 }
 
 export interface TopicMetric {
   id?: string
   name: string
   value: number
+  tickets?: number
+  previousTickets?: number
+  changeAbs?: number
   change?: number
   color: string
 }
@@ -208,6 +212,7 @@ export interface DashboardData {
     confirmedDecisions: number
     correctedDecisions: number
     changeAbs: number
+    previousTotalTickets?: number
     avgDecisionMinutes?: number
     changePct?: number
   }
