@@ -18,7 +18,7 @@ from data.importers import IKOMEK109Importer, get_importer
 from data.normalization import minimize_text, scan_pii
 from data.normalization.pipeline import normalize_row
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS, canonical_topic_id
-from data.schemas.unified_ticket import UnifiedTicket
+from data.schemas.unified_ticket import SchemaValidationError, UnifiedTicket
 from scripts.data_audit import build_normalized_report, build_report, build_source_report
 from scripts.generate_synthetic_sources import SPECS, generate as generate_synthetic_sources
 from scripts import import_tickets
@@ -42,6 +42,15 @@ class UnifiedTicketTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], "unified-ticket.v1")
         self.assertEqual(payload["status"], "UNKNOWN")
         self.assertEqual(payload["created_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_unsupported_schema_version_is_rejected(self) -> None:
+        with self.assertRaises(SchemaValidationError) as raised:
+            UnifiedTicket.from_mapping({
+                "external_ticket_id": "x-1", "source_system": "ikomek109",
+                "region_id": "KZ-ABAY", "created_at": "2026-01-01T00:00:00Z",
+                "original_text": "Проверить освещение", "schema_version": "unified-ticket.v2",
+            })
+        self.assertEqual(raised.exception.code, "UNKNOWN_SCHEMA")
 
     def test_pii_is_masked_before_ticket_is_created(self) -> None:
         text, report = minimize_text("ФИО: Иван Иванов, телефон +7 777 123-45-67, ИИН 900101123456")
@@ -406,13 +415,42 @@ class DataAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tickets.jsonl"
             rows = [
-                {"source_system": "aikey", "external_ticket_id": "shared", "created_at": "2026-01-01"},
-                {"source_system": "ikomek109", "external_ticket_id": "shared", "created_at": "2026-01-01"},
-                {"source_system": "aikey", "external_ticket_id": "shared", "created_at": "2026-01-02"},
+                {"source_system": "aikey", "external_ticket_id": "shared", "created_at": "2026-01-01",
+                 "region_id": "KZ-ABAY", "original_text": "Не горит фонарь"},
+                {"source_system": "ikomek109", "external_ticket_id": "shared", "created_at": "2026-01-01",
+                 "region_id": "KZ-ABAY", "original_text": "Не горит фонарь"},
+                {"source_system": "aikey", "external_ticket_id": "shared", "created_at": "2026-01-02",
+                 "region_id": "KZ-ABAY", "original_text": "Не горит фонарь"},
             ]
             path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
             report = build_normalized_report(path)
         self.assertEqual(report["duplicate_external_id_count"], 1)
+
+    def test_normalized_audit_rejects_invalid_schema_ambiguous_json_and_pii(self) -> None:
+        base = {"source_system": "aikey", "external_ticket_id": "safe-1",
+                "region_id": "KZ-ABAY", "created_at": "2026-01-01",
+                "original_text": "Не горит фонарь"}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tickets.jsonl"
+            rows = [
+                json.dumps(base),
+                json.dumps({key: value for key, value in base.items() if key != "original_text"}),
+                json.dumps({**base, "schema_version": "unified-ticket.v2"}),
+                json.dumps({**base, "created_at": "bad-date"}),
+                json.dumps({**base, "original_text": "Телефон +7 777 123-45-67"}),
+                json.dumps({**base, "resolution_text": "Ответ: synthetic@example.invalid"}),
+                json.dumps({**base, "address": "ул. Тестовая, дом 1"}),
+                '{"external_ticket_id":"safe-1","external_ticket_id":"spoof"}',
+                '{"external_ticket_id":NaN}',
+            ]
+            path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            report = build_normalized_report(path)
+        self.assertEqual(report["record_count"], 9)
+        self.assertEqual(report["valid_record_count"], 1)
+        self.assertEqual(report["parse_or_schema_error_count"], 5)
+        self.assertEqual(report["pii_rejected_record_count"], 3)
+        self.assertEqual(report["invalid_date_count"], 1)
+        self.assertNotIn("+7 777", json.dumps(report, ensure_ascii=False))
 
     def test_source_report_is_aggregate_and_marks_unverified_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

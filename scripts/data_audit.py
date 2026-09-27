@@ -19,6 +19,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data.importers import get_importer
+from data.normalization.pii import scan_pii
+from data.schemas.unified_ticket import SchemaValidationError, UnifiedTicket
+from scripts.strict_json import unique_object
 
 AUDIT_COLUMNS = {
     "application_number", "creation_date", "closing_date", "region", "district",
@@ -26,6 +29,10 @@ AUDIT_COLUMNS = {
     "submittal_channel", "category", "service", "contractor", "com_exp",
     "result", "status", "status_1", "operator",
 }
+NORMALIZED_PII_FIELDS = (
+    "external_ticket_id", "original_text", "topic_raw", "service_raw", "service_id",
+    "district", "address", "object", "channel", "resolution_text", "official_response",
+)
 CSV_DATE_PATTERN = re.compile(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}\Z")
 
 
@@ -39,15 +46,20 @@ def _is_109_date(value: str) -> bool:
     return True
 
 
+def _invalid_json_constant() -> None:
+    raise ValueError("non-finite JSON value")
+
+
 def _rows(path: Path) -> Iterable[Mapping[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                yield {"_parse_error": f"line {line_number}: {exc.msg}"}
+                row = json.loads(line, object_pairs_hook=unique_object,
+                                 parse_constant=lambda _: _invalid_json_constant())
+            except (json.JSONDecodeError, ValueError):
+                yield {"_parse_error": f"line {line_number}: invalid JSON"}
                 continue
             if isinstance(row, Mapping):
                 yield row
@@ -57,31 +69,44 @@ def _rows(path: Path) -> Iterable[Mapping[str, Any]]:
 
 def build_normalized_report(path: Path) -> Dict[str, Any]:
     records = list(_rows(path))
-    valid = [row for row in records if "external_ticket_id" in row and "_parse_error" not in row and "_schema_error" not in row]
-    created = []
+    valid: list[UnifiedTicket] = []
+    schema_errors = pii_rejected = 0
     invalid_dates = 0
-    for row in valid:
+    for row in records:
+        if "_parse_error" in row or "_schema_error" in row:
+            schema_errors += 1
+            continue
         try:
-            created.append(datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00")))
-        except (KeyError, TypeError, ValueError):
-            invalid_dates += 1
-    ids = [(str(row.get("source_system", "UNKNOWN")), str(row["external_ticket_id"])) for row in valid]
+            ticket = UnifiedTicket.from_mapping(row)
+        except (SchemaValidationError, TypeError, ValueError) as error:
+            schema_errors += 1
+            if isinstance(error, SchemaValidationError) and error.code == "INVALID_DATE":
+                invalid_dates += 1
+            continue
+        if (any(scan_pii(getattr(ticket, field)).detected for field in NORMALIZED_PII_FIELDS) or
+                ticket.address not in (None, "[ADDRESS_REDACTED]") or ticket.coordinates is not None):
+            pii_rejected += 1
+            continue
+        valid.append(ticket)
+    created = [ticket.created_at for ticket in valid]
+    ids = [(ticket.source_system, ticket.external_ticket_id) for ticket in valid]
     report = {
         "path": str(path),
         "record_count": len(records),
         "valid_record_count": len(valid),
-        "parse_or_schema_error_count": len(records) - len(valid),
+        "parse_or_schema_error_count": schema_errors,
+        "pii_rejected_record_count": pii_rejected,
         "duplicate_external_id_count": len(ids) - len(set(ids)),
         "invalid_date_count": invalid_dates,
         "time_range": {
             "min": min(created).isoformat() if created else None,
             "max": max(created).isoformat() if created else None,
         },
-        "by_region": dict(sorted(Counter(str(row.get("region_id", "UNKNOWN")) for row in valid).items())),
-        "by_source_system": dict(sorted(Counter(str(row.get("source_system", "UNKNOWN")) for row in valid).items())),
-        "by_topic": dict(sorted(Counter(str(row.get("topic_id", "unknown")) for row in valid).items())),
-        "by_language": dict(sorted(Counter(str(row.get("language", "UNKNOWN")) for row in valid).items())),
-        "by_status": dict(sorted(Counter(str(row.get("status", "UNKNOWN")) for row in valid).items())),
+        "by_region": dict(sorted(Counter(ticket.region_id for ticket in valid).items())),
+        "by_source_system": dict(sorted(Counter(ticket.source_system for ticket in valid).items())),
+        "by_topic": dict(sorted(Counter(ticket.topic_id for ticket in valid).items())),
+        "by_language": dict(sorted(Counter(ticket.language for ticket in valid).items())),
+        "by_status": dict(sorted(Counter(ticket.status for ticket in valid).items())),
     }
     return report
 

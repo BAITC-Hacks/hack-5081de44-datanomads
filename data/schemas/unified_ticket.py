@@ -123,6 +123,8 @@ class UnifiedTicket:
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if self.schema_version != SCHEMA_VERSION:
+            raise SchemaValidationError("UNKNOWN_SCHEMA", "unsupported UnifiedTicket schema version", "schema_version")
         for field_name in ("external_ticket_id", "source_system", "region_id"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
