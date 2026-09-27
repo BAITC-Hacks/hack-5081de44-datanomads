@@ -48,15 +48,21 @@ class DatasetManifest(StrictManifest):
     frozen_evaluation_version: str = Field(min_length=1)
     pii_policy_version: str = Field(min_length=1)
     content_sha256: Sha256
+    retrieval_pair_count: int = Field(default=0, ge=0)
+    split_file_checksums: dict[str, Sha256] = Field(default_factory=dict)
+    membership_sha256: Sha256 | None = None
+    frozen_evaluation_sha256: Sha256 | None = None
+    audit_sha256: Sha256 | None = None
+    lineage: dict[str, str] = Field(default_factory=dict)
 
-    @field_validator("content_sha256")
+    @field_validator("content_sha256", "membership_sha256", "frozen_evaluation_sha256", "audit_sha256")
     @classmethod
-    def valid_content_checksum(cls, value: str) -> str:
-        return _checksum(value)
+    def valid_package_checksum(cls, value: str | None) -> str | None:
+        return _checksum(value) if value is not None else None
 
-    @field_validator("source_checksums")
+    @field_validator("source_checksums", "split_file_checksums")
     @classmethod
-    def valid_source_checksums(cls, values: dict[str, str]) -> dict[str, str]:
+    def valid_file_checksums(cls, values: dict[str, str]) -> dict[str, str]:
         return {source: _checksum(checksum) for source, checksum in values.items()}
 
     @model_validator(mode="after")
