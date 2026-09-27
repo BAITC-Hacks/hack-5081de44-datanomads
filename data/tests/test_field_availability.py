@@ -75,6 +75,15 @@ class FieldAvailabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "schema differs"):
                 scan_profile(path, "vko_109")
 
+    def test_unterminated_quoted_field_rejects_entire_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "malformed.csv"
+            write_csv(path, "vko_109", [{"application_number": "1", "creation_date": "01.01.2025 10:00:00"}])
+            with path.open("a", encoding="utf-8", newline="") as stream:
+                stream.write("," * (len(HEADERS["vko_109"]) - 1) + '"unterminated\n')
+            with self.assertRaises(csv.Error):
+                scan_profile(path, "vko_109")
+
 
 if __name__ == "__main__":
     unittest.main()

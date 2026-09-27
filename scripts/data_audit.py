@@ -78,7 +78,7 @@ def build_109_csv_report(path: Path) -> Dict[str, Any]:
     """Count only structural properties; never serialize source field values."""
     required = {"application_number", "creation_date", "category", "service"}
     with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
+        reader = csv.DictReader(handle, strict=True)
         headers = reader.fieldnames or []
         if not required.issubset(headers):
             raise ValueError("CSV is missing required 109 export columns")
@@ -241,8 +241,12 @@ def main() -> int:
         parser.error("--source requires --synthetic or --real")
     if (args.synthetic or args.real) and not args.source:
         parser.error("--synthetic/--real requires --source")
-    report = build_report(args.input, source_system=args.source,
-                          synthetic=args.synthetic if args.source else None)
+    try:
+        report = build_report(args.input, source_system=args.source,
+                              synthetic=args.synthetic if args.source else None)
+    except csv.Error:
+        print(json.dumps({"status": "FAILED", "error": "CSV_PARSE_FAILED"}), file=sys.stderr)
+        return 2
     serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

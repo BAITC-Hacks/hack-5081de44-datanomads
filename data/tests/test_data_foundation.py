@@ -396,6 +396,25 @@ class DataAuditTests(unittest.TestCase):
         self.assertNotIn("com_exp", report["nonempty_by_column"])
         self.assertFalse(report["has_original_text_column"])
 
+    def test_raw_csv_report_rejects_unterminated_quoted_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "malformed.csv"
+            output = Path(directory) / "report.json"
+            path.write_text(
+                "application_number,creation_date,category,service\n"
+                "ticket-1,01.02.2025 12:30:00,Дороги,Ремонт\n"
+                'ticket-2,02.02.2025 12:30:00,Дороги,"PII-SENTINEL\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(csv.Error):
+                build_report(path)
+            command = [sys.executable, str(ROOT / "scripts/data_audit.py"), str(path), "--output", str(output)]
+            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse(output.exists())
+            self.assertIn("CSV_PARSE_FAILED", result.stderr)
+            self.assertNotIn("PII-SENTINEL", result.stdout + result.stderr)
+
 
 class MigrationTests(unittest.TestCase):
     def test_postgres_migrations_include_source_of_truth_tables(self) -> None:

@@ -179,7 +179,7 @@ def scan_profile(path: Path, profile: str) -> dict:
     identifiers = set()
     row_count = malformed_count = duplicate_ids = invalid_creation_dates = 0
     with path.open(encoding="utf-8-sig", newline="") as stream:
-        reader = csv.DictReader(stream)
+        reader = csv.DictReader(stream, strict=True)
         headers = reader.fieldnames or []
         if len(headers) != len(HEADERS[profile]) or set(headers) != HEADERS[profile]:
             raise ValueError("customer CSV schema differs from the reviewed profile")
