@@ -2,9 +2,10 @@
 
 [`build_feedback_candidate.py`](../scripts/build_feedback_candidate.py) принимает
 JSONL-экспорт одного learning cycle. Экспорт должен быть сформирован после
-проверки в Core: PostgreSQL остаётся source of truth, а `original_text` в
-экспорте уже должен быть минимизирован по PII. Скрипт повторно проверяет
-форматы PII и не записывает отвергнутый текст в отчёт.
+проверки операторского решения и review текста: PostgreSQL остаётся source
+of truth, а `original_text` в экспорте уже должен быть минимизирован по PII.
+Скрипт повторно проверяет
+известные форматы PII и не записывает отвергнутый текст в отчёт.
 
 Каждая строка `learning-feedback-export.v1` содержит:
 
@@ -24,6 +25,33 @@ accepted_or_corrected, feedback_created_at, validation_status
 и вложения в этот контракт не входят. `production_prediction` и
 `operator_confirmed_decision` хранятся отдельно. Обучающая метка берётся
 **только** из `operator_confirmed_decision.topic_id`.
+
+Для локального экспорта из Core создайте вне Git JSONL с подтверждёнными
+связями `feedback-review-link.v1`. Каждая строка содержит `db_ticket_id`,
+стабильный `ticket_id`, `split_group`, `source_dataset_version`,
+`text_review_sha256` (SHA-256 **точного текста из Core** в формате
+`sha256:<64 lowercase hex>`), `review_status="APPROVED"`, `reviewer_id` и
+`reviewed_at` с часовым поясом. Рецензент должен проверить PII и группу
+инцидента; один regex сканер этого не доказывает. Связи без такого review
+не экспортируются. `ticket_id` следует согласовать с идентификаторами
+замороженного evaluation package, чтобы проверка пересечений работала.
+
+```bash
+DATABASE_URL='postgresql://...' PYTHONPATH=.:ml-service \
+  .venv/bin/python scripts/export_learning_feedback.py \
+  --cycle-id cycle_1 --production-model-version classifier_production_v1 \
+  --review-links data/processed/feedback/review-links.jsonl \
+  --output data/processed/feedback/validated-feedback.jsonl
+```
+
+Скрипт читает PostgreSQL в read-only transaction. Он сверяет review hash
+текста, ровно одну dataset lineage с checksums, `is_synthetic`, связанное
+решение оператора и сохранённую production prediction. Generic feedback без
+topic ID, API tickets без dataset lineage и строки с PII отклоняются с
+агрегатным кодом причины. Выходной JSONL создаётся эксклюзивно с правами
+`0600`; при нуле допустимых строк файл не создаётся. В stdout выводятся
+только счётчики. Review links и экспорт содержат чувствительные данные
+или ссылки на них и не должны попадать в Git.
 
 ```bash
 PYTHONPATH=ml-service .venv/bin/python scripts/build_feedback_candidate.py \
@@ -81,8 +109,11 @@ trainer не запускается. Реальное качество оцен�
 
 Текущий Core ставит `TRAIN_CLASSIFIER` с `samples: []`; generic feedback
 может содержать пустой `production_prediction` и решение без topic ID.
-Такие строки этот контракт отвергает. Нужен отдельный проверенный экспорт
-из Core и подключение offline trainer; без них реальный candidate cycle не
-считается завершённым. Проверка только ID/group/точного текста не может
+Такие строки этот контракт отвергает. Offline экспорт требует одобренных
+review links и зарегистрированного импортированного dataset с checksums;
+два региональных CSV без текста обращения этому условию не отвечают.
+Offline trainer ещё не подключён к обычному Core worker; реальный candidate
+cycle поэтому не считается завершённым. Проверка только ID/group/точного
+текста не может
 доказать отсутствие семантически совпадающих инцидентов, поэтому upstream
 review `split_group` остаётся обязательным.
