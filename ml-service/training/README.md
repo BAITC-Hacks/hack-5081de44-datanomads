@@ -5,15 +5,15 @@ Use Python 3.11.15 for the training environment. The runtime service installs
 
 ```bash
 uv venv --python 3.11.15 .venv
-uv pip sync --python .venv/bin/python ml-service/training/requirements.lock
+uv pip sync --python .venv/bin/python --torch-backend cpu ml-service/training/requirements.lock
 PYTHONPATH=ml-service .venv/bin/python -m unittest discover \
   -s ml-service/training/tests -v
 ```
 
-The lock resolves 63 packages for Python 3.11.15 on Linux x86_64. Direct
-requirements and the core version constraints are kept separately so the lock
-can be regenerated when training code changes. This lock pins package versions,
-but does not pin wheel hashes or other operating systems.
+The lock resolves 47 packages with the CPU PyTorch wheel for Python 3.11.15
+on Linux x86_64. Direct requirements and core version constraints are kept
+separately so the lock can be regenerated when training code changes. It pins
+package versions, but does not pin wheel hashes or other operating systems.
 
 `contracts.py` validates dataset, classifier, embedder and evaluation manifests.
 All require explicit synthetic origin and SHA-256 evidence. Dataset versions
