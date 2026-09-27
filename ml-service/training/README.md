@@ -265,8 +265,10 @@ or critical-topic samples give `INSUFFICIENT_EVIDENCE`; an adequately sized
 report with a critical or global correction-rate regression gets a `NO_GO`
 decision. Only a `VALID` report without regressions can contribute to
 promotion evidence.
-Runtime capture/export of candidate shadow predictions is still required;
-this evaluator does not manufacture that input from existing customer CSVs.
+Core and the offline worker capture candidate shadow predictions for fresh
+tickets when a trained candidate and offline report exist. A reviewed paired
+export and persistence of the final shadow report are still required; this
+evaluator does not manufacture that input from existing customer CSVs.
 
 ## Retrieval baselines
 

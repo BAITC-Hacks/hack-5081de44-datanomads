@@ -1,9 +1,8 @@
 """PostgreSQL-backed ML background worker.
 
 The worker claims queued rows with FOR UPDATE SKIP LOCKED so multiple
-instances can safely process the same queue. Training/evaluation remains the
-deterministic baseline for now; the durable job lifecycle is real and ready
-for versioned model artifacts later.
+instances can safely process the same queue. Reviewed training and candidate
+shadow inference use local artifacts only when their inputs are configured.
 """
 
 from __future__ import annotations
@@ -106,6 +105,8 @@ def safe_job_error(error: Exception) -> str:
         "INVALID_PRODUCTION_ARTIFACT", "CANDIDATE_SANITY_FAILED",
         "CANDIDATE_VERSION_EXISTS", "DATASET_VERSION_EXISTS", "TRAINING_CYCLE_CHANGED",
         "INVALID_CRITICAL_POLICY",
+        "INVALID_SHADOW_JOB", "SHADOW_CONTEXT_CHANGED", "SHADOW_ARTIFACT_INVALID",
+        "SHADOW_PREDICTION_INVALID",
     }:
         return str(error)
     if isinstance(error, (ValidationError, json.JSONDecodeError)):
@@ -164,7 +165,7 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
                         json.dumps(offline["regressed_critical_topics"], ensure_ascii=False),
                     )
             updated = await connection.fetchval(
-                "UPDATE learning_cycles SET state = 'EVALUATE', updated_at = now(), decision_note = $2 WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
+                "UPDATE learning_cycles SET state = 'EVALUATE', evaluation_started_at = COALESCE(evaluation_started_at, now()), updated_at = now(), decision_note = $2 WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
                 str(cycle_id),
                 "FAKE_TRAINER_COMPLETED" if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"}
                 else "CANDIDATE_TRAINED" if candidate else "TRAINER_NOT_CONFIGURED",
@@ -313,6 +314,12 @@ async def process_job(pool: Any, job: Any) -> None:
             result = await reindex_qdrant(pool, payload)
             await complete_job(pool, job_id, result)
             return
+        if kind == "shadow_classifier":
+            from training.shadow_job import score_shadow_ticket
+
+            result = await score_shadow_ticket(pool, payload)
+            await complete_job(pool, job_id, result)
+            return
         if kind == "train_classifier":
             if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"}:
                 # The fake trainer remains an integration-test adapter only.
@@ -346,7 +353,8 @@ async def process_job(pool: Any, job: Any) -> None:
     except Exception as exc:
         error_code = safe_job_error(exc)
         await fail_job(pool, job_id, error_code)
-        await update_learning_cycle(pool, payload, error=error_code)
+        if kind != "shadow_classifier":
+            await update_learning_cycle(pool, payload, error=error_code)
 
 
 async def run_worker() -> None:

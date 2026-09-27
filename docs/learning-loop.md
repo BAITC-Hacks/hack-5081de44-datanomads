@@ -106,6 +106,15 @@ shadow metrics остаются пустыми до отдельной пров�
 не проверены на данных заказчика, поскольку исходных текстов и reviewed links
 нет.
 
+В `EVALUATE` Core ставит `SHADOW_CLASSIFIER` job для новых tickets, созданных
+после начала evaluation window и предсказанных закреплённой production версией.
+Исторический импорт не попадает в этот поток по времени исходного ticket.
+Worker загружает локальный candidate artifact, сохраняет в PostgreSQL только
+candidate topic, confidence, версии и ID production prediction. Если оператор
+уже принял решение или цикл сменил состояние, shadow запись не создаётся.
+Текст обращения не попадает в job payload или shadow table. Сбор парного
+export и итоговый shadow report ещё не подключены; это не разрешает promotion.
+
 ```bash
 PULSE_TRAINING_INPUT_DIR=/absolute/path/to/reviewed-inputs \
   docker compose -f docker-compose.yml -f docker-compose.training.yml \

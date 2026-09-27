@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from worker import safe_job_error, update_learning_cycle
+from worker import process_job, safe_job_error, update_learning_cycle
 
 
 class TrainingConnection:
@@ -84,3 +85,15 @@ def test_insufficient_feedback_closes_cycle_without_candidate() -> None:
                                       result={"state": "INSUFFICIENT_FEEDBACK", "sample_count": 0}))
     assert len(pool.connection.queries) == 1
     assert "state = 'INSUFFICIENT_FEEDBACK'" in pool.connection.queries[0][0]
+
+
+def test_failed_shadow_job_does_not_reopen_learning_cycle() -> None:
+    with (patch("worker.make_services", return_value=(None,) * 7),
+          patch("training.shadow_job.score_shadow_ticket",
+                new=AsyncMock(side_effect=RuntimeError("SHADOW_CONTEXT_CHANGED"))),
+          patch("worker.fail_job", new_callable=AsyncMock) as fail,
+          patch("worker.update_learning_cycle", new_callable=AsyncMock) as update):
+        asyncio.run(process_job(None, {"id": 3, "job_type": "SHADOW_CLASSIFIER",
+                                       "payload": {"cycle_id": "1"}}))
+        fail.assert_awaited_once_with(None, 3, "SHADOW_CONTEXT_CHANGED")
+        update.assert_not_awaited()

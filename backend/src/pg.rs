@@ -27,6 +27,24 @@ const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
 
+async fn enqueue_classifier_shadow_job(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    ticket_id: i64,
+    production_prediction_id: i64,
+    production_model_version: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO background_jobs (job_type, payload, state) SELECT 'SHADOW_CLASSIFIER', jsonb_build_object('cycle_id', lc.id::text, 'ticket_id', $1::text, 'production_prediction_id', $2::text, 'production_model_version', $3, 'candidate_model_version', lc.candidate_model_version, 'candidate_artifact_checksum', mv.artifact_checksum), 'QUEUED' FROM learning_cycles lc JOIN tickets t ON t.id = $1 JOIN model_versions mv ON mv.model_version = lc.candidate_model_version JOIN model_evaluations me ON me.model_version = mv.model_version WHERE lc.state = 'EVALUATE' AND lc.production_model_version = $3 AND lc.evaluation_started_at IS NOT NULL AND t.created_at >= lc.evaluation_started_at AND (lc.evaluation_ends_at IS NULL OR t.created_at < lc.evaluation_ends_at) AND mv.status IN ('CANDIDATE', 'SHADOW') AND mv.manifest_uri IS NOT NULL AND mv.artifact_checksum LIKE 'sha256:%' AND me.metrics_json->>'report_version' = 'classifier-pair-evaluation.v1' ORDER BY lc.updated_at DESC, lc.id DESC LIMIT 1",
+    )
+    .bind(ticket_id)
+    .bind(production_prediction_id)
+    .bind(production_model_version)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("queue classifier shadow: {error}"))?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum ImportError {
     Invalid(String),
@@ -764,8 +782,8 @@ impl PgRepository {
             &routing.service_name,
             &routing.reason,
         );
-        sqlx::query(
-            "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        let production_prediction_id: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
         )
         .bind(ticket_id)
         .bind(&classification.model_version)
@@ -783,9 +801,16 @@ impl PgRepository {
             "routing_reason": routing.reason,
         }))
         .bind(classification.prediction.needs_review)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|error| format!("insert prediction: {error}"))?;
+        enqueue_classifier_shadow_job(
+            &mut tx,
+            ticket_id,
+            production_prediction_id,
+            &classification.model_version,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| format!("commit ticket transaction: {error}"))?;
@@ -1006,8 +1031,8 @@ impl PgRepository {
             let is_new_ticket = inserted_id.is_some();
             let ticket_id = if let Some(id) = inserted_id {
                 imported_rows += 1;
-                sqlx::query(
-                    "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                let production_prediction_id: i64 = sqlx::query_scalar(
+                    "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
                 )
                 .bind(id)
                 .bind(&classification.model_version)
@@ -1024,9 +1049,16 @@ impl PgRepository {
                     "routing_reason": routing.reason,
                 }))
                 .bind(classification.prediction.needs_review)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| format!("insert imported prediction {external_id}: {error}"))?;
+                enqueue_classifier_shadow_job(
+                    &mut tx,
+                    id,
+                    production_prediction_id,
+                    &classification.model_version,
+                )
+                .await?;
                 id
             } else {
                 let existing = sqlx::query(
