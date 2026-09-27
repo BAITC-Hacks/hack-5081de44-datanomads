@@ -149,6 +149,30 @@ when loading a local non-Mistral XLM-R tokenizer; this is tracked in the
 Do not set `fix_mistral_regex=True` for this XLM-R artifact: it changes the
 token IDs used by its existing synthetic model.
 
+## Classifier candidate evaluation
+
+After a reviewed candidate artifact and the baseline report exist, compare
+them on the same frozen test:
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/evaluate_classifier_candidate.py \
+  --dataset data/processed/reviewed-v1 \
+  --model ml-service/artifacts/classifier-reviewed-v1 \
+  --baseline-report data/processed/reports/reviewed-v1-classifier-baselines.json \
+  --output data/processed/reports/reviewed-v1-classifier-candidate.json
+```
+
+The evaluator verifies dataset, baseline and model lineage before loading the
+local artifact. It checks the model weight checksum through the runtime loader,
+then reports accuracy, macro/weighted/per-class F1, confusion matrix, RU/KZ/MIXED
+slices, confidence states, review share and single-text p50/p95 latency after
+three warmup calls. It stores no ticket text. A candidate below TF-IDF macro-F1
+gets `NO_GO_BASELINE_OUTPERFORMS`; any other result remains
+`PENDING_HUMAN_REVIEW`. This comparison does not apply a critical-regression
+policy or authorize promotion. Latency is evidence only for the machine named
+in that report, and synthetic holdout results cannot establish quality on
+customer appeals.
+
 ## Retrieval baselines
 
 Evaluate relation groups from the same reviewed package:

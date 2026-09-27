@@ -85,7 +85,7 @@ def _score(rows: list[dict], predictions: list[str], labels: list[str]) -> dict:
     }
 
 
-def _evaluate(rows: list[dict], predictions: list[str], labels: list[str]) -> dict:
+def evaluate_predictions(rows: list[dict], predictions: list[str], labels: list[str]) -> dict:
     result = _score(rows, predictions, labels)
     result["by_language"] = {}
     for language in ("RU", "KZ", "MIXED"):
@@ -115,9 +115,9 @@ def evaluate_baselines(package: Path) -> dict:
     models = {"majority": {}, "tfidf_linear_svc": {}}
     for split in ("validation", "test"):
         rows = splits[split]
-        models["majority"][split] = _evaluate(rows, [majority] * len(rows), labels)
+        models["majority"][split] = evaluate_predictions(rows, [majority] * len(rows), labels)
         features = vectorizer.transform([row["text"] for row in rows])
-        models["tfidf_linear_svc"][split] = _evaluate(rows, classifier.predict(features).tolist(), labels)
+        models["tfidf_linear_svc"][split] = evaluate_predictions(rows, classifier.predict(features).tolist(), labels)
     return {
         "report_version": "classifier-baselines.v1",
         "dataset_version": manifest.dataset_version,
