@@ -37,3 +37,16 @@ calculation is reproducible against that stored snapshot; it cannot prove that
 an upstream CRM feed was complete during the period. Demo memory mode therefore
 returns `INSUFFICIENT_HISTORY` after the selected period rather than presenting
 fixture data as an authoritative signal series.
+
+## Advanced lifecycle gate
+
+The separate `BACKGROUND → WATCH → VERIFY → ESCALATE` lifecycle is not
+enabled. The repository has no detector-specific calibration or evaluation
+evidence showing that those transitions reduce alert noise for the saved
+detector versions. Candidate model promotion metrics are a separate contract
+and do not establish detector quality. ACK/CLOSE actions are not used as
+precision labels. Data/ML must provide versioned detector calibration and a
+comparable evaluation showing the noise change before runtime lifecycle states
+can be added. Until then, no advanced lifecycle state is created. Task-044
+manager monitoring remains separate and does not imply `BACKGROUND`, `WATCH`,
+`VERIFY` or `ESCALATE`.
