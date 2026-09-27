@@ -132,6 +132,16 @@ inference и остаётся `CANDIDATE` с отключённым `CONFIDENT`;
 trainer не запускается. Реальное качество оценивается отдельно на frozen test
 и свежих операторских решениях.
 
+Самостоятельный запуск trainer создаёт ещё не оценённый model artifact.
+Настроенный learning cycle после offline comparison дополняет его внутри
+приватного staging каталога до handoff bundle: `metrics.json`,
+`training_config.json`, `label_map.json`, `thresholds.json`,
+`artifact_checksum.txt`, `MODEL_CARD.md` и checksums в `manifest.json`.
+Верификатор сверяет каждый файл, состав synthetic/real feedback, dataset и
+frozen evaluation, policy и сохранённый offline report. Только после этого
+публикуется весь цикл; путь к модели для inference не меняется. Bundle остаётся
+`CANDIDATE` и не служит решением о promotion.
+
 Core ставит `TRAIN_CLASSIFIER` с `samples: []`, но настроенный offline worker
 читает структурированный feedback из PostgreSQL по `cycle_id`, а не из этого
 поля job payload. Generic feedback с пустым `production_prediction` или

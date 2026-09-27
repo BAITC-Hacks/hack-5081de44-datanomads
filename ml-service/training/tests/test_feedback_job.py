@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from app.confidence import POLICY_VERSION
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum
 from training.feedback_dataset import load_verified_candidate
@@ -126,10 +128,27 @@ class FeedbackJobTests(unittest.TestCase):
                                  policy_path.read_text(encoding="utf-8"))
                 output.mkdir(parents=True)
                 (output / "model.safetensors").write_bytes(b"tiny-candidate-model")
+                for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
+                    (output / name).write_text("{}", encoding="utf-8")
                 candidate_checksum = checksum(output / "model.safetensors")
                 candidate_manifest = json.loads((production / "manifest.json").read_text(encoding="utf-8"))
                 candidate_manifest.update({"model_version": candidate_model_version,
                                            "base_model": "production_v1", "status": "CANDIDATE",
+                                           "base_model_artifact_checksum": checksum(production / "model.safetensors"),
+                                           "dataset_version": manifest.candidate_dataset_version,
+                                           "dataset_content_sha256": manifest.content_sha256,
+                                           "frozen_evaluation_sha256": dataset.frozen_evaluation_sha256,
+                                           "metrics": {"status": "feedback_candidate_unverified",
+                                                       "frozen_test_evaluated": False},
+                                           "confidence_policy_version": POLICY_VERSION,
+                                           "confidence_thresholds": {"low_confidence_below": 0.55,
+                                                                     "confident_at_or_above": 1.0},
+                                           "confident_enabled": False,
+                                           "training_config": {"max_length": 32,
+                                                               "input_length_strategy": "head-32",
+                                                               "temperature": 1.0,
+                                                               "train_samples": len(samples)},
+                                           "languages": ["RU", "KZ", "MIXED"],
                                            "artifact_checksum": candidate_checksum})
                 (output / "manifest.json").write_text(json.dumps(candidate_manifest), encoding="utf-8")
                 return {"candidate_model_version": candidate_model_version,
@@ -144,11 +163,28 @@ class FeedbackJobTests(unittest.TestCase):
                 self.assertEqual(candidate.name, "candidate_v1")
                 self.assertEqual(candidate.parent.name, "models")
                 self.assertEqual(policy.read_text(encoding="utf-8"), policy_path.read_text(encoding="utf-8"))
+                sample_ids = sorted(row["variant_id"] for row in frozen_splits["test"])
+                placeholder_metrics = {"macro_f1": 0.5, "weighted_f1": 0.5,
+                                       "per_class": {}, "confusion_matrix": [], "accuracy": 0.5}
                 return {"report_version": "classifier-pair-evaluation.v1",
-                        "dataset_version": "reviewed_v1", "frozen_evaluation_version": "eval_v1",
+                        "dataset_version": "reviewed_v1", "dataset_content_sha256": dataset.content_sha256,
+                        "frozen_evaluation_version": "eval_v1",
+                        "frozen_evaluation_sha256": dataset.frozen_evaluation_sha256,
+                        "synthetic": True, "sample_count": len(sample_ids),
+                        "sample_ids_sha256": "sha256:" + hashlib.sha256(
+                            json.dumps(sample_ids, ensure_ascii=False).encode("utf-8")
+                        ).hexdigest(),
+                        "labels": sorted(dataset.topics), "policy_sha256": checksum(policy),
+                        "policy_version": "classifier-critical-regression.v1",
+                        "policy": json.loads(policy.read_text(encoding="utf-8")),
                         "candidate": {"model_version": "candidate_v1",
-                                      "artifact_checksum": checksum(candidate / "model.safetensors")},
-                        "production": {"model_version": "production_v1"},
+                                      "dataset_version": "feedback_candidate_v1",
+                                      "artifact_checksum": checksum(candidate / "model.safetensors"),
+                                      "metrics": placeholder_metrics},
+                        "production": {"model_version": "production_v1",
+                                       "artifact_checksum": checksum(production / "model.safetensors"),
+                                       "metrics": placeholder_metrics},
+                        "critical_topics": {}, "insufficient_critical_topics": [],
                         "regressed_critical_topics": [], "decision": "PENDING_HUMAN_REVIEW"}
 
             with (patch.dict(os.environ, environment),
@@ -174,6 +210,9 @@ class FeedbackJobTests(unittest.TestCase):
                              str(root / "cycles/1/datasets/feedback_candidate_v1/manifest.json"))
             self.assertEqual(result["manifest"]["artifact_uri"],
                              str(root / "cycles/1/models/candidate_v1/manifest.json"))
+            self.assertTrue((root / "cycles/1/models/candidate_v1/MODEL_CARD.md").is_file())
+            self.assertEqual((root / "cycles/1/models/candidate_v1/metrics.json").read_bytes(),
+                             (root / "cycles/1/reports/offline.json").read_bytes())
             self.assertNotIn("На дороге", json.dumps(result, ensure_ascii=False))
 
             stale = root / ".staging/1-interrupted"

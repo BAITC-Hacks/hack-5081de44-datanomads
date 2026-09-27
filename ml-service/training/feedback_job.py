@@ -20,6 +20,7 @@ from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum
 from training.classifier_pair_eval import CriticalRegressionPolicy, compare_classifiers
 from training.feedback_dataset import ID_RE, VERSION_RE, build_candidate
+from training.feedback_bundle import finalize_staged_feedback_bundle, verify_feedback_bundle
 from training.feedback_export import FEEDBACK_QUERY, export_feedback, load_review_links
 from training.feedback_trainer import train_feedback_candidate
 
@@ -185,9 +186,11 @@ def _verify_cycle(cycle_dir: Path, payload: dict, snapshot: dict,
         dataset = cycle_dir / "datasets" / payload["dataset_version"]
         model = cycle_dir / "models" / payload["candidate_model_version"]
         report = cycle_dir / "reports" / "offline.json"
+        policy = cycle_dir / "policies" / "critical.json"
         dataset_manifest = json.loads((dataset / "manifest.json").read_text(encoding="utf-8"))
         model_manifest = ModelMetadata.model_validate_json((model / "manifest.json").read_text(encoding="utf-8"))
         offline = json.loads(report.read_text(encoding="utf-8"))
+        verify_feedback_bundle(model, dataset, frozen, report, policy)
         expected = _result_for_cycle(cycle_dir, cycle_dir, {
             "dataset_version": dataset_manifest["candidate_dataset_version"],
             "candidate_model_version": model_manifest.model_version,
@@ -327,6 +330,8 @@ async def train_classifier_job(pool: Any, payload: dict[str, Any]) -> dict:
             with report_path.open("x", encoding="utf-8") as stream:
                 json.dump(offline, stream, ensure_ascii=False, sort_keys=True, allow_nan=False)
                 stream.write("\n")
+            finalize_staged_feedback_bundle(candidate_path, stage / "datasets" / dataset_version,
+                                            frozen, report_path, policy_snapshot)
             if _input_snapshot(review_links_path, frozen, production, policy_path) != snapshot:
                 raise FeedbackJobError("TRAINING_INPUT_CHANGED")
             final_result = _result_for_cycle(stage, destination, result, offline,

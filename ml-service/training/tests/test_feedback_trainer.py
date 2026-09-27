@@ -14,6 +14,7 @@ from app.trained_classifier import TrainedClassifierService
 from train_classifier import LABELS
 from training.classifier_pair_eval import compare_classifiers
 from training.dataset_builder import checksum
+from training.feedback_bundle import finalize_staged_feedback_bundle, verify_feedback_bundle
 from training.feedback_dataset import build_candidate
 from training.feedback_trainer import CandidateTrainingError, train_feedback_candidate
 from test_dataset_builder import build_fixture_package, fixture_inputs
@@ -86,6 +87,31 @@ class FeedbackTrainerTests(unittest.TestCase):
             self.assertEqual(comparison["sample_count"], 48)
             self.assertEqual(comparison["candidate"]["model_version"], "classifier_candidate_v1")
             self.assertEqual(comparison["production"]["model_version"], "classifier_production_v1")
+            report_path = root / "offline.json"
+            report_path.write_text(json.dumps(comparison, ensure_ascii=False), encoding="utf-8")
+            finalize_staged_feedback_bundle(output, package, frozen, report_path, policy_path)
+            self.assertEqual(verify_feedback_bundle(output, package, frozen, report_path, policy_path).model_version,
+                             "classifier_candidate_v1")
+            for name in ("metrics.json", "training_config.json", "label_map.json",
+                         "thresholds.json", "artifact_checksum.txt", "MODEL_CARD.md"):
+                self.assertTrue((output / name).is_file(), name)
+            self.assertIn("2 synthetic and 0 reviewed real feedback rows",
+                          (output / "MODEL_CARD.md").read_text(encoding="utf-8"))
+            self.assertTrue(TrainedClassifierService(output).classify("Проверка после упаковки.").needs_review)
+            card_path = output / "MODEL_CARD.md"
+            original_card = card_path.read_bytes()
+            card_path.write_bytes(original_card + b"changed")
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                verify_feedback_bundle(output, package, frozen, report_path, policy_path)
+            card_path.write_bytes(original_card)
+            manifest_path = output / "manifest.json"
+            original_manifest = manifest_path.read_bytes()
+            changed_manifest = json.loads(original_manifest)
+            changed_manifest["handoff_bundle"]["evaluation_version"] = "wrong_eval"
+            manifest_path.write_text(json.dumps(changed_manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "manifest does not match"):
+                verify_feedback_bundle(output, package, frozen, report_path, policy_path)
+            manifest_path.write_bytes(original_manifest)
             with self.assertRaises(FileExistsError):
                 train_feedback_candidate(package, frozen, production, output,
                                          candidate_model_version="classifier_candidate_v1")
