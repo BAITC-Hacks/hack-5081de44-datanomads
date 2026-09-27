@@ -479,3 +479,27 @@ captured at feedback time. The report therefore marks retrieval quality drift
 `UNAVAILABLE_NO_RANKED_RELEVANCE`; relation counts are context, not Recall@K.
 Both CSVs supplied by the customer lack appeal text and classifier predictions,
 so they cannot supply these runtime drift snapshots.
+
+## Several classifier challengers
+
+`scripts/compare_classifier_challengers.py` combines at least two existing
+production-versus-candidate offline reports and their paired shadow reports.
+Repeat each flag in matching order:
+
+```bash
+.venv/bin/python scripts/compare_classifier_challengers.py \
+  --offline-report /path/to/candidate-a-offline.json \
+  --shadow-report /path/to/candidate-a-shadow.json \
+  --offline-report /path/to/candidate-b-offline.json \
+  --shadow-report /path/to/candidate-b-shadow.json \
+  --output /tmp/classifier-challengers.json
+```
+
+The combiner requires the same champion artifact and metrics, frozen
+evaluation version, sample IDs, policy, fresh window, operator labels and
+champion predictions across candidates. A fresh report now includes
+`champion_reference_sha256` for that last check; reports without it cannot be
+compared safely. Candidate scores and regressions stay separate in the output.
+No model is selected or promoted automatically. Actual candidate artifacts,
+reviewed labels and paired fresh predictions are still required to produce the
+input reports.

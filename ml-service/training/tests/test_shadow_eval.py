@@ -67,6 +67,10 @@ class ShadowEvaluationTests(unittest.TestCase):
             self.assertFalse(report["blind_ab_enabled"])
             self.assertIsNone(report["blind_ab_preference"])
             self.assertNotIn("ticket_1", json.dumps(report))
+            original_reference = report["champion_reference_sha256"]
+            rows.reverse()
+            self.assertEqual(evaluate()["champion_reference_sha256"], original_reference)
+            rows.reverse()
 
             policy["max_topic_agreement_drop"] = 1.0
             self.assertEqual(evaluate()["decision"], "PENDING_HUMAN_REVIEW")
@@ -75,6 +79,7 @@ class ShadowEvaluationTests(unittest.TestCase):
             policy["max_correction_rate_increase"] = 0.4
             rows[0]["is_synthetic"] = True
             self.assertEqual(evaluate()["status"], "INSUFFICIENT_EVIDENCE")
+            self.assertNotEqual(evaluate()["champion_reference_sha256"], original_reference)
             rows[0]["candidate_model_version"] = "another_candidate"
             with self.assertRaisesRegex(ValueError, "versions, window or identity"):
                 evaluate()

@@ -135,6 +135,20 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
                 "NO_GO_CRITICAL_REGRESSION" if regressions else
                 "NO_GO_CORRECTION_RATE" if global_regression else "PENDING_HUMAN_REVIEW")
     ids_digest = hashlib.sha256(json.dumps(sorted(seen_feedback), ensure_ascii=False).encode("utf-8")).hexdigest()
+    champion_reference = [
+        {
+            "feedback_id": row.feedback_id,
+            "ticket_id": row.ticket_id,
+            "source_dataset_version": row.source_dataset_version,
+            "is_synthetic": row.is_synthetic,
+            "production_prediction": row.production_prediction.model_dump(mode="json"),
+            "operator_confirmed_decision": row.operator_confirmed_decision.model_dump(mode="json"),
+            "feedback_created_at": row.feedback_created_at.astimezone(timezone.utc).isoformat(),
+        }
+        for row in sorted(rows, key=lambda item: item.feedback_id)
+    ]
+    reference_digest = hashlib.sha256(json.dumps(champion_reference, ensure_ascii=False,
+                                               sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {
         "report_version": "classifier-shadow-evaluation.v1",
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -149,6 +163,7 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
         "window_end": policy.window_end.isoformat(),
         "sample_count": len(rows),
         "sample_ids_sha256": f"sha256:{ids_digest}",
+        "champion_reference_sha256": f"sha256:{reference_digest}",
         "source_dataset_versions": sorted({row.source_dataset_version for row in rows}),
         "origin_counts": origin_counts,
         "production_agreement": production_agreement,
