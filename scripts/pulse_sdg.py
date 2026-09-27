@@ -29,7 +29,16 @@ REQUIRED_SEED_FIELDS = {
     "source_category",
     "source_service",
     "facts_ru",
+    "critical_facts",
+    "forbidden_invented_facts",
+    "source_provenance",
+    "review_status",
 }
+OPTIONAL_SEED_FIELDS = {"object_type", "region_constraints", "time_context", "duplicate_group", "repeat_group"}
+SEED_SOURCE_PROVENANCE = "SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR"
+GENERATION_SEED_FIELDS = (
+    "scenario_id", "topic_id", "subtopic_id", "source_category", "source_service", "facts_ru",
+)
 PROMPT = """Напиши ровно одно вымышленное обращение гражданина в службу 109.
 Факты ситуации: {{ facts_ru }}
 Язык: {{ language }}. RU — русский; KZ — естественный казахский; MIXED — естественное смешение русского и казахского.
@@ -47,28 +56,48 @@ def source_checksum(path: Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def read_seeds(path: Path) -> dict[str, dict[str, str]]:
+def read_seeds(path: Path) -> dict[str, dict]:
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
     allowed = {
         (pair["source_category"], pair["source_service"]): pair
         for pair in catalog["pairs"]
         if pair["proposal_status"] == "CANDIDATE" and pair["suggested_subtopic_id"]
     }
-    seeds: dict[str, dict[str, str]] = {}
+    seeds: dict[str, dict] = {}
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
             seed = json.loads(line)
-            if not isinstance(seed, dict) or set(seed) != REQUIRED_SEED_FIELDS:
+            if (not isinstance(seed, dict) or not REQUIRED_SEED_FIELDS <= set(seed) or
+                    set(seed) - REQUIRED_SEED_FIELDS - OPTIONAL_SEED_FIELDS):
                 raise ValueError(f"seed line {line_number}: unexpected fields")
             if any(
                 not isinstance(value, str) or not value.strip()
-                for value in seed.values()
+                for key, value in seed.items()
+                if key not in {"critical_facts", "forbidden_invented_facts", "region_constraints"}
             ):
                 raise ValueError(
-                    f"seed line {line_number}: every field must be nonempty text"
+                    f"seed line {line_number}: text fields must be nonempty"
                 )
+            if (seed["source_provenance"] != SEED_SOURCE_PROVENANCE or
+                    seed["review_status"] != "PENDING"):
+                raise ValueError(f"seed line {line_number}: invalid provenance or review status")
+            for field in ("critical_facts", "forbidden_invented_facts"):
+                values = seed[field]
+                if (not isinstance(values, list) or not values or
+                        any(not isinstance(value, str) or not value.strip() for value in values) or
+                        len(set(values)) != len(values)):
+                    raise ValueError(f"seed line {line_number}: invalid {field}")
+            regions = seed.get("region_constraints", [])
+            if (not isinstance(regions, list) or
+                    any(not isinstance(value, str) or not value.strip() for value in regions) or
+                    len(set(regions)) != len(regions)):
+                raise ValueError(f"seed line {line_number}: invalid region_constraints")
+            if (any(fact not in seed["facts_ru"] for fact in seed["critical_facts"]) or
+                    any(seed[field] not in seed["facts_ru"] for field in ("object_type", "time_context")
+                        if field in seed)):
+                raise ValueError(f"seed line {line_number}: context is not present in facts_ru")
             scenario_id = seed["scenario_id"]
             if scenario_id in seeds:
                 raise ValueError(f"seed line {line_number}: duplicate scenario_id")
@@ -80,12 +109,22 @@ def read_seeds(path: Path) -> dict[str, dict[str, str]]:
                 raise ValueError(
                     f"seed line {line_number}: pair is outside the clear catalog scope"
                 )
-            if scan_pii(seed["facts_ru"]).detected:
+            if any(scan_pii(value).detected for value in (
+                    seed["facts_ru"], *seed["critical_facts"], *seed["forbidden_invented_facts"],
+                    *regions, *(seed[field] for field in ("object_type", "time_context") if field in seed))):
                 raise ValueError(f"seed line {line_number}: sensitive-looking value")
             seeds[scenario_id] = seed
     if not seeds:
         raise ValueError("seed file is empty")
     return seeds
+
+
+def write_generation_seeds(seeds: dict[str, dict], path: Path) -> None:
+    """Keep review metadata in source scenarios, not Data Designer's seed columns."""
+    with path.open("x", encoding="utf-8") as stream:
+        for seed in seeds.values():
+            stream.write(json.dumps({key: seed[key] for key in GENERATION_SEED_FIELDS},
+                                    ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def build_config(seed_path: Path, model_id: str, generator_seed: int):
@@ -151,7 +190,7 @@ def clean_text(value: object) -> str | None:
 
 
 def export_candidates(
-    rows: list[dict], seeds: dict[str, dict[str, str]], output: Path, model_id: str,
+    rows: list[dict], seeds: dict[str, dict], output: Path, model_id: str,
     scenario_checksum: str, generator_seed: int,
 ) -> Counter:
     counts: Counter = Counter()
@@ -215,7 +254,10 @@ def main() -> None:
     parser.add_argument("--run-dir", type=Path)
     args = parser.parse_args()
 
+    scenario_checksum = source_checksum(args.seed_path)
     seeds = read_seeds(args.seed_path)
+    if source_checksum(args.seed_path) != scenario_checksum:
+        raise ValueError("source scenarios changed while loading")
     if args.check_seeds:
         print(f"OK: {len(seeds)} clear synthetic scenarios")
         return
@@ -239,6 +281,8 @@ def main() -> None:
         timezone.utc
     ).strftime("%Y%m%dT%H%M%SZ")
     run_dir.mkdir(parents=True, exist_ok=False)
+    generation_seeds = run_dir / "generation_seeds.jsonl"
+    write_generation_seeds(seeds, generation_seeds)
     provider = dd.ModelProvider(
         name="local",
         endpoint=args.endpoint,
@@ -248,18 +292,20 @@ def main() -> None:
     designer = DataDesigner(
         model_providers=[provider], artifact_path=run_dir / "artifacts"
     )
-    config = build_config(args.seed_path.resolve(), args.model, args.generator_seed)
+    config = build_config(generation_seeds.resolve(), args.model, args.generator_seed)
     designer.validate(config)
     result = designer.create(
         config, num_records=num_records, dataset_name="pulse109-pilot"
     )
     dataset = result.load_dataset()
     rows = dataset.to_dict(orient="records")
-    scenario_checksum = source_checksum(args.seed_path)
+    if source_checksum(args.seed_path) != scenario_checksum:
+        raise ValueError("source scenarios changed during generation")
     counts = export_candidates(rows, seeds, run_dir / "candidates.jsonl", args.model,
                                scenario_checksum, args.generator_seed)
     (run_dir / "summary.json").write_text(
         json.dumps({"counts": dict(counts), "source_scenario_sha256": scenario_checksum,
+                    "generation_seed_sha256": source_checksum(generation_seeds),
                     "prompt_version": PROMPT_VERSION, "generator_model": args.model,
                     "generator_seed": args.generator_seed}, indent=2) + "\n", encoding="utf-8"
     )

@@ -7,7 +7,9 @@ import unittest
 from unittest.mock import patch
 
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
-from scripts.pulse_sdg import CATALOG, DEFAULT_SEEDS, export_candidates, read_seeds, source_checksum
+from scripts.pulse_sdg import (
+    CATALOG, DEFAULT_SEEDS, SEED_SOURCE_PROVENANCE, export_candidates, read_seeds, source_checksum,
+)
 from scripts.review_retrieval_relations import CHECKS as RELATION_CHECKS
 from scripts.review_retrieval_relations import export_approved as export_retrieval
 from scripts.review_retrieval_relations import prepare as prepare_retrieval
@@ -50,6 +52,10 @@ def fixture_inputs(root: Path, *, groups_per_topic: int, retrieval_groups: int, 
                 "source_category": pair["source_category"],
                 "source_service": pair["source_service"],
                 "facts_ru": f"На объекте наблюдается неисправность, сценарий {topic}.",
+                "critical_facts": [f"На объекте наблюдается неисправность, сценарий {topic}"],
+                "forbidden_invented_facts": ["неуказанная причина"],
+                "source_provenance": SEED_SOURCE_PROVENANCE,
+                "review_status": "PENDING",
             }
     if topic_count == len(TOPIC_DEFINITIONS):
         assert set(seed_by_topic) == {topic["id"] for topic in TOPIC_DEFINITIONS}

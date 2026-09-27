@@ -5,10 +5,40 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.pulse_sdg import DEFAULT_SEEDS, PROMPT_VERSION, export_candidates, read_seeds, source_checksum
+from scripts.pulse_sdg import (
+    DEFAULT_SEEDS, GENERATION_SEED_FIELDS, PROMPT_VERSION, export_candidates,
+    read_seeds, source_checksum, write_generation_seeds,
+)
 
 
 class PilotSdgTests(unittest.TestCase):
+    def test_generation_projection_contains_only_scalar_seed_columns(self) -> None:
+        seeds = read_seeds(DEFAULT_SEEDS)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "generation.jsonl"
+            write_generation_seeds(seeds, output)
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), len(seeds))
+            self.assertTrue(all(set(row) == set(GENERATION_SEED_FIELDS) for row in rows))
+            self.assertTrue(all(all(isinstance(value, str) for value in row.values()) for row in rows))
+
+    def test_seed_metadata_is_grounded_and_pending(self) -> None:
+        seed = next(iter(read_seeds(DEFAULT_SEEDS).values()))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.jsonl"
+            for change in (
+                {"critical_facts": []},
+                {"critical_facts": ["Новая неподтверждённая деталь"]},
+                {"forbidden_invented_facts": []},
+                {"source_provenance": "REAL_CUSTOMER_APPEAL"},
+                {"review_status": "APPROVED"},
+                {"object_type": "неизвестный объект"},
+            ):
+                with self.subTest(change=change):
+                    path.write_text(json.dumps({**seed, **change}, ensure_ascii=False) + "\n", encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        read_seeds(path)
+
     def test_export_keeps_review_pending_and_stable_provenance(self) -> None:
         seeds = read_seeds(DEFAULT_SEEDS)
         seed = next(iter(seeds.values()))

@@ -11,13 +11,21 @@
 | Поле | Источник | Назначение |
 | --- | --- | --- |
 | `scenario_id`, `topic_id`, `subtopic_id` | Наш seed | Неизменяемая ожидаемая разметка и группа split. |
-| `source_category`, `source_service` | Проверенная пара каталога | Происхождение темы; в prompt не вставляется. |
+| `source_category`, `source_service` | Пара каталога со статусом `CANDIDATE` | Гипотеза происхождения темы; человеческая проверка ещё нужна. В prompt не вставляется. |
 | `facts_ru` | Придуманная ситуация | Только разрешённые факты для текста. |
+| `critical_facts` | Подстроки `facts_ru` | Факты, которые рецензент проверяет в каждом варианте. |
+| `forbidden_invented_facts` | Правила сценария | Детали, которые нельзя додумывать. |
+| `object_type`, `time_context` | `facts_ru`, если указаны | Структурированный контекст без новых фактов. |
+| `region_constraints`, `duplicate_group`, `repeat_group` | Только при наличии подтверждённого контекста | Не заполняются догадками. |
+| `source_provenance`, `review_status` | Synthetic seed | `SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR`, `PENDING`. |
 | `language` | Sampler Data Designer | `RU` 45%, `KZ` 45%, `MIXED` 10% как целевая пропорция. |
 | `style` | Sampler Data Designer | `short`, `conversational`, `neutral`. |
 | `appeal_text` | Локальная LLM | Одно обращение без разметки и выдуманных действий службы. |
 
-Data Designer читает локальный JSONL как seed, выбирает язык и стиль, затем
+Перед запуском из проверенных scenarios создаётся `generation_seeds.jsonl`
+только с шестью строковыми полями, которые читает Data Designer. Полные
+critical/forbidden facts и provenance остаются в versioned source scenarios и
+затем попадают в очередь review. Data Designer выбирает язык и стиль, затем
 создаёт только текст. Повторные проходы по одному `scenario_id` дают варианты;
 все варианты этой ситуации позже должны попадать в один train/validation/test
 split. Для первого пилота не создаём `OTHER`, `UNKNOWN`, приоритеты и
@@ -51,7 +59,8 @@ python scripts/pulse_sdg.py --model qwen3.5:9b --num-records 25
 [документации Ollama](https://docs.ollama.com/api/openai-compatibility).
 
 Результат появляется в игнорируемом Git каталоге `data/sdg/runs/<время>/`:
-артефакты Data Designer, `candidates.jsonl` и `summary.json`. Каждый кандидат
+артефакты Data Designer, `generation_seeds.jsonl`, `candidates.jsonl` и
+`summary.json`. Каждый кандидат
 имеет `synthetic=true`, `split_group=scenario_id` и
 `review_status="PENDING"`. Записываются checksum source scenarios, версия
 prompt, model ID и seed запроса к локальной LLM. `variant_id` вычисляется из
@@ -72,7 +81,10 @@ python3 scripts/review_synthetic_classifier.py prepare \
   --output data/reviews/sdg-pilot-review.jsonl
 ```
 
-В каждой строке очереди `candidate` и `scenario_facts_ru` неизменяемы.
+В каждой строке очереди `candidate`, `scenario_facts_ru`, critical/forbidden
+facts, контекст и происхождение сценария неизменяемы. Их значения сверяются с
+versioned source scenarios; `PENDING` у сценария не становится одобрением
+сгенерированного текста.
 Рецензент сравнивает текст с фактами ситуации и заполняет `decision`,
 `reviewer_id`, `reviewed_at` с часовым поясом, `review_reason` и `checks`.
 Для `APPROVED` нужен `review_reason="VERIFIED"` и `true` для всех шести

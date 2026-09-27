@@ -38,9 +38,12 @@ REASONS = {
     "OTHER_QUALITY", "INSUFFICIENT_EVIDENCE",
 }
 REVIEW_FIELDS = {
-    "candidate", "scenario_facts_ru", "candidate_source_sha256", "decision",
+    "candidate", "scenario_facts_ru", "scenario_critical_facts",
+    "scenario_forbidden_invented_facts", "scenario_source_provenance",
+    "scenario_review_status", "scenario_context", "candidate_source_sha256", "decision",
     "reviewer_id", "reviewed_at", "review_reason", "checks",
 }
+SCENARIO_CONTEXT_FIELDS = ("object_type", "region_constraints", "time_context", "duplicate_group", "repeat_group")
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -109,6 +112,12 @@ def prepare(candidate_path: Path, scenario_path: Path, output_path: Path) -> int
             row = {
                 "candidate": candidate,
                 "scenario_facts_ru": seeds[candidate["scenario_id"]]["facts_ru"],
+                "scenario_critical_facts": seeds[candidate["scenario_id"]]["critical_facts"],
+                "scenario_forbidden_invented_facts": seeds[candidate["scenario_id"]]["forbidden_invented_facts"],
+                "scenario_source_provenance": seeds[candidate["scenario_id"]]["source_provenance"],
+                "scenario_review_status": seeds[candidate["scenario_id"]]["review_status"],
+                "scenario_context": {key: seeds[candidate["scenario_id"]][key]
+                                     for key in SCENARIO_CONTEXT_FIELDS if key in seeds[candidate["scenario_id"]]},
                 "candidate_source_sha256": candidate_sha,
                 "decision": "PENDING",
                 "reviewer_id": None,
@@ -128,8 +137,14 @@ def read_reviews(review_path: Path, candidate_path: Path, scenario_path: Path) -
         candidate = row.get("candidate")
         candidate_id = candidate.get("variant_id") if isinstance(candidate, dict) else None
         expected = candidates.get(candidate_id) if isinstance(candidate_id, str) else None
+        seed = seeds[expected["scenario_id"]] if expected is not None else None
         if (set(row) != REVIEW_FIELDS or expected is None or candidate != expected or
-                row["scenario_facts_ru"] != seeds[expected["scenario_id"]]["facts_ru"] or
+                row["scenario_facts_ru"] != seed["facts_ru"] or
+                row["scenario_critical_facts"] != seed["critical_facts"] or
+                row["scenario_forbidden_invented_facts"] != seed["forbidden_invented_facts"] or
+                row["scenario_source_provenance"] != seed["source_provenance"] or
+                row["scenario_review_status"] != seed["review_status"] or
+                row["scenario_context"] != {key: seed[key] for key in SCENARIO_CONTEXT_FIELDS if key in seed} or
                 row["candidate_source_sha256"] != candidate_sha or
                 candidate_id in seen):
             raise ValueError(f"review line {line_number}: candidate or scenario changed, duplicated or missing")

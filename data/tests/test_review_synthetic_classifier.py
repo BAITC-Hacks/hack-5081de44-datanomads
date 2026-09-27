@@ -43,6 +43,13 @@ class SyntheticClassifierReviewTests(unittest.TestCase):
             row["checks"] = {check: True for check in CHECKS}
 
     def test_queue_stays_pending_and_cannot_export(self) -> None:
+        seed = read_seeds(DEFAULT_SEEDS)["light_001"]
+        row = self._rows()[0]
+        self.assertEqual(row["scenario_critical_facts"], seed["critical_facts"])
+        self.assertEqual(row["scenario_forbidden_invented_facts"], seed["forbidden_invented_facts"])
+        self.assertEqual(row["scenario_source_provenance"], seed["source_provenance"])
+        self.assertEqual(row["scenario_review_status"], "PENDING")
+        self.assertEqual(row["scenario_context"]["object_type"], seed["object_type"])
         self.assertEqual(len(read_reviews(self.review, self.candidates, DEFAULT_SEEDS)), 2)
         with self.assertRaisesRegex(ValueError, "no human-approved"):
             export_approved(self.review, self.candidates, DEFAULT_SEEDS, self.approved)
@@ -78,6 +85,12 @@ class SyntheticClassifierReviewTests(unittest.TestCase):
 
     def test_source_binding_and_complete_queue(self) -> None:
         rows = self._rows()
+        rows[0]["scenario_critical_facts"] = ["Подменённый факт"]
+        self._edit(rows)
+        with self.assertRaisesRegex(ValueError, "candidate or scenario changed"):
+            read_reviews(self.review, self.candidates, DEFAULT_SEEDS)
+        rows = self._rows()
+        rows[0]["scenario_critical_facts"] = read_seeds(DEFAULT_SEEDS)["light_001"]["critical_facts"]
         rows[0]["candidate"]["text"] = "Подменённый текст"
         self._edit(rows)
         with self.assertRaisesRegex(ValueError, "candidate or scenario changed"):
