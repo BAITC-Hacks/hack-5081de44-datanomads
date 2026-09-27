@@ -24,6 +24,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from app.constants import TOPICS
 from app.confidence import ConfidencePolicy, POLICY_VERSION
 from app.classifier_input import encode_classifier_texts
+from training.atomic_publish import publish_directory
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum as file_checksum
 
@@ -443,7 +444,7 @@ def main() -> None:
             "artifact_checksum": f"sha256:{checksum}",
         }
         (artifact_dir / "manifest.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        artifact_dir.rename(args.output_dir)
+        publish_directory(artifact_dir, args.output_dir)
         print(json.dumps({"stage": "complete", "model_version": version,
                           "validation_macro_f1": best_f1,
                           "test_macro_f1": test["macro_f1"] if test is not None else None,
