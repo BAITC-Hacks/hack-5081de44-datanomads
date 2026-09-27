@@ -226,9 +226,9 @@ The evaluator checks the candidate's production and frozen-test lineage,
 requires matching input length and strategy, compares tokenization on every
 frozen text, and loads the two classifiers sequentially to limit memory use.
 Current reviewed packages are synthetic, so the comparison cannot establish
-performance on actual citizen appeals. The feedback candidate trainer and a
-production model pointer are still required to run a real controlled-learning
-comparison.
+performance on actual citizen appeals. A real controlled-learning comparison
+still needs reviewed feedback, a frozen dataset, a trained production artifact
+and a configured offline worker.
 
 ## Fresh shadow evaluation
 
@@ -442,8 +442,9 @@ exploration cannot establish a runtime alert threshold.
 `learning-feedback-export.v1` JSONL, excludes frozen test IDs/groups/text and
 writes an immutable offline candidate package only after the configured
 minimum feedback count. Operator-confirmed topic is the sole training label;
-prediction is retained separately. Contract, command and current Core export
-gap are documented in [`docs/feedback-candidate-dataset.md`](../../docs/feedback-candidate-dataset.md).
+prediction is retained separately. The contract, commands and reviewed Core
+export requirements are documented in
+[`docs/feedback-candidate-dataset.md`](../../docs/feedback-candidate-dataset.md).
 
 ## Offline drift evidence
 

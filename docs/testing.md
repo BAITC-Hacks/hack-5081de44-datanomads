@@ -100,8 +100,10 @@ PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py --restart-
 idempotency, затем проверяет PostgreSQL/Qdrant preview, refetch решения после
 перезаписи, relation feedback, analytics drill-down, QueryIntent, forecast
 30/60/90, spike detector → ACK/CLOSE → SSE, PDF/XLSX, RBAC, Qdrant reindex и
-learning-cycle. В normal mode ожидается `TRAINER_NOT_CONFIGURED`; test-only
-fake trainer включается отдельно и не считается реальной ML-метрикой.
+learning-cycle. В стандартном Compose без training overlay ожидается
+`TRAINER_NOT_CONFIGURED`; отдельный настроенный offline worker использует
+reviewed inputs и не запускается этим acceptance flow. Test-only fake trainer
+включается отдельно и не считается реальной ML-метрикой.
 Acceptance flow проверяет, что fake candidate без offline/shadow evidence
 получает `409` на promotion и может быть только отклонён.
 

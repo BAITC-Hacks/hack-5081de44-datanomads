@@ -107,13 +107,19 @@ inference и остаётся `CANDIDATE` с отключённым `CONFIDENT`;
 trainer не запускается. Реальное качество оценивается отдельно на frozen test
 и свежих операторских решениях.
 
-Текущий Core ставит `TRAIN_CLASSIFIER` с `samples: []`; generic feedback
-может содержать пустой `production_prediction` и решение без topic ID.
-Такие строки этот контракт отвергает. Offline экспорт требует одобренных
-review links и зарегистрированного импортированного dataset с checksums;
-два региональных CSV без текста обращения этому условию не отвечают.
-Offline trainer ещё не подключён к обычному Core worker; реальный candidate
-cycle поэтому не считается завершённым. Проверка только ID/group/точного
-текста не может
-доказать отсутствие семантически совпадающих инцидентов, поэтому upstream
-review `split_group` остаётся обязательным.
+Core ставит `TRAIN_CLASSIFIER` с `samples: []`, но настроенный offline worker
+читает структурированный feedback из PostgreSQL по `cycle_id`, а не из этого
+поля job payload. Generic feedback с пустым `production_prediction` или
+решением без topic ID отвергается экспортёром. Worker затем собирает
+candidate dataset, обучает модель и сохраняет offline comparison report;
+этот путь требует `docker-compose.training.yml`, review links, frozen dataset,
+production artifact и заранее утверждённый critical policy. Без них job
+получает явный код ошибки. Два региональных CSV без текста обращения не дают
+необходимых входов для реального обучения.
+
+Парный shadow export и сохранение его итогового отчёта выполняются отдельно
+после evaluation window командами, описанными в
+[`ml-service/training/README.md`](../ml-service/training/README.md). До
+достаточного свежего real feedback promotion остаётся недоступным.
+Проверка только ID/group/точного текста не доказывает отсутствие семантически
+совпадающих инцидентов, поэтому upstream review `split_group` обязателен.

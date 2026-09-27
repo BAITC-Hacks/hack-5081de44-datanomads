@@ -113,7 +113,12 @@ Worker загружает локальный candidate artifact, сохраня�
 candidate topic, confidence, версии и ID production prediction. Если оператор
 уже принял решение или цикл сменил состояние, shadow запись не создаётся.
 Текст обращения не попадает в job payload или shadow table. Сбор парного
-export и итоговый shadow report ещё не подключены; это не разрешает promotion.
+export и расчёт итогового shadow report выполняются отдельно после закрытия
+evaluation window через `scripts/export_classifier_shadow.py` и
+`scripts/record_classifier_shadow_report.py`. Последняя команда пересчитывает
+пары из PostgreSQL и сохраняет метрики в `model_evaluations`; без проверенного
+происхождения текста и решения оператора строки исключаются. Отчёт с
+`INSUFFICIENT_EVIDENCE` не разрешает promotion.
 
 ```bash
 PULSE_TRAINING_INPUT_DIR=/absolute/path/to/reviewed-inputs \
