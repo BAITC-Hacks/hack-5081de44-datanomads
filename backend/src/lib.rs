@@ -27,7 +27,10 @@ use std::{
     env,
     io::Write,
     process::{Command, Stdio},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock,
+    },
     time::{Duration as StdDuration, Instant},
 };
 use thiserror::Error;
@@ -55,6 +58,7 @@ const DEFAULT_LEARNING_CYCLE_DURATION_HOURS: i32 = 168;
 const DEFAULT_LEARNING_MIN_FEEDBACK_COUNT: i32 = 1;
 const DEFAULT_LEARNING_PROMOTION_POLICY_VERSION: &str = "policy-v1";
 const MAX_LEARNING_CYCLE_DURATION_HOURS: i32 = 87_600;
+static LOG_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn is_active_learning_cycle_state(state: &str) -> bool {
     matches!(state, "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION")
@@ -737,6 +741,15 @@ fn request_id_from_headers(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+fn log_request_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-pulse-log-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("n/a")
+        .to_owned()
+}
+
 fn trace_id_from_headers(headers: &HeaderMap) -> String {
     headers
         .get("x-trace-id")
@@ -765,6 +778,18 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    fn public_message(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "invalid request",
+            Self::Unauthorized(_) => "authentication required",
+            Self::Forbidden(_) => "role does not allow this action",
+            Self::NotFound(_) => "resource not found",
+            Self::Conflict(_) => "request conflicts with current resource state",
+            Self::Internal(_) => "internal server error",
+            Self::Unavailable(_) => "service is not ready",
+        }
+    }
+
     fn code(&self) -> &'static str {
         match self {
             Self::BadRequest(_) => "BAD_REQUEST",
@@ -796,7 +821,7 @@ impl IntoResponse for ApiError {
         let body = Json(json!({
             "error": {
                 "code": self.code(),
-                "message": self.to_string(),
+                "message": self.public_message(),
             }
         }));
         (status, body).into_response()
@@ -1718,8 +1743,24 @@ async fn request_context(mut request: Request, next: Next) -> Response {
         .to_owned();
     let started = Instant::now();
     let method = request.method().clone();
-    let path = request.uri().path().to_owned();
+    let path = request
+        .uri()
+        .path()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("/");
+    let path = format!("/{path}");
+    let log_request_id = format!(
+        "core-{}-{}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        LOG_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
     request.extensions_mut().insert(request_id.clone());
+    if let Ok(value) = HeaderValue::from_str(&log_request_id) {
+        request.headers_mut().insert("x-pulse-log-id", value);
+    }
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         request.headers_mut().insert("x-request-id", value);
     }
@@ -1736,8 +1777,8 @@ async fn request_context(mut request: Request, next: Next) -> Response {
     }
     info!(
         service = SERVICE_NAME,
-        request_id = %request_id,
-        trace_id = %trace_id,
+        request_id = %log_request_id,
+        trace_id = %log_request_id,
         endpoint = %path,
         method = %method,
         latency_ms,
@@ -1959,11 +2000,10 @@ async fn create_ticket(
             .map_err(ApiError::Internal)?;
         info!(
             service = SERVICE_NAME,
-            user_id = %actor.user_id,
             ticket_id = %response.ticket.id,
             model_version = %response.prediction.model_version,
-            request_id = %request_id_from_headers(&headers),
-            trace_id = %request_id_from_headers(&headers),
+            request_id = %log_request_id_from_headers(&headers),
+            trace_id = %log_request_id_from_headers(&headers),
             endpoint = "/api/v1/tickets",
             latency_ms = 0.0_f64,
             status = 201_u16,
@@ -2015,7 +2055,6 @@ async fn create_ticket(
     store.tickets.insert(id, ticket.clone());
     info!(
         service = SERVICE_NAME,
-        user_id = %actor.user_id,
         ticket_id = %ticket.id,
         model_version = %prediction.model_version,
         request_id = "n/a",
@@ -2096,13 +2135,12 @@ async fn import_tickets(
         .map_err(ApiError::Internal)?;
     info!(
         service = SERVICE_NAME,
-        user_id = %actor.user_id,
         source_system = %response.source_system,
         import_run_id = %response.import_run_id,
         imported_rows = response.imported_rows,
         quarantined_rows = response.quarantined_rows,
-        request_id = %request_id_from_headers(&headers),
-        trace_id = %request_id_from_headers(&headers),
+        request_id = %log_request_id_from_headers(&headers),
+        trace_id = %log_request_id_from_headers(&headers),
         endpoint = "/api/v1/import",
         latency_ms = 0.0_f64,
         status = 201_u16,
@@ -3259,10 +3297,9 @@ async fn apply_decision(
             service = SERVICE_NAME,
             ticket_id = %ticket_id,
             decision = %action,
-            user_id = %actor.user_id,
             model_version = %response.prediction.model_version,
-            request_id = %request_id_from_headers(&headers),
-            trace_id = %request_id_from_headers(&headers),
+            request_id = %log_request_id_from_headers(&headers),
+            trace_id = %log_request_id_from_headers(&headers),
             endpoint = "/api/v1/assist/decision",
             latency_ms = 0.0_f64,
             status = 200_u16,
@@ -3394,7 +3431,6 @@ async fn apply_decision(
         service = SERVICE_NAME,
         ticket_id = %ticket_id,
         decision = %action,
-        user_id = %decision.user_id,
         model_version = %prediction.model_version,
         request_id = "n/a",
         trace_id = "n/a",
@@ -3437,6 +3473,41 @@ pub struct AnalyticsDrilldownQuery {
     pub value: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AnalyticsDrilldownTicket {
+    pub id: String,
+    pub region_id: String,
+    pub region_name: String,
+    pub topic_id: String,
+    pub topic_label: String,
+    pub priority: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+impl From<&Ticket> for AnalyticsDrilldownTicket {
+    fn from(ticket: &Ticket) -> Self {
+        Self {
+            id: ticket.id.clone(),
+            region_id: ticket.region_id.clone(),
+            region_name: ticket.region_name.clone(),
+            topic_id: ticket.topic_id.clone(),
+            topic_label: ticket.topic_label.clone(),
+            priority: ticket.priority.clone(),
+            status: ticket.status.clone(),
+            created_at: ticket.created_at.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnalyticsDrilldownResponse {
+    pub items: Vec<AnalyticsDrilldownTicket>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3797,7 +3868,7 @@ async fn analytics_drilldown(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<AnalyticsDrilldownQuery>,
-) -> Result<Json<TicketListResponse>, ApiError> {
+) -> Result<Json<AnalyticsDrilldownResponse>, ApiError> {
     require_role(
         &headers,
         &state.config,
@@ -3892,8 +3963,8 @@ async fn analytics_drilldown(
     let limit = query.limit.unwrap_or(100).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
     items = items.into_iter().skip(offset).take(limit).collect();
-    Ok(Json(TicketListResponse {
-        items,
+    Ok(Json(AnalyticsDrilldownResponse {
+        items: items.iter().map(AnalyticsDrilldownTicket::from).collect(),
         total,
         limit,
         offset,
@@ -6255,10 +6326,15 @@ async fn create_learning_cycle(
     headers: HeaderMap,
     Json(request): Json<CreateLearningCycleRequest>,
 ) -> Result<(StatusCode, Json<LearningCycle>), ApiError> {
-    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let cycle = repository
-            .create_learning_cycle(&request, &state.config)
+            .create_learning_cycle(
+                &request,
+                &state.config,
+                &actor.user_id,
+                &request_id_from_headers(&headers),
+            )
             .await
             .map_err(|error| {
                 if error.contains("active learning cycle")
@@ -6605,7 +6681,7 @@ async fn close_learning_cycle(
     let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let result = repository
-            .close_learning_cycle(&request)
+            .close_learning_cycle(&request, &actor.user_id, &request_id_from_headers(&headers))
             .await
             .map_err(|error| {
                 if error.contains("not found") {
@@ -6620,17 +6696,6 @@ async fn close_learning_cycle(
                     ApiError::Internal(error)
                 }
             })?;
-        let _ = repository
-            .audit(
-                &actor.user_id,
-                "CLOSE_LEARNING_CYCLE",
-                "learning_cycle",
-                request.cycle_id.as_deref(),
-                None,
-                None,
-                json!({}),
-            )
-            .await;
         return Ok((StatusCode::ACCEPTED, Json(result)));
     }
     let mut store = state.write_store()?;
@@ -7117,7 +7182,6 @@ async fn promote_model(
     info!(
         service = SERVICE_NAME,
         model_version = %model_id,
-        user_id = %actor.user_id,
         request_id = "n/a",
         trace_id = "n/a",
         endpoint = "/api/v1/models/{model_id}/promote",
@@ -7175,7 +7239,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/assist/correct/{ticket_id}": { "post": { "summary": "Correct prediction alias" } },
             "/api/v1/analytics": { "get": { "summary": "Situation center analytics" } },
             "/api/v1/analytics/overview": { "get": { "summary": "Situation center overview" } },
-            "/api/v1/analytics/drilldown": { "get": { "summary": "Drill analytics metrics down to source tickets" } },
+            "/api/v1/analytics/drilldown": { "get": { "summary": "Drill analytics metrics down to privacy-safe ticket summaries" } },
             "/api/v1/taxonomy": { "get": { "summary": "Current regions, topics, services and available ticket filters" } },
             "/api/v1/analytics/query": { "post": { "summary": "Validated QueryIntent analytics" } },
             "/api/v1/retrieval/reindex": { "post": { "summary": "Queue a PostgreSQL-backed Qdrant reindex" } },

@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from . import __version__
@@ -49,6 +50,7 @@ class JSONFormatter(logging.Formatter):
             "model_version": getattr(record, "model_version", "n/a"),
             "status": getattr(record, "status", 0),
             "error_code": getattr(record, "error_code", "none"),
+            "error_type": getattr(record, "error_type", "n/a"),
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -60,6 +62,12 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 logger.propagate = False
+
+
+def log_endpoint_path(path: str) -> str:
+    """Keep route groups in logs while omitting caller-controlled path values."""
+    segments = [segment for segment in path.split("/") if segment]
+    return "/" + "/".join(segments[:3])
 
 
 registry, classifier, embedder, forecaster, anomaly_detector, trainer, evaluator = make_services()
@@ -74,6 +82,11 @@ app = FastAPI(
 router = APIRouter(prefix="/internal/v1")
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": "invalid request"})
+
+
 def require_ready() -> None:
     if not registry.ready:
         raise HTTPException(status_code=503, detail=registry.load_error or "model runtime is not ready")
@@ -84,29 +97,42 @@ def require_model_runtime(model_type: str) -> ModelMetadata:
     try:
         return registry.get(model_type)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"unknown model type: {model_type}") from exc
+        raise HTTPException(status_code=404, detail="unknown model type") from exc
 
 
 @app.middleware("http")
 async def request_logging(request: Request, call_next: Any) -> JSONResponse:
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    log_request_id = str(uuid.uuid4())
     started = time.perf_counter()
     try:
         response = await call_next(request)
-    except Exception:
-        logger.exception(
+    except Exception as error:
+        logger.error(
             "request_failed",
-            extra={"request_id": request_id, "endpoint": request.url.path, "status": 500, "error_code": "internal_error"},
+            extra={
+                "request_id": log_request_id,
+                "trace_id": log_request_id,
+                "endpoint": log_endpoint_path(request.url.path),
+                "status": 500,
+                "error_code": "internal_error",
+                "error_type": type(error).__name__,
+            },
         )
-        raise
+        error_response = JSONResponse(
+            status_code=500,
+            content={"detail": "internal server error"},
+        )
+        error_response.headers["x-request-id"] = request_id
+        return error_response
     latency_ms = round((time.perf_counter() - started) * 1000, 3)
     response.headers["x-request-id"] = request_id
     logger.info(
         "request_completed",
         extra={
-            "request_id": request_id,
-            "trace_id": request.headers.get("x-trace-id", request_id),
-            "endpoint": request.url.path,
+            "request_id": log_request_id,
+            "trace_id": log_request_id,
+            "endpoint": log_endpoint_path(request.url.path),
             "status": response.status_code,
             "latency_ms": latency_ms,
             "model_version": "n/a",
@@ -244,7 +270,7 @@ async def train_for_model(model_type: str, request: TrainingRequest) -> Training
 async def training_job(job_id: str) -> TrainingResponse:
     result = trainer.get(job_id)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"unknown training job: {job_id}")
+        raise HTTPException(status_code=404, detail="training job not found")
     return result
 
 
@@ -264,7 +290,7 @@ async def evaluate_for_model(model_type: str, request: EvaluationRequest) -> Eva
 async def evaluation_job(evaluation_id: str) -> EvaluationResponse:
     result = evaluator.get(evaluation_id)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"unknown evaluation: {evaluation_id}")
+        raise HTTPException(status_code=404, detail="evaluation not found")
     return result
 
 

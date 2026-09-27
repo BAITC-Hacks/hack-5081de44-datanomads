@@ -67,6 +67,17 @@ export interface BackendTicket {
   updated_at: string
 }
 
+export interface AnalyticsDrilldownTicket {
+  id: string
+  region_id: string
+  region_name: string
+  topic_id: string
+  topic_label: string
+  priority: string
+  status: string
+  created_at: string
+}
+
 interface BackendAlternative {
   topic_id: string
   topic_label: string
@@ -750,7 +761,7 @@ export async function loadAnalyticsDrilldown(dimension: DrilldownDimension, valu
   const params = new URLSearchParams(queryString(filters))
   params.set('dimension', dimension)
   if (value) params.set('value', value)
-  return request<{ items: BackendTicket[]; total: number; limit: number; offset: number }>(`/analytics/drilldown?${params.toString()}`)
+  return request<{ items: AnalyticsDrilldownTicket[]; total: number; limit: number; offset: number }>(`/analytics/drilldown?${params.toString()}`)
 }
 
 export interface QueryIntentResult {

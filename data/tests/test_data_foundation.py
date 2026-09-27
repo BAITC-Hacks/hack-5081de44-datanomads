@@ -146,6 +146,10 @@ class DemoFixtureTests(unittest.TestCase):
         self.assertEqual(len({row["region_id"] for row in rows}), 20)
         self.assertGreaterEqual(len({row["topic_id"] for row in rows}), 10)
         self.assertFalse(any(scan_pii(row["original_text"]).detected for row in rows))
+        self.assertTrue(all(row["address"] is None for row in rows))
+        self.assertTrue(all(row["object"] is None for row in rows))
+        self.assertTrue(all(row["coordinates"] is None for row in rows))
+        self.assertTrue(all(not row["attachments"] for row in rows))
         for entry in manifest["files"]:
             path = ROOT / entry["path"]
             digest = hashlib.sha256(path.read_bytes()).hexdigest()

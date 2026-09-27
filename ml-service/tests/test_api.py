@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import math
 import asyncio
+from io import StringIO
 
 import httpx
 
-from app.main import app
+from app import main
+
+app = main.app
 
 
 class ASGIClient:
@@ -48,6 +51,66 @@ def test_health_and_readiness() -> None:
     assert health.json()["status"] == "ok"
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
+
+
+def test_unhandled_error_response_and_log_hide_exception_text(monkeypatch) -> None:
+    sentinel = "PII_SENTINEL_029"
+
+    def fail_classification(*args, **kwargs):
+        raise ValueError(sentinel)
+
+    handler = main.logger.handlers[0]
+    original_stream = handler.stream
+    captured_log = StringIO()
+    handler.setStream(captured_log)
+    monkeypatch.setattr(main.classifier, "classify", fail_classification)
+    try:
+        response = client.request(
+            "POST",
+            "/internal/v1/classify",
+            json={"text": "safe request"},
+            headers={"x-request-id": sentinel, "x-trace-id": sentinel},
+        )
+        log_output = captured_log.getvalue()
+    finally:
+        handler.setStream(original_stream)
+
+    assert response.status_code == 500
+    assert response.headers["x-request-id"] == sentinel
+    assert response.json() == {"detail": "internal server error"}
+    assert sentinel not in response.text
+    assert sentinel not in log_output
+    assert '"error_type":"ValueError"' in log_output
+
+
+def test_validation_error_does_not_echo_input_values() -> None:
+    sentinel = "PII_SENTINEL_029"
+    response = client.post(
+        "/internal/v1/classify",
+        json={"text": "safe request", "top_k": sentinel},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid request"}
+    assert sentinel not in response.text
+
+
+def test_unknown_job_identifier_is_omitted_from_response_and_logs() -> None:
+    sentinel = "PII_SENTINEL_029"
+    handler = main.logger.handlers[0]
+    original_stream = handler.stream
+    captured_log = StringIO()
+    handler.setStream(captured_log)
+    try:
+        response = client.get(f"/internal/v1/training/jobs/{sentinel}")
+        log_output = captured_log.getvalue()
+    finally:
+        handler.setStream(original_stream)
+
+    assert response.status_code == 404
+    assert sentinel not in response.text
+    assert sentinel not in log_output
+    assert '"endpoint":"/internal/v1/training"' in log_output
 
 
 def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:

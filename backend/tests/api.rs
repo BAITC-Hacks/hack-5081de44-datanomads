@@ -50,6 +50,68 @@ async fn demo_api_supports_preview_and_manager_analytics() {
 }
 
 #[tokio::test]
+async fn error_messages_do_not_echo_untrusted_values() {
+    let response = app(AppState::demo())
+        .oneshot(
+            Request::post("/api/v1/tickets")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::from(
+                    r#"{"text":"safe request","region_id":"PII_SENTINEL_029"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["message"], "invalid request");
+    assert!(!body.to_string().contains("PII_SENTINEL_029"));
+}
+
+#[tokio::test]
+async fn manager_analytics_drilldown_omits_source_text() {
+    let application = app(AppState::demo());
+    let created = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::from(
+                    r#"{"text":"PII_SENTINEL_029 source text","region_id":"R01"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+
+    let response = application
+        .oneshot(
+            Request::get("/api/v1/analytics/drilldown?dimension=overview&value=all&range=30d")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let encoded = body.to_string();
+    assert!(!encoded.contains("PII_SENTINEL_029"));
+    assert!(body["items"].as_array().unwrap().iter().all(|item| {
+        item.get("text").is_none()
+            && item.get("external_ref").is_none()
+            && item.get("address").is_none()
+            && item.get("attachments").is_none()
+    }));
+}
+
+#[tokio::test]
 async fn demo_analytics_uses_one_filtered_slice_for_comparison_and_drilldown() {
     let application = app(AppState::demo());
     let analytics = application

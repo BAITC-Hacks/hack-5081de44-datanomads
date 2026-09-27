@@ -11,8 +11,9 @@ use crate::anomaly::{
 use crate::{
     build_query_intent_result, manual_response_template, metric_rate, query_analytics_filters,
     related_ticket_candidate, render_template_body, validate_query_intent, Alert, AlertQuery,
-    AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse,
-    AssistOrchestration, AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
+    AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsDrilldownResponse,
+    AnalyticsDrilldownTicket, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
+    AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
     CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
     ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
     LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
@@ -525,6 +526,18 @@ struct DbTicket {
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DbAnalyticsDrilldownTicket {
+    id: i64,
+    region_id: String,
+    region_name: String,
+    topic_id: String,
+    topic_label: String,
+    priority: String,
+    status: String,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, FromRow)]
@@ -2877,8 +2890,10 @@ impl PgRepository {
         &self,
         query: &AnalyticsDrilldownQuery,
         dimension: &str,
-    ) -> Result<TicketListResponse, String> {
-        let mut builder = QueryBuilder::<Postgres>::new(TICKET_SELECT);
+    ) -> Result<AnalyticsDrilldownResponse, String> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "SELECT t.id, t.region_id, COALESCE(r.name_ru, r.name_en, t.region_id) AS region_name, t.topic_id, COALESCE(tp.name_ru, tp.name_kk, t.topic_id) AS topic_label, COALESCE(t.priority, 'normal') AS priority, t.status, t.created_at FROM tickets t LEFT JOIN regions r ON r.id = t.region_id LEFT JOIN topics tp ON tp.id = t.topic_id",
+        );
         push_drilldown_predicates(&mut builder, query, dimension)?;
 
         let limit = query.limit.unwrap_or(100).clamp(1, 100);
@@ -2888,7 +2903,7 @@ impl PgRepository {
             .push_bind(limit as i64)
             .push(" OFFSET ")
             .push_bind(offset as i64);
-        let rows: Vec<DbTicket> = builder
+        let rows: Vec<DbAnalyticsDrilldownTicket> = builder
             .build_query_as()
             .fetch_all(&self.pool)
             .await
@@ -2902,8 +2917,20 @@ impl PgRepository {
             .await
             .map_err(|error| format!("analytics drilldown count: {error}"))?
             .max(0) as usize;
-        Ok(TicketListResponse {
-            items: rows.into_iter().map(ticket_from_db).collect(),
+        Ok(AnalyticsDrilldownResponse {
+            items: rows
+                .into_iter()
+                .map(|row| AnalyticsDrilldownTicket {
+                    id: row.id.to_string(),
+                    region_id: row.region_id,
+                    region_name: row.region_name,
+                    topic_id: row.topic_id,
+                    topic_label: row.topic_label,
+                    priority: row.priority,
+                    status: row.status.to_ascii_lowercase(),
+                    created_at: row.created_at.to_rfc3339(),
+                })
+                .collect(),
             total,
             limit,
             offset,
@@ -3632,6 +3659,8 @@ impl PgRepository {
         &self,
         request: &CreateLearningCycleRequest,
         config: &Config,
+        actor_id: &str,
+        request_id: &str,
     ) -> Result<LearningCycle, String> {
         let mut tx = self
             .pool
@@ -3709,6 +3738,17 @@ impl PgRepository {
                 .await
                 .map_err(|error| format!("freeze evaluation ticket IDs: {error}"))?;
         }
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, metadata) VALUES ($1, 'CREATE_LEARNING_CYCLE', 'learning_cycle', $2, $3, $4)")
+            .bind(actor_id)
+            .bind(&cycle_id)
+            .bind(request_id)
+            .bind(json!({
+                "candidate_model_version": &candidate_model_version,
+                "frozen_evaluation_dataset_version": evaluation_dataset_version.as_deref(),
+            }))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit learning cycle creation: {error}"))?;
         tx.commit()
             .await
             .map_err(|error| format!("commit learning cycle: {error}"))?;
@@ -3810,6 +3850,8 @@ impl PgRepository {
     pub async fn close_learning_cycle(
         &self,
         request: &CloseLearningCycleRequest,
+        actor_id: &str,
+        request_id: &str,
     ) -> Result<Value, String> {
         let mut tx = self
             .pool
@@ -3880,8 +3922,16 @@ impl PgRepository {
             )
             .bind(json!({"kind": "candidate_evaluation", "cycle_id": &cycle_id}))
             .fetch_one(&mut *tx)
-            .await
-            .map_err(|error| format!("queue candidate evaluation: {error}"))?;
+                .await
+                .map_err(|error| format!("queue candidate evaluation: {error}"))?;
+            sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ($1, 'CLOSE_LEARNING_CYCLE', 'learning_cycle', $2, $3, 'evaluation window closed', $4)")
+                .bind(actor_id)
+                .bind(&cycle_id)
+                .bind(request_id)
+                .bind(json!({"state": "DECISION", "job_id": job_id.to_string()}))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("audit evaluation window close: {error}"))?;
             tx.commit()
                 .await
                 .map_err(|error| format!("commit evaluation window close: {error}"))?;
@@ -3908,6 +3958,14 @@ impl PgRepository {
                 .execute(&mut *tx)
                 .await
                 .map_err(|error| format!("close insufficient learning cycle: {error}"))?;
+            sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ($1, 'CLOSE_LEARNING_CYCLE', 'learning_cycle', $2, $3, 'insufficient feedback', $4)")
+                .bind(actor_id)
+                .bind(&cycle_id)
+                .bind(request_id)
+                .bind(json!({"state": "INSUFFICIENT_FEEDBACK"}))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("audit insufficient learning cycle close: {error}"))?;
             tx.commit()
                 .await
                 .map_err(|error| format!("commit insufficient learning cycle: {error}"))?;
@@ -3964,6 +4022,14 @@ impl PgRepository {
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| format!("queue candidate dataset build job: {error}"))?;
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ($1, 'CLOSE_LEARNING_CYCLE', 'learning_cycle', $2, $3, 'candidate dataset build queued', $4)")
+            .bind(actor_id)
+            .bind(&cycle_id)
+            .bind(request_id)
+            .bind(json!({"state": "TRAINING", "job_id": job_id.to_string()}))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit candidate dataset build: {error}"))?;
         tx.commit()
             .await
             .map_err(|error| format!("commit candidate dataset build job: {error}"))?;

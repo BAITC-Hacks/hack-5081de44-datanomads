@@ -347,8 +347,8 @@ paths:
   /api/v1/analytics/drilldown:
     get:
       tags: [analytics]
-      summary: Drill an analytics metric down to source tickets
-      description: Returns the PostgreSQL ticket rows behind a region, topic, date, alert or overview metric.
+      summary: Drill an analytics metric down to privacy-safe ticket summaries
+      description: Returns ticket identifiers and taxonomy/status/time fields for a region, topic, date, alert or overview metric. Source text and contact data are omitted.
       security: [{ pulseRole: [] }, {}]
       parameters:
         - name: dimension
@@ -385,10 +385,10 @@ paths:
           schema: { type: integer, minimum: 0, default: 0 }
       responses:
         '200':
-          description: Source tickets for the selected analytics slice
+          description: Privacy-safe ticket summaries for the selected analytics slice
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/TicketListResponse' }
+              schema: { $ref: '#/components/schemas/AnalyticsDrilldownResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/analytics/query:
@@ -1327,6 +1327,28 @@ components:
         total: { type: integer }
         limit: { type: integer }
         offset: { type: integer }
+    AnalyticsDrilldownResponse:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AnalyticsDrilldownTicket' }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    AnalyticsDrilldownTicket:
+      type: object
+      required: [id, region_id, region_name, topic_id, topic_label, priority, status, created_at]
+      properties:
+        id: { type: string }
+        region_id: { type: string }
+        region_name: { type: string }
+        topic_id: { type: string }
+        topic_label: { type: string }
+        priority: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
     Ticket:
       type: object
       required: [id, text, region_id, topic_id, created_at]

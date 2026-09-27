@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
-import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
+import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
@@ -24,7 +24,7 @@ type Route =
 
 type IconName = 'inbox' | 'pulse' | 'grid' | 'map' | 'tag' | 'trend' | 'bell' | 'forecast' | 'file' | 'cycle' | 'model' | 'search' | 'settings' | 'help' | 'chevron' | 'arrow' | 'check' | 'edit' | 'external' | 'download' | 'more' | 'clock' | 'close'
 type DrilldownHandler = (dimension: DrilldownDimension, value: string | undefined, label: string) => void
-type DrilldownState = { label: string; items: BackendTicket[]; total: number } | null
+type DrilldownState = { label: string; items: AnalyticsDrilldownTicket[]; total: number } | null
 type RelatedTicketPanelState = {
   ticketId: string
   matchedFactors: string[]
@@ -328,7 +328,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
 function AnalyticsDrilldownPanel({ state, loading }: { state: DrilldownState; loading: boolean }) {
   if (loading) return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2></div><p className="panel-note">Загружаем обращения…</p></section>
   if (!state) return null
-  return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Исходные обращения</h2><span className="drilldown-label">{state.label} · {state.total}</span></div>{state.items.length ? <div className="drilldown-list">{state.items.map((ticket) => <article className="drilldown-ticket" key={ticket.id}><div><strong>{ticket.id}</strong><span>{ticket.region_name} · {ticket.topic_label}</span></div><p>{ticket.text}</p><small>{ticket.created_at} · {ticket.status} · {ticket.priority}</small></article>)}</div> : <p className="panel-note">За выбранный период обращений не найдено.</p>}</section>
+  return <section className="panel drilldown-panel" aria-live="polite"><div className="panel-heading"><h2>Обращения в выбранном срезе</h2><span className="drilldown-label">{state.label} · {state.total}</span></div><p className="panel-note">Исходный текст и контактные данные скрыты в аналитике.</p>{state.items.length ? <div className="drilldown-list">{state.items.map((ticket) => <article className="drilldown-ticket" key={ticket.id}><div><strong>{ticket.id}</strong><span>{ticket.region_name} · {ticket.topic_label}</span></div><small>{ticket.created_at} · {ticket.status} · {ticket.priority}</small></article>)}</div> : <p className="panel-note">За выбранный период обращений не найдено.</p>}</section>
 }
 
 function LoadingState() {
