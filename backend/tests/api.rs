@@ -227,12 +227,32 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
             Request::post("/api/v1/assist/ticket-001/correct")
                 .header("x-pulse-role", "OPERATOR")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"topic_id":"TOPIC-ROADS","service":"Городская инфраструктура","priority":"medium"}"#))
+                .body(Body::from(
+                    r#"{"topic_id":"TOPIC-ROADS","service":"service_other","priority":"critical"}"#,
+                ))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(corrected.status(), 200);
+    let corrected: serde_json::Value =
+        serde_json::from_slice(&to_bytes(corrected.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(corrected["prediction"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(corrected["decision"]["priority"], "critical");
+    assert_eq!(corrected["decision"]["service"], "Другая служба");
+    assert_eq!(
+        corrected["decision"]["service_provenance"]["source"],
+        "MANUAL"
+    );
+    assert_eq!(
+        corrected["decision"]["priority_provenance"]["source"],
+        "MANUAL"
+    );
+    assert_eq!(
+        corrected["decision"]["priority_provenance"]["reason"],
+        "Приоритет переопределён оператором"
+    );
 
     let detail = application
         .clone()
@@ -248,6 +268,20 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
         serde_json::from_slice(&to_bytes(detail.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(detail["ticket"]["topic_id"], "TOPIC-ROADS");
     assert_eq!(detail["prediction"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(
+        detail["prediction"]["service_provenance"]["source"],
+        "MANUAL"
+    );
+    assert_eq!(
+        detail["prediction"]["priority_provenance"]["source"],
+        "MANUAL"
+    );
+    assert_eq!(detail["latest_decision"]["priority"], "critical");
+    assert_eq!(detail["latest_decision"]["service"], "Другая служба");
+    assert_eq!(
+        detail["latest_decision"]["priority_provenance"]["source"],
+        "MANUAL"
+    );
 
     let preview = application
         .oneshot(

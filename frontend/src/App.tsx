@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RuleProvenance, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
@@ -367,7 +367,7 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
     <div className="workbench-grid">
       <section className="ticket-queue" aria-label="Очередь обращений">
         <div className="section-toolbar"><div><h2>Очередь на разбор <span className="count-pill">{filtered.length}</span></h2><p>Выберите обращение для проверки</p></div></div>
-        <div className="filter-row"><div className="inline-search"><Icon name="search" size={16} /><input aria-label="Фильтр очереди" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти обращение" /></div><select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">Все статусы</option><option value="new">Новые</option><option value="reviewed">Разобранные</option></select><select aria-label="Фильтр по приоритету" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as typeof priorityFilter)}><option value="all">Все приоритеты</option><option value="Высокий">Высокий</option><option value="Средний">Средний</option><option value="Низкий">Низкий</option></select></div>
+        <div className="filter-row"><div className="inline-search"><Icon name="search" size={16} /><input aria-label="Фильтр очереди" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти обращение" /></div><select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">Все статусы</option><option value="new">Новые</option><option value="reviewed">Разобранные</option></select><select aria-label="Фильтр по приоритету" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as typeof priorityFilter)}><option value="all">Все приоритеты</option><option value="Критический">Критический</option><option value="Высокий">Высокий</option><option value="Средний">Средний</option><option value="Низкий">Низкий</option></select></div>
         <div className="ticket-table-wrap"><table className="ticket-table"><thead><tr><th scope="col">Обращение</th><th scope="col">Тема</th><th scope="col">Уверенность</th><th scope="col">Регион</th><th scope="col">Приоритет</th><th scope="col"><span className="sr-only">Действия</span></th></tr></thead><tbody>{filtered.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? 'selected-row' : ''} onClick={() => { setSelectedId(ticket.id); setMobileDetailOpen(true) }}><td><div className="ticket-id">{ticket.id}<span className={`channel-dot channel-${ticket.channel.replace(/[^a-zA-Z]/g, '').toLowerCase()}`} /></div><div className="ticket-preview">{ticket.originalText}</div><span className="ticket-time">{ticket.createdAt} · {languageLabel(ticket.language)}</span></td><td><span className="topic-cell">{ticket.topic}</span><span className="status-text">{ticket.status === 'new' ? 'Нужно решение' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</span></td><td><Confidence value={ticket.confidence} compact available={ticket.confidenceAvailable !== false} /></td><td><span className="region-cell">{ticket.region}</span></td><td><PriorityBadge priority={ticket.priority} /></td><td><button className="row-arrow icon-button" aria-label={`Открыть ${ticket.id}`} onClick={(event) => { event.stopPropagation(); setSelectedId(ticket.id); setMobileDetailOpen(true) }}><Icon name="arrow" size={17} /></button></td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty-state"><div className="state-icon">⌕</div><h3>Ничего не найдено</h3><p>Измените запрос или сбросьте фильтры.</p><button className="button button-quiet" onClick={() => { setQuery(''); setStatusFilter('all'); setPriorityFilter('all') }}>Сбросить фильтры</button></div>}</div>
       </section>
       {selected && <TicketDetail ticket={selected} taxonomy={taxonomy} open={mobileDetailOpen} onClose={() => setMobileDetailOpen(false)} onDecision={updateTicket} onRelationFeedback={updateRelation} onOpenRelated={(relatedId) => { setSelectedId(relatedId); setMobileDetailOpen(true) }} />}
@@ -470,6 +470,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
           <label>Приоритет
             <select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}>
               <option>Высокий</option>
+              <option>Критический</option>
               <option>Средний</option>
               <option>Низкий</option>
               <option>Не определён</option>
@@ -480,7 +481,27 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
           </button>
         </div>
       )}
-      <div className="detail-section"><div className="field-label">Маршрутизация</div><div className="routing-grid"><div className="routing-field"><span>Рекомендуемая служба</span><strong>{ticket.service}</strong></div><div className="routing-field"><span>Приоритет</span><PriorityBadge priority={ticket.priority} /></div></div>{ticket.routingReason && <p className="panel-note">Причина: {ticket.routingReason}</p>}</div>
+      <div className="detail-section">
+        <div className="field-label">Маршрутизация и приоритет</div>
+        <div className="routing-grid">
+          <div className="routing-field">
+            <span>Служба</span>
+            <strong>{ticket.service}</strong>
+            <RoutingProvenance
+              provenance={ticket.serviceProvenance}
+              fallbackReason="Демонстрационная рекомендация; официальный источник не предоставлен"
+            />
+          </div>
+          <div className="routing-field">
+            <span>Приоритет</span>
+            <PriorityBadge priority={ticket.priority} />
+            <RoutingProvenance
+              provenance={ticket.priorityProvenance}
+              fallbackReason="Демонстрационное значение; официальное правило не предоставлено"
+            />
+          </div>
+        </div>
+      </div>
       <div className="detail-section">
         <div className="field-label">Ответ оператору {ticket.status !== 'new' && <span className="language-chip">{ticket.responseTemplateApproved ? 'Утверждённый' : hasTemplate ? 'Демо-черновик' : 'Нет шаблона'}</span>}</div>
         {ticket.status === 'new' ? (
@@ -503,8 +524,23 @@ function Confidence({ value, state, compact = false, available = true }: { value
 }
 
 function PriorityBadge({ priority }: { priority: Priority }) {
-  const level = priority === 'Высокий' ? 'high' : priority === 'Средний' ? 'medium' : priority === 'Низкий' ? 'low' : 'unknown'
+  const level = priority === 'Критический' ? 'critical' : priority === 'Высокий' ? 'high' : priority === 'Средний' ? 'medium' : priority === 'Низкий' ? 'low' : 'unknown'
   return <span className={`priority-badge priority-${level}`}><span />{priority === 'Не определён' ? 'Не определён' : priority}</span>
+}
+
+function RoutingProvenance({ provenance, fallbackReason }: { provenance?: RuleProvenance; fallbackReason: string }) {
+  const value = provenance ?? { source: 'MANUAL' as const, version: null, reason: fallbackReason }
+  const sourceLabel = value.source === 'OFFICIAL'
+    ? 'Официальное правило'
+    : value.source === 'LABEL_HISTORY'
+      ? 'Историческая метка'
+      : 'Ручной источник / решение'
+  return (
+    <span className={`routing-provenance routing-source-${value.source.toLowerCase()}`}>
+      <strong>{value.source} · {sourceLabel}{value.version ? ` · версия ${value.version}` : ''}</strong>
+      <span>{value.reason}</span>
+    </span>
+  )
 }
 
 function CleanRegionsPage({ regions, onDrilldown }: { regions: RegionMetric[]; onDrilldown: DrilldownHandler }) {

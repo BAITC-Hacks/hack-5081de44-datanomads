@@ -1,8 +1,10 @@
 openapi: 3.1.0
 info:
   title: Pulse 109 ML Service
-  description: Local deterministic baseline for classification, retrieval embeddings,
-    forecast and anomaly APIs.
+  description: >-
+    Local deterministic baseline for classification, retrieval embeddings,
+    forecast and anomaly APIs. Classification returns topic signals only;
+    Core owns routing and priority rules and exposes their source provenance.
   version: 0.1.0
 paths:
   /healthz:

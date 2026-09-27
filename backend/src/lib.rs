@@ -249,6 +249,41 @@ pub struct AlternativePrediction {
     pub confidence: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RuleSource {
+    Official,
+    LabelHistory,
+    Manual,
+}
+
+impl RuleSource {
+    pub fn from_db(value: &str) -> Self {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "OFFICIAL" => Self::Official,
+            "LABEL_HISTORY" => Self::LabelHistory,
+            _ => Self::Manual,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RuleProvenance {
+    pub source: RuleSource,
+    pub version: Option<i32>,
+    pub reason: String,
+}
+
+impl RuleProvenance {
+    pub fn manual(reason: impl Into<String>) -> Self {
+        Self {
+            source: RuleSource::Manual,
+            version: None,
+            reason: reason.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Prediction {
     pub ticket_id: String,
@@ -260,6 +295,8 @@ pub struct Prediction {
     pub recommended_service: String,
     pub predicted_priority: String,
     pub routing_reason: String,
+    pub service_provenance: RuleProvenance,
+    pub priority_provenance: RuleProvenance,
     pub alternatives: Vec<AlternativePrediction>,
     pub created_at: String,
 }
@@ -273,6 +310,8 @@ pub struct OperatorDecision {
     pub confirmed_topic_id: String,
     pub service: String,
     pub priority: String,
+    pub service_provenance: RuleProvenance,
+    pub priority_provenance: RuleProvenance,
     pub note: Option<String>,
     pub user_id: String,
     pub created_at: String,
@@ -716,6 +755,10 @@ fn unavailable_demo_prediction(ticket: &Ticket) -> Prediction {
         recommended_service: "UNKNOWN".to_owned(),
         predicted_priority: "UNKNOWN".to_owned(),
         routing_reason: "Требуется ручная проверка".to_owned(),
+        service_provenance: RuleProvenance::manual(
+            "Маршрутизация недоступна; выберите службу вручную",
+        ),
+        priority_provenance: RuleProvenance::manual("Приоритет недоступен; выберите его вручную"),
         alternatives: Vec::new(),
         created_at: ticket.created_at.clone(),
     }
@@ -830,7 +873,14 @@ fn prediction_for_ticket(ticket: &Ticket, topics: &[Topic]) -> Prediction {
         confidence_state: confidence_state(confidence).to_owned(),
         recommended_service: service,
         predicted_priority: priority,
-        routing_reason: "deterministic memory fallback".to_owned(),
+        routing_reason: "Демонстрационное сопоставление; официальные правила 109 не предоставлены"
+            .to_owned(),
+        service_provenance: RuleProvenance::manual(
+            "Демонстрационное сопоставление; официальные правила 109 не предоставлены",
+        ),
+        priority_provenance: RuleProvenance::manual(
+            "Демонстрационный приоритет; официальные правила 109 не предоставлены",
+        ),
         alternatives,
         created_at: ticket.created_at.clone(),
     }
@@ -1067,6 +1117,8 @@ impl Store {
                 confirmed_topic_id: "TOPIC-ROADS".to_owned(),
                 service: "Городская инфраструктура".to_owned(),
                 priority: "high".to_owned(),
+                service_provenance: RuleProvenance::manual("Демо-решение оператора"),
+                priority_provenance: RuleProvenance::manual("Демо-решение оператора"),
                 note: Some("Подтверждено оператором для demo flow".to_owned()),
                 user_id: "demo-operator".to_owned(),
                 created_at: "2026-09-20T08:30:00Z".to_owned(),
@@ -2301,8 +2353,23 @@ async fn apply_decision(
             "unknown topic_id: {topic_id}"
         )));
     }
+    let service_overridden = request
+        .service
+        .as_deref()
+        .is_some_and(|service| !service.trim().is_empty());
+    let priority_overridden = request
+        .priority
+        .as_deref()
+        .is_some_and(|priority| !priority.trim().is_empty());
     let service = request
         .service
+        .map(|service| {
+            if service == "service_other" {
+                "Другая служба".to_owned()
+            } else {
+                service
+            }
+        })
         .unwrap_or_else(|| service_for_topic(&topic_id).to_owned());
     let priority = request
         .priority
@@ -2330,6 +2397,16 @@ async fn apply_decision(
         confirmed_topic_id: topic_id,
         service,
         priority,
+        service_provenance: RuleProvenance::manual(if service_overridden {
+            "Служба переопределена оператором"
+        } else {
+            "Служба подтверждена оператором"
+        }),
+        priority_provenance: RuleProvenance::manual(if priority_overridden {
+            "Приоритет переопределён оператором"
+        } else {
+            "Приоритет подтверждён оператором"
+        }),
         note,
         user_id: actor.user_id.clone(),
         created_at: DEMO_TIMESTAMP.to_owned(),

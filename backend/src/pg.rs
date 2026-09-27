@@ -12,8 +12,8 @@ use crate::{
     DecisionResponse, ForecastQuery, ForecastResponse, ImportRequest, ImportResponse,
     LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview,
     MetricBucket, ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
-    ResponseTemplate, SimilarTicket, Ticket, TicketDetailResponse, TicketListResponse, TicketQuery,
-    TimeSeriesPoint, Topic,
+    ResponseTemplate, RuleProvenance, RuleSource, SimilarTicket, Ticket, TicketDetailResponse,
+    TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -212,6 +212,7 @@ struct DbDecision {
     confirmed_topic_id: Option<String>,
     confirmed_priority: String,
     service: Option<String>,
+    feedback: Value,
     user_id: String,
     note: Option<String>,
     created_at: DateTime<Utc>,
@@ -286,6 +287,10 @@ fn unavailable_assist_prediction(ticket: &Ticket) -> Prediction {
         recommended_service: "UNKNOWN".to_owned(),
         predicted_priority: "UNKNOWN".to_owned(),
         routing_reason: "Требуется ручная проверка".to_owned(),
+        service_provenance: RuleProvenance::manual(
+            "Маршрутизация недоступна; выберите службу вручную",
+        ),
+        priority_provenance: RuleProvenance::manual("Приоритет недоступен; выберите его вручную"),
         alternatives: Vec::new(),
         created_at: ticket.created_at.clone(),
     }
@@ -302,9 +307,14 @@ struct MlEmbedderMetadata {
 struct RoutingDecision {
     service_id: String,
     service_name: String,
+    service_provenance: RuleProvenance,
     priority: String,
+    priority_provenance: RuleProvenance,
     reason: String,
 }
+
+const ROUTING_RULE_LOOKUP: &str = "SELECT s.id, s.name_ru, rr.source, rr.reason, rr.version FROM routing_rules rr JOIN services s ON s.id = rr.service_id WHERE rr.active AND (rr.topic_id = $1 OR rr.topic_id IS NULL) AND (rr.region_id = $2 OR rr.region_id IS NULL) ORDER BY CASE rr.source WHEN 'OFFICIAL' THEN 0 WHEN 'LABEL_HISTORY' THEN 1 WHEN 'MANUAL' THEN 2 ELSE 3 END, CASE WHEN rr.region_id IS NULL THEN 1 ELSE 0 END, rr.version DESC, rr.precedence ASC, rr.id ASC LIMIT 1";
+const PRIORITY_RULE_LOOKUP: &str = "SELECT priority, source, reason, version FROM priority_rules WHERE active AND (topic_id = $1 OR topic_id IS NULL) AND (region_id = $2 OR region_id IS NULL) ORDER BY CASE source WHEN 'OFFICIAL' THEN 0 WHEN 'LABEL_HISTORY' THEN 1 WHEN 'MANUAL' THEN 2 ELSE 3 END, CASE WHEN region_id IS NULL THEN 1 ELSE 0 END, version DESC, precedence ASC, id ASC LIMIT 1";
 
 const TICKET_SELECT: &str = r#"
 SELECT
@@ -870,25 +880,17 @@ impl PgRepository {
         region_id: &str,
         service_label: Option<&str>,
         requested_priority: Option<&str>,
+        input_source: RuleSource,
     ) -> Result<RoutingDecision, String> {
-        let service_row = sqlx::query(
-            "SELECT s.id, s.name_ru, rr.reason FROM routing_rules rr JOIN services s ON s.id = rr.service_id WHERE rr.active AND (rr.topic_id = $1 OR rr.topic_id IS NULL) AND (rr.region_id = $2 OR rr.region_id IS NULL) ORDER BY CASE rr.source WHEN 'OFFICIAL' THEN 0 WHEN 'LABEL_HISTORY' THEN 1 WHEN 'MANUAL' THEN 2 ELSE 3 END, CASE WHEN rr.region_id IS NULL THEN 1 ELSE 0 END, rr.precedence ASC, rr.id ASC LIMIT 1",
-        )
-        .bind(topic_id)
-        .bind(region_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| format!("resolve routing rule: {error}"))?;
-        let (service_id, service_name, service_reason) = if let Some(row) = service_row {
-            (
-                row.try_get::<String, _>("id")
-                    .map_err(|error| format!("routing service id: {error}"))?,
-                row.try_get::<String, _>("name_ru")
-                    .map_err(|error| format!("routing service name: {error}"))?,
-                row.try_get::<String, _>("reason")
-                    .map_err(|error| format!("routing reason: {error}"))?,
-            )
-        } else if let Some(label) = service_label.filter(|value| !value.trim().is_empty()) {
+        let service_row = sqlx::query(ROUTING_RULE_LOOKUP)
+            .bind(topic_id)
+            .bind(region_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("resolve routing rule: {error}"))?;
+        let service_label_match = if let Some(label) =
+            service_label.filter(|value| !value.trim().is_empty())
+        {
             let row = sqlx::query(
                 "SELECT id, name_ru FROM services WHERE active AND (id = $1 OR lower(name_ru) = lower($1)) LIMIT 1",
             )
@@ -896,60 +898,203 @@ impl PgRepository {
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| format!("resolve service label: {error}"))?;
-            if let Some(row) = row {
-                (
+            row.map(|row| {
+                Ok::<_, String>((
                     row.try_get::<String, _>("id")
                         .map_err(|error| format!("service id: {error}"))?,
                     row.try_get::<String, _>("name_ru")
                         .map_err(|error| format!("service name: {error}"))?,
-                    "Source service label/history".to_owned(),
+                ))
+            })
+            .transpose()?
+        } else {
+            None
+        };
+        let (service_id, service_name, service_provenance) = if let Some(row) = service_row {
+            let source = row
+                .try_get::<String, _>("source")
+                .map_err(|error| format!("routing source: {error}"))?;
+            let rule_source = RuleSource::from_db(&source);
+            if rule_source == RuleSource::Official {
+                (
+                    row.try_get::<String, _>("id")
+                        .map_err(|error| format!("routing service id: {error}"))?,
+                    row.try_get::<String, _>("name_ru")
+                        .map_err(|error| format!("routing service name: {error}"))?,
+                    RuleProvenance {
+                        source: rule_source,
+                        version: Some(
+                            row.try_get::<i32, _>("version")
+                                .map_err(|error| format!("routing rule version: {error}"))?,
+                        ),
+                        reason: row
+                            .try_get::<String, _>("reason")
+                            .map_err(|error| format!("routing reason: {error}"))?,
+                    },
                 )
+            } else if input_source == RuleSource::LabelHistory {
+                if let Some((service_id, service_name)) = service_label_match {
+                    (
+                        service_id,
+                        service_name,
+                        RuleProvenance {
+                            source: RuleSource::LabelHistory,
+                            version: None,
+                            reason: "Служба из исторической метки обращения".to_owned(),
+                        },
+                    )
+                } else {
+                    (
+                        row.try_get::<String, _>("id")
+                            .map_err(|error| format!("routing service id: {error}"))?,
+                        row.try_get::<String, _>("name_ru")
+                            .map_err(|error| format!("routing service name: {error}"))?,
+                        RuleProvenance {
+                            source: rule_source,
+                            version: Some(
+                                row.try_get::<i32, _>("version")
+                                    .map_err(|error| format!("routing rule version: {error}"))?,
+                            ),
+                            reason: row
+                                .try_get::<String, _>("reason")
+                                .map_err(|error| format!("routing reason: {error}"))?,
+                        },
+                    )
+                }
             } else {
                 (
-                    "service_other".to_owned(),
-                    "Другая служба".to_owned(),
-                    "No authoritative or mapped service rule".to_owned(),
+                    row.try_get::<String, _>("id")
+                        .map_err(|error| format!("routing service id: {error}"))?,
+                    row.try_get::<String, _>("name_ru")
+                        .map_err(|error| format!("routing service name: {error}"))?,
+                    RuleProvenance {
+                        source: rule_source,
+                        version: Some(
+                            row.try_get::<i32, _>("version")
+                                .map_err(|error| format!("routing rule version: {error}"))?,
+                        ),
+                        reason: row
+                            .try_get::<String, _>("reason")
+                            .map_err(|error| format!("routing reason: {error}"))?,
+                    },
                 )
             }
+        } else if let Some((service_id, service_name)) = service_label_match {
+            (
+                service_id,
+                service_name,
+                RuleProvenance {
+                    source: input_source,
+                    version: None,
+                    reason: match input_source {
+                        RuleSource::LabelHistory => {
+                            "Служба из исторической метки обращения".to_owned()
+                        }
+                        RuleSource::Manual => "Служба введена вручную".to_owned(),
+                        RuleSource::Official => "Официальная метка службы".to_owned(),
+                    },
+                },
+            )
         } else {
             (
                 "service_other".to_owned(),
                 "Другая служба".to_owned(),
-                "No authoritative or mapped service rule".to_owned(),
+                RuleProvenance::manual(
+                    "Проверенное правило маршрутизации не предоставлено; выберите службу вручную",
+                ),
             )
         };
 
-        let priority_row = sqlx::query(
-            "SELECT priority, reason FROM priority_rules WHERE active AND (topic_id = $1 OR topic_id IS NULL) AND (region_id = $2 OR region_id IS NULL) ORDER BY CASE source WHEN 'OFFICIAL' THEN 0 WHEN 'LABEL_HISTORY' THEN 1 WHEN 'MANUAL' THEN 2 ELSE 3 END, CASE WHEN region_id IS NULL THEN 1 ELSE 0 END, precedence ASC, id ASC LIMIT 1",
-        )
-        .bind(topic_id)
-        .bind(region_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| format!("resolve priority rule: {error}"))?;
-        let (priority, priority_reason) = if let Some(row) = priority_row {
-            (
-                row.try_get::<String, _>("priority")
-                    .map_err(|error| format!("priority value: {error}"))?,
-                row.try_get::<String, _>("reason")
-                    .map_err(|error| format!("priority reason: {error}"))?,
-            )
+        let priority_row = sqlx::query(PRIORITY_RULE_LOOKUP)
+            .bind(topic_id)
+            .bind(region_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("resolve priority rule: {error}"))?;
+        let (priority, priority_provenance) = if let Some(row) = priority_row {
+            let source = row
+                .try_get::<String, _>("source")
+                .map_err(|error| format!("priority source: {error}"))?;
+            let rule_source = RuleSource::from_db(&source);
+            let historical_priority = requested_priority
+                .filter(|value| !value.trim().is_empty())
+                .filter(|_| input_source == RuleSource::LabelHistory);
+            if rule_source != RuleSource::Official {
+                if let Some(value) = historical_priority {
+                    (
+                        normalize_priority(value),
+                        RuleProvenance {
+                            source: RuleSource::LabelHistory,
+                            version: None,
+                            reason: "Приоритет из исторического значения обращения".to_owned(),
+                        },
+                    )
+                } else {
+                    (
+                        row.try_get::<String, _>("priority")
+                            .map_err(|error| format!("priority value: {error}"))?,
+                        RuleProvenance {
+                            source: rule_source,
+                            version: Some(
+                                row.try_get::<i32, _>("version")
+                                    .map_err(|error| format!("priority rule version: {error}"))?,
+                            ),
+                            reason: row
+                                .try_get::<String, _>("reason")
+                                .map_err(|error| format!("priority reason: {error}"))?,
+                        },
+                    )
+                }
+            } else {
+                (
+                    row.try_get::<String, _>("priority")
+                        .map_err(|error| format!("priority value: {error}"))?,
+                    RuleProvenance {
+                        source: rule_source,
+                        version: Some(
+                            row.try_get::<i32, _>("version")
+                                .map_err(|error| format!("priority rule version: {error}"))?,
+                        ),
+                        reason: row
+                            .try_get::<String, _>("reason")
+                            .map_err(|error| format!("priority reason: {error}"))?,
+                    },
+                )
+            }
         } else if let Some(value) = requested_priority.filter(|value| !value.trim().is_empty()) {
             (
                 normalize_priority(value),
-                "Explicit request priority".to_owned(),
+                RuleProvenance {
+                    source: input_source,
+                    version: None,
+                    reason: match input_source {
+                        RuleSource::LabelHistory => {
+                            "Приоритет из исторического значения обращения".to_owned()
+                        }
+                        RuleSource::Manual => "Приоритет введён вручную".to_owned(),
+                        RuleSource::Official => "Официальное значение приоритета".to_owned(),
+                    },
+                },
             )
         } else {
             (
                 "medium".to_owned(),
-                "No priority rule; medium fallback".to_owned(),
+                RuleProvenance::manual(
+                    "Правило приоритета не предоставлено; используется ручной средний уровень",
+                ),
             )
         };
+        let reason = format!(
+            "{}; {}",
+            service_provenance.reason, priority_provenance.reason
+        );
         Ok(RoutingDecision {
             service_id,
             service_name,
+            service_provenance,
             priority,
-            reason: format!("{service_reason}; {priority_reason}"),
+            priority_provenance,
+            reason,
         })
     }
 
@@ -1021,7 +1166,7 @@ impl PgRepository {
         let db_language =
             normalize_language(language.unwrap_or(&classification.prediction.language));
         let routing = self
-            .resolve_routing(&db_topic, &db_region, None, priority)
+            .resolve_routing(&db_topic, &db_region, None, priority, RuleSource::Manual)
             .await?;
         let db_priority = routing.priority.clone();
         let external_id = format!(
@@ -1067,19 +1212,15 @@ impl PgRepository {
             "confidence": classification.prediction.confidence,
             "model_version": classification.model_version,
             "routing_reason": routing.reason,
+            "service_provenance": routing.service_provenance,
+            "priority_provenance": routing.priority_provenance,
         }))
         .bind(json!({"classifier": classification.model_version}))
         .fetch_one(&mut *tx)
         .await
         .map_err(|error| format!("insert ticket: {error}"))?;
 
-        let prediction = prediction_for_db(
-            ticket_id,
-            &classification,
-            &db_priority,
-            &routing.service_name,
-            &routing.reason,
-        );
+        let prediction = prediction_for_db(ticket_id, &classification, &routing);
         sqlx::query(
             "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
@@ -1096,7 +1237,9 @@ impl PgRepository {
             "confidence": classification.prediction.confidence,
             "confidence_state": classification.prediction.confidence_state,
             "needs_review": classification.prediction.needs_review,
-            "routing_reason": routing.reason,
+            "routing_reason": &routing.reason,
+            "service_provenance": &routing.service_provenance,
+            "priority_provenance": &routing.priority_provenance,
         }))
         .bind(classification.prediction.needs_review)
         .execute(&mut *tx)
@@ -1371,6 +1514,7 @@ impl PgRepository {
                     &region_id,
                     json_text(item, "service_raw").as_deref(),
                     json_text(item, "priority").as_deref(),
+                    RuleSource::LabelHistory,
                 )
                 .await?;
             let created_at = json_datetime(item, "created_at")
@@ -1423,6 +1567,8 @@ impl PgRepository {
                 "confidence": classification.prediction.confidence,
                 "model_version": classification.model_version,
                 "routing_reason": routing.reason,
+                "service_provenance": routing.service_provenance,
+                "priority_provenance": routing.priority_provenance,
             }))
             .bind(json!({
                 "classifier": classification.model_version,
@@ -1455,7 +1601,9 @@ impl PgRepository {
                     "topic": classification.prediction.topic,
                     "confidence": classification.prediction.confidence,
                     "confidence_state": classification.prediction.confidence_state,
-                    "routing_reason": routing.reason,
+                    "routing_reason": &routing.reason,
+                    "service_provenance": &routing.service_provenance,
+                    "priority_provenance": &routing.priority_provenance,
                 }))
                 .bind(classification.prediction.needs_review)
                 .execute(&mut *tx)
@@ -3199,7 +3347,13 @@ impl PgRepository {
                         ticket.topic_label = classification.prediction.topic.clone();
                         let routing_started = Instant::now();
                         let routing = self
-                            .resolve_routing(&ticket.topic_id, &ticket.region_id, None, None)
+                            .resolve_routing(
+                                &ticket.topic_id,
+                                &ticket.region_id,
+                                None,
+                                None,
+                                RuleSource::Manual,
+                            )
                             .await;
                         let routing_latency_ms = routing_started.elapsed().as_secs_f64() * 1000.0;
                         match routing {
@@ -3213,13 +3367,7 @@ impl PgRepository {
                                     None,
                                 ));
                                 stages.push(assist_stage("priority", "completed", 0.0, None, None));
-                                prediction_for_db(
-                                    0,
-                                    &classification,
-                                    &routing.priority,
-                                    &routing.service_name,
-                                    &routing.reason,
-                                )
+                                prediction_for_db(0, &classification, &routing)
                             }
                             Err(_) => {
                                 needs_review = true;
@@ -3238,13 +3386,19 @@ impl PgRepository {
                                     None,
                                     Some("ROUTING_UNAVAILABLE"),
                                 ));
-                                prediction_for_db(
-                                    0,
-                                    &classification,
-                                    "UNKNOWN",
-                                    "UNKNOWN",
-                                    "Ручная проверка маршрутизации",
-                                )
+                                let unavailable_routing = RoutingDecision {
+                                    service_id: "service_other".to_owned(),
+                                    service_name: "UNKNOWN".to_owned(),
+                                    service_provenance: RuleProvenance::manual(
+                                        "Маршрутизация недоступна; выберите службу вручную",
+                                    ),
+                                    priority: "UNKNOWN".to_owned(),
+                                    priority_provenance: RuleProvenance::manual(
+                                        "Приоритет недоступен; выберите его вручную",
+                                    ),
+                                    reason: "Ручная проверка маршрутизации".to_owned(),
+                                };
+                                prediction_for_db(0, &classification, &unavailable_routing)
                             }
                         }
                     }
@@ -3536,7 +3690,8 @@ impl PgRepository {
                 &confirmed_topic,
                 &ticket.region_id,
                 None,
-                request.priority.as_deref(),
+                None,
+                RuleSource::Manual,
             )
             .await?;
         let (service_id, service) = if let Some(service_label) = request
@@ -3569,6 +3724,24 @@ impl PgRepository {
             .as_deref()
             .map(normalize_priority)
             .unwrap_or(routing.priority);
+        let service_overridden = request
+            .service
+            .as_deref()
+            .is_some_and(|service| !service.trim().is_empty());
+        let priority_overridden = request
+            .priority
+            .as_deref()
+            .is_some_and(|priority| !priority.trim().is_empty());
+        let service_provenance = RuleProvenance::manual(if service_overridden {
+            "Служба переопределена оператором"
+        } else {
+            "Служба подтверждена оператором"
+        });
+        let priority_provenance = RuleProvenance::manual(if priority_overridden {
+            "Приоритет переопределён оператором"
+        } else {
+            "Приоритет подтверждён оператором"
+        });
         let decision_value = if action == "correct" {
             "CORRECTED"
         } else {
@@ -3600,6 +3773,8 @@ impl PgRepository {
             "action": action,
             "predicted_topic_id": prediction.topic_id,
             "routing_reason": routing.reason,
+            "service_provenance": service_provenance,
+            "priority_provenance": priority_provenance,
         }))
         .fetch_one(&mut *tx)
         .await
@@ -3610,6 +3785,8 @@ impl PgRepository {
             "service": service,
             "priority": priority,
             "decision_id": decision_id.to_string(),
+            "service_provenance": service_provenance,
+            "priority_provenance": priority_provenance,
         });
         sqlx::query("UPDATE tickets SET topic_id = $2, service_id = $3, priority = $4, status = 'TRIAGED', operator_confirmed_decision = $5, needs_review = false, updated_in_pulse_at = now() WHERE id = $1")
             .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
@@ -3665,6 +3842,8 @@ impl PgRepository {
             confirmed_topic_id: confirmed_topic,
             service,
             priority,
+            service_provenance,
+            priority_provenance,
             note: request.note.clone(),
             user_id: user_id.to_owned(),
             created_at: Utc::now().to_rfc3339(),
@@ -3746,7 +3925,7 @@ impl PgRepository {
         ticket_id: i64,
     ) -> Result<Option<OperatorDecision>, String> {
         let row: Option<DbDecision> = sqlx::query_as(
-            "SELECT d.id, d.ticket_id, d.decision, COALESCE(d.feedback->>'predicted_topic_id', d.confirmed_topic_id) AS predicted_topic_id, d.confirmed_topic_id, COALESCE(d.confirmed_priority, 'normal') AS confirmed_priority, d.feedback->>'service' AS service, COALESCE(d.user_id, 'unknown') AS user_id, d.feedback->>'note' AS note, d.created_at FROM operator_decisions d WHERE d.ticket_id = $1 ORDER BY d.created_at DESC, d.id DESC LIMIT 1",
+            "SELECT d.id, d.ticket_id, d.decision, COALESCE(d.feedback->>'predicted_topic_id', d.confirmed_topic_id) AS predicted_topic_id, d.confirmed_topic_id, COALESCE(d.confirmed_priority, 'normal') AS confirmed_priority, d.feedback->>'service' AS service, d.feedback, COALESCE(d.user_id, 'unknown') AS user_id, d.feedback->>'note' AS note, d.created_at FROM operator_decisions d WHERE d.ticket_id = $1 ORDER BY d.created_at DESC, d.id DESC LIMIT 1",
         )
         .bind(ticket_id)
         .fetch_optional(&self.pool)
@@ -3794,6 +3973,19 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
         })
         .collect();
     let confidence = row.confidence.unwrap_or(0.0) as f32;
+    let routing_reason = row
+        .prediction
+        .get("routing_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("Источник маршрутизации не сохранён; требуется ручная проверка")
+        .to_owned();
+    let service_provenance =
+        rule_provenance_from_db(&row.prediction, "service_provenance", &routing_reason);
+    let priority_provenance = rule_provenance_from_db(
+        &row.prediction,
+        "priority_provenance",
+        "Источник приоритета не сохранён; требуется ручная проверка",
+    );
     Prediction {
         ticket_id: row.ticket_id.to_string(),
         model_version: row.model_version,
@@ -3803,14 +3995,37 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
         confidence_state: persisted_confidence_state(&row.prediction, row.needs_review, confidence),
         recommended_service: row.service_name,
         predicted_priority: row.priority,
-        routing_reason: row
-            .prediction
-            .get("routing_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("persisted routing rule")
-            .to_owned(),
+        routing_reason,
+        service_provenance,
+        priority_provenance,
         alternatives,
         created_at: row.created_at.to_rfc3339(),
+    }
+}
+
+fn rule_provenance_from_db(prediction: &Value, key: &str, fallback_reason: &str) -> RuleProvenance {
+    let stored = prediction.get(key);
+    let source = stored
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        .map(RuleSource::from_db)
+        .unwrap_or(RuleSource::Manual);
+    let version = stored
+        .and_then(|value| value.get("version"))
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value > 0);
+    let reason = stored
+        .and_then(|value| value.get("reason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_reason)
+        .to_owned();
+    RuleProvenance {
+        source,
+        version,
+        reason,
     }
 }
 
@@ -3836,9 +4051,7 @@ fn persisted_confidence_state(prediction: &Value, needs_review: bool, confidence
 fn prediction_for_db(
     ticket_id: i64,
     classification: &MlClassificationWithModel,
-    priority: &str,
-    service_name: &str,
-    routing_reason: &str,
+    routing: &RoutingDecision,
 ) -> Prediction {
     let topic_id = normalize_topic_id(&classification.prediction.topic_id);
     let confidence = classification.prediction.confidence;
@@ -3852,9 +4065,11 @@ fn prediction_for_db(
             .prediction
             .confidence_state
             .to_ascii_lowercase(),
-        recommended_service: service_name.to_owned(),
-        predicted_priority: priority.to_owned(),
-        routing_reason: routing_reason.to_owned(),
+        recommended_service: routing.service_name.clone(),
+        predicted_priority: routing.priority.clone(),
+        routing_reason: routing.reason.clone(),
+        service_provenance: routing.service_provenance.clone(),
+        priority_provenance: routing.priority_provenance.clone(),
         alternatives: classification
             .prediction
             .alternatives
@@ -3904,6 +4119,16 @@ fn decision_from_db(row: DbDecision) -> OperatorDecision {
             .unwrap_or_else(|| "unknown".to_owned()),
         service: row.service.unwrap_or_else(|| "Другая служба".to_owned()),
         priority: row.confirmed_priority,
+        service_provenance: rule_provenance_from_db(
+            &row.feedback,
+            "service_provenance",
+            "Источник решения не сохранён; значение подтверждено оператором",
+        ),
+        priority_provenance: rule_provenance_from_db(
+            &row.feedback,
+            "priority_provenance",
+            "Источник решения не сохранён; значение подтверждено оператором",
+        ),
         note: row.note,
         user_id: row.user_id,
         created_at: row.created_at.to_rfc3339(),
@@ -4257,6 +4482,14 @@ mod assist_preview_tests {
         assert_eq!(preview.prediction.confidence, 0.0);
         assert_eq!(preview.prediction.recommended_service, "UNKNOWN");
         assert_eq!(preview.prediction.predicted_priority, "UNKNOWN");
+        assert_eq!(
+            preview.prediction.service_provenance.source,
+            RuleSource::Manual
+        );
+        assert_eq!(
+            preview.prediction.priority_provenance.source,
+            RuleSource::Manual
+        );
         assert_eq!(preview.response_template.source, "UNAVAILABLE");
         assert!(preview.similar_tickets.is_empty());
         assert!(preview.duplicate_candidates.is_empty());
@@ -4269,6 +4502,83 @@ mod assist_preview_tests {
             stage.name == "retrieval"
                 && stage.error_code.as_deref() == Some("RETRIEVAL_UNAVAILABLE")
         }));
+    }
+}
+
+#[cfg(test)]
+mod routing_provenance_tests {
+    use super::*;
+
+    #[test]
+    fn stored_rule_source_and_version_are_preserved() {
+        let provenance = rule_provenance_from_db(
+            &json!({
+                "service_provenance": {
+                    "source": "OFFICIAL",
+                    "version": 3,
+                    "reason": "Утверждённое правило"
+                }
+            }),
+            "service_provenance",
+            "fallback",
+        );
+
+        assert_eq!(provenance.source, RuleSource::Official);
+        assert_eq!(provenance.version, Some(3));
+        assert_eq!(provenance.reason, "Утверждённое правило");
+
+        let history = rule_provenance_from_db(
+            &json!({
+                "priority_provenance": {
+                    "source": "LABEL_HISTORY",
+                    "version": 2,
+                    "reason": "Историческое значение"
+                }
+            }),
+            "priority_provenance",
+            "fallback",
+        );
+        assert_eq!(history.source, RuleSource::LabelHistory);
+        assert_eq!(history.version, Some(2));
+        assert_eq!(history.reason, "Историческое значение");
+
+        let manual = rule_provenance_from_db(
+            &json!({
+                "service_provenance": {
+                    "source": "MANUAL",
+                    "version": 1,
+                    "reason": "Ручное правило"
+                }
+            }),
+            "service_provenance",
+            "fallback",
+        );
+        assert_eq!(manual.source, RuleSource::Manual);
+        assert_eq!(manual.version, Some(1));
+        assert_eq!(manual.reason, "Ручное правило");
+    }
+
+    #[test]
+    fn legacy_or_unknown_provenance_defaults_to_manual() {
+        let legacy = rule_provenance_from_db(&json!({}), "service_provenance", "Проверьте вручную");
+        let unknown = rule_provenance_from_db(
+            &json!({
+                "service_provenance": {
+                    "source": "UNVERIFIED_MODEL",
+                    "version": 0,
+                    "reason": " "
+                }
+            }),
+            "service_provenance",
+            "Проверьте вручную",
+        );
+
+        assert_eq!(legacy.source, RuleSource::Manual);
+        assert_eq!(legacy.version, None);
+        assert_eq!(legacy.reason, "Проверьте вручную");
+        assert_eq!(unknown.source, RuleSource::Manual);
+        assert_eq!(unknown.version, None);
+        assert_eq!(unknown.reason, "Проверьте вручную");
     }
 }
 

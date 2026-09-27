@@ -517,7 +517,11 @@ paths:
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
       responses:
-        '200': { description: Request completed }
+        '200':
+          description: Ticket, prediction and latest operator decision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketDetailResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/tickets/{ticket_id}/prediction:
@@ -531,7 +535,11 @@ paths:
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
       responses:
-        '200': { description: Request completed }
+        '200':
+          description: Latest AI prediction with routing and priority provenance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Prediction' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/tickets/{ticket_id}/vector:
@@ -558,8 +566,17 @@ paths:
           required: true
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecisionRequest' }
       responses:
-        '200': { description: Request completed }
+        '200':
+          description: Prediction and separately persisted operator decision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DecisionResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/assist/{ticket_id}/correct:
@@ -572,8 +589,17 @@ paths:
           required: true
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DecisionRequest' }
       responses:
-        '200': { description: Request completed }
+        '200':
+          description: Prediction and separately persisted operator decision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DecisionResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/assist/confirm:
@@ -940,19 +966,73 @@ components:
         error_code: { type: string }
     Prediction:
       type: object
-      required: [ticket_id, model_version, topic_id, topic_label, confidence, confidence_state, recommended_service, predicted_priority, routing_reason, alternatives, created_at]
+      required: [ticket_id, model_version, topic_id, topic_label, confidence, confidence_state, recommended_service, predicted_priority, routing_reason, service_provenance, priority_provenance, alternatives, created_at]
       properties:
         ticket_id: { type: string }
         model_version: { type: string }
         topic_id: { type: string }
         topic_label: { type: string }
         confidence: { type: number, minimum: 0, maximum: 1 }
-        confidence_state: { type: string, enum: [high, medium, low] }
+        confidence_state: { type: string, enum: [confident, uncertain, low_confidence, unavailable, high, medium, low] }
         recommended_service: { type: string }
         predicted_priority: { type: string }
         routing_reason: { type: string }
+        service_provenance: { $ref: '#/components/schemas/RuleProvenance' }
+        priority_provenance: { $ref: '#/components/schemas/RuleProvenance' }
         alternatives: { type: array, items: { type: object, additionalProperties: true } }
         created_at: { type: string, format: date-time }
+    RuleProvenance:
+      type: object
+      description: Per-field source for a routing or priority recommendation or operator decision.
+      required: [source, version, reason]
+      properties:
+        source:
+          type: string
+          enum: [OFFICIAL, LABEL_HISTORY, MANUAL]
+          description: OFFICIAL is reserved for provisioned verified rules; demo defaults and operator decisions are MANUAL.
+        version: { type: integer, minimum: 1, nullable: true, description: Null for direct historical labels and operator decisions. }
+        reason: { type: string }
+    DecisionRequest:
+      type: object
+      properties:
+        topic_id: { type: string }
+        service: { type: string, description: Operator-selected service id or name. }
+        priority: { type: string, enum: [critical, high, medium, low] }
+        note: { type: string, maxLength: 2000 }
+    OperatorDecision:
+      type: object
+      required: [id, ticket_id, action, predicted_topic_id, confirmed_topic_id, service, priority, service_provenance, priority_provenance, note, user_id, created_at]
+      properties:
+        id: { type: string }
+        ticket_id: { type: string }
+        action: { type: string, enum: [confirm, correct] }
+        predicted_topic_id: { type: string }
+        confirmed_topic_id: { type: string }
+        service: { type: string }
+        priority: { type: string }
+        service_provenance: { $ref: '#/components/schemas/RuleProvenance' }
+        priority_provenance: { $ref: '#/components/schemas/RuleProvenance' }
+        note: { type: string, nullable: true }
+        user_id: { type: string }
+        created_at: { type: string, format: date-time }
+    TicketDetailResponse:
+      type: object
+      required: [ticket, prediction, latest_decision]
+      properties:
+        ticket: { $ref: '#/components/schemas/Ticket' }
+        prediction: { $ref: '#/components/schemas/Prediction' }
+        latest_decision:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/OperatorDecision'
+    DecisionResponse:
+      type: object
+      required: [ticket, prediction, decision]
+      properties:
+        ticket: { $ref: '#/components/schemas/Ticket' }
+        prediction: { $ref: '#/components/schemas/Prediction' }
+        decision: { $ref: '#/components/schemas/OperatorDecision' }
     SimilarTicket:
       type: object
       required: [ticket_id, score]

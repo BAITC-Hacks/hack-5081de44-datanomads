@@ -1,7 +1,8 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
+import { mapPriority, mapRuleProvenance } from '../routing'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -79,6 +80,8 @@ interface BackendPrediction {
   recommended_service: string
   predicted_priority: string
   routing_reason?: string
+  service_provenance?: RuleProvenance
+  priority_provenance?: RuleProvenance
   alternatives: BackendAlternative[]
 }
 
@@ -98,7 +101,14 @@ interface BackendAssistPreview {
 interface BackendTicketDetail {
   ticket: BackendTicket
   prediction: BackendPrediction
-  latest_decision?: { action: string; confirmed_topic_id: string; service: string; priority: string }
+  latest_decision?: {
+    action: string
+    confirmed_topic_id: string
+    service: string
+    priority: string
+    service_provenance?: RuleProvenance
+    priority_provenance?: RuleProvenance
+  }
 }
 
 interface BackendDecisionResponse {
@@ -139,13 +149,6 @@ interface BackendTaxonomy {
   statuses?: TaxonomyOption[]
   districts?: TaxonomyOption[]
   channels?: TaxonomyOption[]
-}
-
-function mapPriority(value: string): Priority {
-  if (value === 'high' || value === 'Высокий') return 'Высокий'
-  if (value === 'low' || value === 'Низкий') return 'Низкий'
-  if (value.toUpperCase() === 'UNKNOWN' || value.toLowerCase() === 'unavailable' || !value.trim()) return 'Не определён'
-  return 'Средний'
 }
 
 function mapLearningStage(value: string): LearningCycle['stage'] {
@@ -219,6 +222,18 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     service: latest?.service ?? (prediction?.recommended_service && !['UNKNOWN', 'unavailable'].includes(prediction.recommended_service) ? prediction.recommended_service : 'Не определена'),
     priority: mapPriority(latest?.priority ?? prediction?.predicted_priority ?? item.priority),
     routingReason: prediction?.routing_reason,
+    serviceProvenance: mapRuleProvenance(
+      latest?.service_provenance ?? prediction?.service_provenance,
+      latest
+        ? 'Источник подтверждённой службы не сохранён; проверьте решение вручную'
+        : 'Источник рекомендованной службы не сохранён; проверьте вручную',
+    ),
+    priorityProvenance: mapRuleProvenance(
+      latest?.priority_provenance ?? prediction?.priority_provenance,
+      latest
+        ? 'Источник подтверждённого приоритета не сохранён; проверьте решение вручную'
+        : 'Источник рекомендованного приоритета не сохранён; проверьте вручную',
+    ),
     region: item.region_name,
     createdAt: item.created_at,
     status,
@@ -357,7 +372,7 @@ export async function submitDecision(ticketId: string, decision: { status: 'conf
       body: JSON.stringify({
         topic_id: topicIdForLabel(decision.topic, taxonomy?.topics),
         service: serviceIdForLabel(decision.service, taxonomy?.services),
-        priority: decision.priority === 'Высокий' ? 'high' : decision.priority === 'Низкий' ? 'low' : decision.priority === 'Средний' ? 'medium' : undefined,
+        priority: decision.priority === 'Критический' ? 'critical' : decision.priority === 'Высокий' ? 'high' : decision.priority === 'Низкий' ? 'low' : decision.priority === 'Средний' ? 'medium' : undefined,
       }),
     })
     let preview: BackendAssistPreview | undefined

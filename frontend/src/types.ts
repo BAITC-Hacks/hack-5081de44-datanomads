@@ -1,5 +1,11 @@
 export type TicketStatus = 'new' | 'confirmed' | 'corrected'
-export type Priority = 'Высокий' | 'Средний' | 'Низкий' | 'Не определён'
+export type Priority = 'Критический' | 'Высокий' | 'Средний' | 'Низкий' | 'Не определён'
+export type RuleSource = 'OFFICIAL' | 'LABEL_HISTORY' | 'MANUAL'
+export interface RuleProvenance {
+  source: RuleSource
+  version?: number | null
+  reason: string
+}
 export type PreviewLanguage = 'RU' | 'KZ' | 'MIXED' | 'UNKNOWN'
 export type ClassificationConfidenceState = 'CONFIDENT' | 'UNCERTAIN' | 'LOW_CONFIDENCE' | 'UNAVAILABLE'
 
@@ -49,6 +55,8 @@ export interface Ticket {
   service: string
   priority: Priority
   routingReason?: string
+  serviceProvenance?: RuleProvenance
+  priorityProvenance?: RuleProvenance
   region: string
   createdAt: string
   status: TicketStatus
