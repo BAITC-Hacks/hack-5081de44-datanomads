@@ -9,8 +9,9 @@ use crate::anomaly::{
     evaluate_series, AlertDetectionRun, AlertDetectorConfig, AlertEvaluation, AlertSeriesInput,
 };
 use crate::{
-    manual_response_template, metric_rate, related_ticket_candidate, render_template_body, Alert,
-    AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse,
+    build_query_intent_result, manual_response_template, metric_rate, query_analytics_filters,
+    related_ticket_candidate, render_template_body, validate_query_intent, Alert, AlertQuery,
+    AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse,
     AssistOrchestration, AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
     CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
     ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
@@ -3084,119 +3085,28 @@ impl PgRepository {
     }
 
     pub async fn analytics_query(&self, query: &QueryIntentRequest) -> Result<Value, String> {
-        let mut intent = query
-            .intent
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if intent == "compare" {
-            intent = "compare_regions".to_owned();
-        }
-        let region_id = query.region_id.clone().or_else(|| {
-            query
-                .filters
-                .as_ref()
-                .and_then(|filters| filters.region_id.clone())
-        });
-        let topic_id = query.topic_id.clone().or_else(|| {
-            query
-                .filters
-                .as_ref()
-                .and_then(|filters| filters.topic_id.clone())
-        });
-        let service_id = query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.service_id.clone());
-        let status = query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.status.clone());
-        let district = query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.district.clone());
-        let channel = query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.channel.clone());
-        let range = query.range.clone().or_else(|| {
-            query
-                .filters
-                .as_ref()
-                .and_then(|filters| filters.range.clone())
-        });
-        let filters = AnalyticsQuery {
-            region_id: region_id.clone(),
-            topic_id: topic_id.clone(),
-            service_id: service_id.clone(),
-            status: status.clone(),
-            district: district.clone(),
-            channel: channel.clone(),
-            range: range.clone().or_else(|| Some("30d".to_owned())),
-        };
+        let intent = validate_query_intent(query)?;
+        let filters = query_analytics_filters(query)?;
         let report = self.analytics(&filters).await?;
-        let mut rows = match intent.as_str() {
-            "count" => vec![json!({
-                "period": range.clone().unwrap_or_else(|| "30d".to_owned()),
-                "count": report.overview.get("total_tickets").cloned().unwrap_or(json!(0)),
-            })],
-            "trend" => report
-                .time_series
-                .iter()
-                .map(|point| json!({"period": point.date, "count": point.tickets, "resolved": point.resolved}))
-                .collect(),
-            "compare_regions" => report
-                .by_region
-                .iter()
-                .map(|bucket| json!({"key": bucket.id, "label": bucket.label, "count": bucket.tickets, "change_abs": bucket.change_abs, "change_pct": bucket.change_pct}))
-                .collect(),
-            "top_topics" => report
-                .by_topic
-                .iter()
-                .map(|bucket| json!({"key": bucket.id, "label": bucket.label, "count": bucket.tickets, "change_abs": bucket.change_abs, "change_pct": bucket.change_pct}))
-                .collect(),
-            "spikes" => report
-                .time_series
-                .windows(2)
-                .filter(|window| window[1].tickets >= 3 && window[1].tickets > window[0].tickets.saturating_mul(3) / 2)
-                .map(|window| json!({"period": window[1].date, "count": window[1].tickets, "baseline": window[0].tickets, "is_spike": true}))
-                .collect(),
-            "forecast" => {
-                let forecast = self
-                    .forecast(&ForecastQuery {
-                        horizon: Some(30),
-                        horizon_days: None,
-                        region_id,
-                        topic_id,
-                        service_id,
-                        status,
-                        district,
-                        channel,
-                    })
-                    .await?;
-                return serde_json::to_value(forecast)
-                    .map(|value| json!({"intent": "forecast", "filters": {"range": range}, "result": value, "source": "postgres+ml"}))
-                    .map_err(|error| format!("serialize forecast query: {error}"));
-            }
-            _ => return Err(format!("unsupported QueryIntent: {intent}")),
+        let forecast = if intent == "forecast" {
+            let horizon = query.horizon_days.unwrap_or(30);
+            Some(
+                self.forecast(&ForecastQuery {
+                    horizon: Some(horizon),
+                    horizon_days: None,
+                    region_id: filters.region_id.clone(),
+                    topic_id: filters.topic_id.clone(),
+                    service_id: filters.service_id.clone(),
+                    status: filters.status.clone(),
+                    district: filters.district.clone(),
+                    channel: filters.channel.clone(),
+                })
+                .await?,
+            )
+        } else {
+            None
         };
-        if let Some(limit) = query.limit {
-            rows.truncate(limit.clamp(1, 100));
-        }
-        let total = report
-            .overview
-            .get("total_tickets")
-            .cloned()
-            .unwrap_or(json!(0));
-        Ok(json!({
-            "intent": intent,
-            "filters": {"region_id": region_id, "topic_id": topic_id, "range": range.unwrap_or_else(|| "30d".to_owned())},
-            "number": total,
-            "rows": rows,
-            "source": "postgres",
-        }))
+        build_query_intent_result(query, &filters, &report, forecast.as_ref())
     }
 
     pub async fn list_alerts(&self, query: &AlertQuery) -> Result<Vec<Alert>, String> {

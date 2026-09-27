@@ -3,6 +3,7 @@ import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, 
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
+import { QueryIntentResultView } from './components/QueryIntentResultView'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
 import { confidenceStateLabel, confidenceStateNotice, normalizeConfidenceState } from './classification'
@@ -1469,7 +1470,6 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
   const total = data.overview.totalTickets
   const highPriority = data.overview.highPriorityTickets
   const metrics = data.operatorMetrics
-  const queryRows = queryResult?.rows ?? queryResult?.result?.points ?? []
   const queryTitle = queryResult ? ({
     count: 'Количество обращений',
     trend: 'Динамика обращений',
@@ -1522,10 +1522,7 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
         <p>Можно спросить о количестве, динамике, регионах, темах, всплесках или прогнозе.</p>
         <div className="query-input"><Icon name="search" size={16} /><input aria-label="Вопрос по данным" placeholder="Сколько обращений по регионам?" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void submitQuery() }} /><button aria-label="Выполнить поиск" onClick={() => void submitQuery()} disabled={queryLoading}><Icon name="arrow" size={16} /></button></div>
         {queryError && <p className="query-error" role="alert">Не удалось получить ответ: {queryError}</p>}
-        {queryResult && <div className="query-results" role="status">
-          <strong>{queryTitle}</strong>
-          {queryResult.intent === 'count' ? <p>Обращений за выбранный период: {queryResult.number ?? 0}</p> : queryRows.length ? <ul>{queryRows.slice(0, 10).map((row, index) => <li key={`${row.label ?? row.period ?? row.date ?? 'row'}-${index}`}><span>{row.label ?? row.period ?? row.date ?? `Позиция ${index + 1}`}</span><strong>{row.count ?? row.tickets ?? 0}</strong></li>)}</ul> : <p>По выбранным фильтрам результатов нет.</p>}
-        </div>}
+        {queryResult && <QueryIntentResultView result={queryResult} filterOptions={data.filterOptions} title={queryTitle} />}
       </section>
     </div>
   </div>

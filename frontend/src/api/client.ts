@@ -730,40 +730,106 @@ export async function loadAnalyticsDrilldown(dimension: DrilldownDimension, valu
 }
 
 export interface QueryIntentResult {
-  intent: string
-  number?: number | string
-  rows?: QueryIntentRow[]
-  result?: { points?: QueryIntentRow[] }
+  intent: 'count' | 'trend' | 'compare_regions' | 'top_topics' | 'spikes' | 'forecast'
+  summary: { label: string; value: number | null; text: string }
+  number: number | null
+  rows: QueryIntentRow[]
+  table: QueryIntentRow[]
+  table_columns: Array<{ key: string; label: string }>
+  series: QueryIntentSeriesPoint[]
+  chart: { type: 'line' | 'bar'; x: string; y: string; title: string; forecast_start: string | null }
+  filters: QueryIntentFilterValues
+  interpreted_filters: QueryIntentFilterValues & { group_by: string; limit: number | null; horizon_days: number | null }
+  period: { range: string; days: number; start: string; end: string }
+  grouping: string
+  comparison: {
+    type: string
+    current_total: number
+    previous_total: number
+    change_abs: number
+    change_pct: number | null
+    current_start: string
+    current_end: string
+    previous_start: string
+    previous_end: string
+  }
+  comparison_definition: string
   source: string
+  generated_at: string
+  forecast_status: string | null
+  forecast_insufficient_history: boolean | null
+  forecast_start: string | null
+  forecast_model_version: string | null
+  forecast_model: string | null
+  forecast_horizon_days: number | null
+  forecast_history: QueryIntentRow[] | null
+  forecast_points: QueryIntentRow[] | null
+  expected_peaks: string[] | null
+  backtest: Record<string, unknown> | null
 }
 
-interface QueryIntentRow {
+export interface QueryIntentRow {
+  key?: string
+  label?: string
   period?: string
+  date?: string
+  count?: number
+  tickets?: number
+  resolved?: number
+  change_abs?: number | null
+  change_pct?: number | null
+  baseline?: number
+  deviation?: number
+  is_spike?: boolean
+  segment?: 'history' | 'forecast'
+  [key: string]: string | number | boolean | null | undefined
+}
+
+export interface QueryIntentSeriesPoint extends QueryIntentRow {
   date?: string
   label?: string
   count?: number
-  tickets?: number
+  segment?: 'history' | 'forecast'
+}
+
+export interface QueryIntentFilterValues {
+  region_id?: string | null
+  topic_id?: string | null
+  service_id?: string | null
+  status?: string | null
+  district?: string | null
+  channel?: string | null
+  range?: string
+  group_by?: string
 }
 
 export async function runQueryIntent(text: string, filters: DashboardFilters = { range: '30d' }) {
-  return request<QueryIntentResult>('/analytics/query', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      text: text.trim(),
-      range: filters.range,
-      region_id: filters.regionId,
-      topic_id: filters.topicId,
-      filters: {
+  try {
+    return await request<QueryIntentResult>('/analytics/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: text.trim(),
         range: filters.range,
         region_id: filters.regionId,
         topic_id: filters.topicId,
-        service_id: filters.serviceId,
-        status: filters.status,
-        district: filters.district,
-        channel: filters.channel,
-      },
-      limit: 10,
-    }),
-  })
+        filters: {
+          range: filters.range,
+          region_id: filters.regionId,
+          topic_id: filters.topicId,
+          service_id: filters.serviceId,
+          status: filters.status,
+          district: filters.district,
+          channel: filters.channel,
+        },
+        limit: 100,
+        ...(/прогноз|forecast/i.test(text) ? { horizon_days: filters.forecastHorizon ?? 30 } : {}),
+      }),
+    })
+  } catch (error: unknown) {
+    if (error instanceof Error && (error.message === 'API 400' || error.message === 'API 422')) {
+      throw new Error('Запрос не распознан или фильтр недоступен. Спросите о количестве, динамике, регионах, темах, всплесках или прогнозе.')
+    }
+    throw error
+  }
 }

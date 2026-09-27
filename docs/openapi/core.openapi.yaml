@@ -1383,13 +1383,19 @@ components:
         time_series: { type: array, items: { type: object, additionalProperties: true } }
     QueryIntent:
       type: object
-      description: Provide either an allow-listed intent or a natural-language text question; Core infers and validates the same strict intent set.
+      description: Provide exactly one allow-listed intent or a natural-language question. Core deterministically resolves the question and executes a parameterized analytics query; free-form SQL is not accepted.
+      oneOf:
+        - required: [intent]
+        - required: [text]
+        - required: [query]
+      additionalProperties: false
       properties:
         intent: { type: string, enum: [count, trend, compare, compare_regions, top_topics, spikes, forecast] }
         text: { type: string, minLength: 1, maxLength: 500 }
+        query: { type: string, minLength: 1, maxLength: 500, description: Compatibility alias for text. }
         region_id: { type: string }
         topic_id: { type: string }
-        range: { type: string, default: 7d }
+        range: { type: string, pattern: '^([1-9]|[1-9][0-9]|[12][0-9]{2}|3[0-5][0-9]|36[0-6])d$', default: 30d, description: Day range from 1d through 366d. }
         filters:
           type: object
           properties:
@@ -1399,23 +1405,111 @@ components:
             status: { type: string }
             district: { type: string }
             channel: { type: string }
-            range: { type: string }
+            range: { type: string, pattern: '^([1-9]|[1-9][0-9]|[12][0-9]{2}|3[0-5][0-9]|36[0-6])d$', description: Day range from 1d through 366d. }
           additionalProperties: false
-        group_by: { type: string, enum: [region, topic, day, week, month] }
+        group_by: { type: string, enum: [none, region, topic, day, week, month] }
         limit: { type: integer, minimum: 1, maximum: 100 }
+        horizon_days: { type: integer, enum: [30, 60, 90], description: Forecast horizon; valid only for forecast intent. }
     AnalyticsQueryResponse:
       type: object
-      required: [intent, number, rows, chart, filters]
+      required: [intent, summary, number, rows, table, table_columns, series, chart, filters, interpreted_filters, period, grouping, comparison, comparison_definition, generated_at, source, forecast_status, forecast_insufficient_history, forecast_start, forecast_model_version, forecast_model, forecast_horizon_days, forecast_history, forecast_points, expected_peaks, backtest]
+      additionalProperties: false
       properties:
-        intent: { type: string }
-        number: { type: number }
+        intent: { type: string, enum: [count, trend, compare_regions, top_topics, spikes, forecast] }
+        summary:
+          type: object
+          required: [label, value, text]
+          additionalProperties: false
+          properties:
+            label: { type: string }
+            value: { type: number, nullable: true }
+            text: { type: string }
+        number: { type: number, nullable: true, description: Null when forecast history is insufficient. }
         rows: { type: array, items: { type: object, additionalProperties: true } }
         table: { type: array, items: { type: object, additionalProperties: true } }
+        table_columns:
+          type: array
+          items:
+            type: object
+            required: [key, label]
+            properties:
+              key: { type: string }
+              label: { type: string }
         series: { type: array, items: { type: object, additionalProperties: true } }
-        chart: { type: object, additionalProperties: true }
-        filters: { type: object, additionalProperties: true }
-        interpreted_filters: { type: object, additionalProperties: true }
+        chart:
+          type: object
+          required: [type, x, y, title, forecast_start]
+          additionalProperties: false
+          properties:
+            type: { type: string, enum: [line, bar] }
+            x: { type: string }
+            y: { type: string }
+            title: { type: string }
+            forecast_start: { type: string, format: date, nullable: true }
+        filters:
+          type: object
+          required: [region_id, topic_id, service_id, status, district, channel, range]
+          properties:
+            region_id: { type: string, nullable: true }
+            topic_id: { type: string, nullable: true }
+            service_id: { type: string, nullable: true }
+            status: { type: string, nullable: true }
+            district: { type: string, nullable: true }
+            channel: { type: string, nullable: true }
+            range: { type: string }
+          additionalProperties: false
+        interpreted_filters:
+          type: object
+          required: [region_id, topic_id, service_id, status, district, channel, range, group_by, limit, horizon_days]
+          properties:
+            region_id: { type: string, nullable: true }
+            topic_id: { type: string, nullable: true }
+            service_id: { type: string, nullable: true }
+            status: { type: string, nullable: true }
+            district: { type: string, nullable: true }
+            channel: { type: string, nullable: true }
+            range: { type: string }
+            group_by: { type: string, enum: [none, region, topic, day, week, month] }
+            limit: { type: integer, nullable: true }
+            horizon_days: { type: integer, enum: [30, 60, 90], nullable: true }
+          additionalProperties: false
+        period:
+          type: object
+          required: [range, days, start, end]
+          additionalProperties: false
+          properties:
+            range: { type: string }
+            days: { type: integer, minimum: 1, maximum: 366 }
+            start: { type: string, format: date-time }
+            end: { type: string, format: date-time }
+        grouping: { type: string }
+        comparison:
+          type: object
+          required: [type, current_total, previous_total, change_abs, change_pct, current_start, current_end, previous_start, previous_end]
+          additionalProperties: false
+          properties:
+            type: { type: string, enum: [previous_equal_length_period] }
+            current_total: { type: integer }
+            previous_total: { type: integer }
+            change_abs: { type: integer }
+            change_pct: { type: number, nullable: true }
+            current_start: { type: string, format: date-time }
+            current_end: { type: string, format: date-time }
+            previous_start: { type: string, format: date-time }
+            previous_end: { type: string, format: date-time }
+        comparison_definition: { type: string }
+        generated_at: { type: string, format: date-time }
         source: { type: string }
+        forecast_status: { type: string, nullable: true }
+        forecast_insufficient_history: { type: boolean, nullable: true }
+        forecast_start: { type: string, format: date, nullable: true }
+        forecast_model_version: { type: string, nullable: true }
+        forecast_model: { type: string, nullable: true }
+        forecast_horizon_days: { type: integer, nullable: true }
+        forecast_history: { type: array, nullable: true, items: { type: object, additionalProperties: true } }
+        forecast_points: { type: array, nullable: true, items: { type: object, additionalProperties: true } }
+        expected_peaks: { type: array, nullable: true, items: { type: string, format: date } }
+        backtest: { type: object, nullable: true, additionalProperties: true }
     Alert:
       type: object
       required: [id, incident_key, alert_type, severity, status, title, description, region_id, topic_id, ticket_count, current_count, linked_ticket_ids, created_at, detected_at, detail]

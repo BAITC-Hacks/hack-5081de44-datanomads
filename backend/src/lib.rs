@@ -18,7 +18,7 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -3885,6 +3885,7 @@ async fn taxonomy(
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct QueryIntentFilters {
     pub region_id: Option<String>,
     pub topic_id: Option<String>,
@@ -3896,6 +3897,7 @@ pub struct QueryIntentFilters {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct QueryIntentRequest {
     pub intent: Option<String>,
     /// Optional natural-language question.  Core maps it to the small
@@ -3909,7 +3911,11 @@ pub struct QueryIntentRequest {
     pub filters: Option<QueryIntentFilters>,
     pub group_by: Option<String>,
     pub limit: Option<usize>,
+    pub horizon_days: Option<u32>,
 }
+
+const QUERY_SPIKE_MIN_COUNT: u64 = 3;
+const QUERY_SPIKE_MIN_RATIO: f64 = 1.5;
 
 fn infer_query_intent(text: &str) -> Option<&'static str> {
     let value = text.trim().to_lowercase();
@@ -3966,6 +3972,525 @@ fn resolved_query_intent(query: &QueryIntentRequest) -> Option<String> {
         })
 }
 
+fn validate_query_intent(query: &QueryIntentRequest) -> Result<String, String> {
+    let explicit_intent = query
+        .intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let question = query
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if explicit_intent.is_some() == question.is_some() {
+        return Err("provide exactly one allow-listed intent or text question".to_owned());
+    }
+    if question.is_some_and(|value| value.chars().count() > 500) {
+        return Err("text question exceeds 500 characters".to_owned());
+    }
+    let intent = resolved_query_intent(query)
+        .ok_or_else(|| "unsupported or empty QueryIntent question".to_owned())?
+        .to_ascii_lowercase();
+    let intent = match intent.as_str() {
+        "count" | "trend" | "compare_regions" | "top_topics" | "spikes" | "forecast" => intent,
+        "compare" => "compare_regions".to_owned(),
+        _ => return Err(format!("unsupported QueryIntent: {intent}")),
+    };
+    if query.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+        return Err("limit must be between 1 and 100".to_owned());
+    }
+    if query
+        .horizon_days
+        .is_some_and(|horizon| !matches!(horizon, 30 | 60 | 90))
+    {
+        return Err("horizon_days must be 30, 60 or 90".to_owned());
+    }
+    if query.horizon_days.is_some() && intent != "forecast" {
+        return Err("horizon_days is only valid for forecast intent".to_owned());
+    }
+    resolved_query_grouping(&intent, query.group_by.as_deref())?;
+    Ok(intent)
+}
+
+fn merge_query_filter(
+    top_level: Option<&String>,
+    nested: Option<&String>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let normalize = |value: Option<&String>| {
+        value
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let top_level = normalize(top_level);
+    let nested = normalize(nested);
+    match (top_level, nested) {
+        (Some(left), Some(right)) if left != right => {
+            Err(format!("conflicting top-level and filters.{field} values"))
+        }
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+pub(crate) fn query_analytics_filters(
+    query: &QueryIntentRequest,
+) -> Result<AnalyticsQuery, String> {
+    let nested = query.filters.as_ref();
+    let region_id = merge_query_filter(
+        query.region_id.as_ref(),
+        nested.and_then(|filters| filters.region_id.as_ref()),
+        "region_id",
+    )?;
+    let topic_id = merge_query_filter(
+        query.topic_id.as_ref(),
+        nested.and_then(|filters| filters.topic_id.as_ref()),
+        "topic_id",
+    )?;
+    let range = merge_query_filter(
+        query.range.as_ref(),
+        nested.and_then(|filters| filters.range.as_ref()),
+        "range",
+    )?
+    .unwrap_or_else(|| "30d".to_owned());
+    let days = range
+        .strip_suffix('d')
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|days| (1..=366).contains(days))
+        .ok_or_else(|| "range must be a day period from 1d through 366d".to_owned())?;
+    Ok(AnalyticsQuery {
+        region_id,
+        topic_id,
+        service_id: nested
+            .and_then(|filters| filters.service_id.as_ref())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        status: nested
+            .and_then(|filters| filters.status.as_ref())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        district: nested
+            .and_then(|filters| filters.district.as_ref())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        channel: nested
+            .and_then(|filters| filters.channel.as_ref())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        range: Some(format!("{days}d")),
+    })
+}
+
+fn resolved_query_grouping(intent: &str, requested: Option<&str>) -> Result<&'static str, String> {
+    let requested = requested.map(str::trim).filter(|value| !value.is_empty());
+    let default = match intent {
+        "compare_regions" => "region",
+        "top_topics" => "topic",
+        "trend" | "spikes" | "forecast" => "day",
+        _ => "none",
+    };
+    let grouping = requested.unwrap_or(default).to_ascii_lowercase();
+    let valid = match intent {
+        "compare_regions" => grouping == "region",
+        "top_topics" => grouping == "topic",
+        "trend" | "spikes" => matches!(grouping.as_str(), "day" | "week" | "month"),
+        "forecast" => grouping == "day",
+        "count" => matches!(
+            grouping.as_str(),
+            "none" | "region" | "topic" | "day" | "week" | "month"
+        ),
+        _ => false,
+    };
+    if !valid {
+        return Err(format!(
+            "group_by is not supported for {intent}: {grouping}"
+        ));
+    }
+    match grouping.as_str() {
+        "none" => Ok("none"),
+        "region" => Ok("region"),
+        "topic" => Ok("topic"),
+        "day" => Ok("day"),
+        "week" => Ok("week"),
+        "month" => Ok("month"),
+        _ => Err(format!("unsupported group_by: {grouping}")),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct QueryTimeBucket {
+    date: String,
+    label: String,
+    count: u64,
+    resolved: u64,
+}
+
+fn query_time_buckets(points: &[TimeSeriesPoint], grouping: &str) -> Vec<QueryTimeBucket> {
+    if grouping == "day" {
+        return points
+            .iter()
+            .map(|point| QueryTimeBucket {
+                date: point.date.clone(),
+                label: point.date.clone(),
+                count: u64::from(point.tickets),
+                resolved: u64::from(point.resolved),
+            })
+            .collect();
+    }
+    let mut buckets = BTreeMap::<String, QueryTimeBucket>::new();
+    for point in points {
+        let Ok(date) = NaiveDate::parse_from_str(&point.date, "%Y-%m-%d") else {
+            continue;
+        };
+        let (key, bucket_date) = match grouping {
+            "week" => {
+                let week = date.iso_week();
+                let monday =
+                    date - Duration::days(i64::from(date.weekday().num_days_from_monday()));
+                (
+                    format!("{}-W{:02}", week.year(), week.week()),
+                    monday.to_string(),
+                )
+            }
+            "month" => (
+                format!("{}-{:02}", date.year(), date.month()),
+                format!("{}-{:02}-01", date.year(), date.month()),
+            ),
+            _ => continue,
+        };
+        let bucket = buckets
+            .entry(key.clone())
+            .or_insert_with(|| QueryTimeBucket {
+                date: bucket_date,
+                label: key,
+                count: 0,
+                resolved: 0,
+            });
+        bucket.count += u64::from(point.tickets);
+        bucket.resolved += u64::from(point.resolved);
+    }
+    buckets.into_values().collect()
+}
+
+fn metric_query_rows(buckets: &[MetricBucket]) -> Vec<Value> {
+    buckets
+        .iter()
+        .map(|bucket| {
+            json!({
+                "key": bucket.id,
+                "label": bucket.label,
+                "count": bucket.tickets,
+                "tickets": bucket.tickets,
+                "change_abs": bucket.change_abs,
+                "change_pct": bucket.change_pct,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn build_query_intent_result(
+    query: &QueryIntentRequest,
+    filters: &AnalyticsQuery,
+    report: &AnalyticsResponse,
+    forecast: Option<&ForecastResponse>,
+) -> Result<Value, String> {
+    let intent = validate_query_intent(query)?;
+    let grouping = resolved_query_grouping(&intent, query.group_by.as_deref())?;
+    let total = report
+        .overview
+        .get("total_tickets")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .max(0);
+    let previous_total = report
+        .overview
+        .get("previous_total_tickets")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .max(0);
+    let range = filters.range.as_deref().unwrap_or("30d");
+    let range_days = range
+        .strip_suffix('d')
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(30);
+    let generated_at = DateTime::parse_from_rfc3339(&report.generated_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| format!("invalid analytics generated_at: {error}"))?;
+    let period_start = generated_at - Duration::days(range_days);
+    let comparison_start = period_start - Duration::days(range_days);
+    let time_buckets = query_time_buckets(&report.time_series, grouping);
+
+    let forecast = if intent == "forecast" {
+        Some(forecast.ok_or_else(|| "forecast result is unavailable".to_owned())?)
+    } else {
+        None
+    };
+    let mut rows = match intent.as_str() {
+        "count" if grouping == "region" => metric_query_rows(&report.by_region),
+        "count" if grouping == "topic" => metric_query_rows(&report.by_topic),
+        "count" if matches!(grouping, "day" | "week" | "month") => time_buckets
+            .iter()
+            .map(|bucket| {
+                json!({"date": bucket.date, "period": bucket.label, "label": bucket.label, "count": bucket.count, "tickets": bucket.count})
+            })
+            .collect(),
+        "count" => vec![json!({
+            "period": range,
+            "label": range,
+            "count": total,
+            "tickets": total,
+        })],
+        "trend" => time_buckets
+            .iter()
+            .map(|bucket| {
+                json!({"date": bucket.date, "period": bucket.label, "label": bucket.label, "count": bucket.count, "tickets": bucket.count, "resolved": bucket.resolved})
+            })
+            .collect(),
+        "compare_regions" => metric_query_rows(&report.by_region),
+        "top_topics" => metric_query_rows(&report.by_topic),
+        "spikes" => time_buckets
+            .windows(2)
+            .filter(|window| {
+                window[1].count >= QUERY_SPIKE_MIN_COUNT
+                    && (window[1].count as f64)
+                        > window[0].count as f64 * QUERY_SPIKE_MIN_RATIO
+            })
+            .map(|window| {
+                json!({
+                    "date": window[1].date,
+                    "period": window[1].label,
+                    "label": window[1].label,
+                    "count": window[1].count,
+                    "baseline": window[0].count,
+                    "deviation": window[1].count as i64 - window[0].count as i64,
+                    "is_spike": true,
+                })
+            })
+            .collect(),
+        "forecast" => forecast
+            .expect("forecast presence was validated")
+            .points
+            .iter()
+            .map(|point| {
+                json!({"date": point.date, "period": point.date, "label": point.date, "count": point.tickets, "tickets": point.tickets})
+            })
+            .collect(),
+        _ => return Err(format!("unsupported QueryIntent: {intent}")),
+    };
+    let matching_row_count = rows.len();
+    if let Some(limit) = query.limit {
+        rows.truncate(limit);
+    }
+
+    let mut series = if intent == "spikes" {
+        time_buckets
+            .iter()
+            .enumerate()
+            .map(|(index, bucket)| {
+                let baseline = index
+                    .checked_sub(1)
+                    .and_then(|previous| time_buckets.get(previous))
+                    .map(|previous| previous.count);
+                let is_spike = baseline.is_some_and(|baseline| {
+                    bucket.count >= QUERY_SPIKE_MIN_COUNT
+                        && (bucket.count as f64) > baseline as f64 * QUERY_SPIKE_MIN_RATIO
+                });
+                json!({
+                    "date": bucket.date,
+                    "label": bucket.label,
+                    "count": bucket.count,
+                    "baseline": baseline,
+                    "is_spike": is_spike,
+                })
+            })
+            .collect()
+    } else {
+        rows.clone()
+    };
+    if let Some(forecast) = forecast {
+        series = forecast
+            .history
+            .iter()
+            .map(|point| {
+                json!({"date": point.date, "label": point.date, "count": point.tickets, "segment": "history"})
+            })
+            .chain(forecast.points.iter().map(|point| {
+                json!({"date": point.date, "label": point.date, "count": point.tickets, "segment": "forecast"})
+            }))
+            .collect();
+    }
+
+    let (number, summary_label, summary_text) = if let Some(forecast) = forecast {
+        let predicted_total = forecast
+            .points
+            .iter()
+            .map(|point| i64::from(point.tickets))
+            .sum::<i64>();
+        let value = if forecast.insufficient_history {
+            Value::Null
+        } else {
+            json!(predicted_total)
+        };
+        (
+            value,
+            "Ожидаемый объём".to_owned(),
+            if forecast.insufficient_history {
+                format!(
+                    "Недостаточно истории для прогноза на {} дней.",
+                    forecast.horizon_days
+                )
+            } else {
+                format!(
+                    "Ожидаемый объём за {} дней по модели {}.",
+                    forecast.horizon_days, forecast.model
+                )
+            },
+        )
+    } else if intent == "spikes" {
+        let count = matching_row_count;
+        (
+            json!(count),
+            "Периоды необычного роста".to_owned(),
+            format!("Найдено {count} периодов по сравнению с предыдущим равным интервалом."),
+        )
+    } else {
+        (
+            json!(total),
+            "Обращения в текущем срезе".to_owned(),
+            format!("{total} обращений за {range} по выбранным фильтрам."),
+        )
+    };
+    let comparison_change = total - previous_total;
+    let comparison = json!({
+        "type": "previous_equal_length_period",
+        "current_total": total,
+        "previous_total": previous_total,
+        "change_abs": comparison_change,
+        "change_pct": report.overview.get("change_pct").cloned().unwrap_or(Value::Null),
+        "current_start": period_start.to_rfc3339(),
+        "current_end": generated_at.to_rfc3339(),
+        "previous_start": comparison_start.to_rfc3339(),
+        "previous_end": period_start.to_rfc3339(),
+    });
+    let grouping_label = match grouping {
+        "none" => "без группировки",
+        "region" => "регион",
+        "topic" => "тема",
+        "day" => "день",
+        "week" => "неделя",
+        "month" => "месяц",
+        _ => "не задано",
+    };
+    let columns: Vec<Value> = match intent.as_str() {
+        "compare_regions" => vec![
+            json!({"key":"label","label":"Регион"}),
+            json!({"key":"count","label":"Обращения"}),
+            json!({"key":"change_abs","label":"Изменение"}),
+            json!({"key":"change_pct","label":"Изменение, %"}),
+        ],
+        "top_topics" => vec![
+            json!({"key":"label","label":"Тема"}),
+            json!({"key":"count","label":"Обращения"}),
+            json!({"key":"change_abs","label":"Изменение"}),
+            json!({"key":"change_pct","label":"Изменение, %"}),
+        ],
+        "spikes" => vec![
+            json!({"key":"label","label":"Период"}),
+            json!({"key":"count","label":"Обращения"}),
+            json!({"key":"baseline","label":"Предыдущий период"}),
+            json!({"key":"deviation","label":"Разница"}),
+        ],
+        "forecast" => vec![
+            json!({"key":"date","label":"Дата"}),
+            json!({"key":"count","label":"Ожидаемые обращения"}),
+        ],
+        _ => vec![
+            json!({"key":"label","label":"Период"}),
+            json!({"key":"count","label":"Обращения"}),
+            json!({"key":"resolved","label":"Закрыто"}),
+        ],
+    };
+    let chart_type = if matches!(intent.as_str(), "trend" | "spikes" | "forecast")
+        || (intent == "count" && matches!(grouping, "day" | "week" | "month"))
+    {
+        "line"
+    } else {
+        "bar"
+    };
+    let horizon = forecast.map(|value| value.horizon_days);
+    let chart_boundary = forecast.and_then(|value| value.forecast_start.clone());
+    let filters_json = json!({
+        "region_id": filters.region_id,
+        "topic_id": filters.topic_id,
+        "service_id": filters.service_id,
+        "status": filters.status,
+        "district": filters.district,
+        "channel": filters.channel,
+        "range": range,
+    });
+    let interpreted_filters = json!({
+        "region_id": filters.region_id,
+        "topic_id": filters.topic_id,
+        "service_id": filters.service_id,
+        "status": filters.status,
+        "district": filters.district,
+        "channel": filters.channel,
+        "range": range,
+        "group_by": grouping,
+        "limit": query.limit,
+        "horizon_days": horizon,
+    });
+    Ok(json!({
+        "intent": intent,
+        "summary": {"label": summary_label, "value": number, "text": summary_text},
+        "number": number,
+        "rows": rows,
+        "table": rows,
+        "table_columns": columns,
+        "series": series,
+        "chart": {
+            "type": chart_type,
+            "x": if grouping == "day" { "date" } else { "label" },
+            "y": "count",
+            "title": summary_label,
+            "forecast_start": chart_boundary,
+        },
+        "filters": filters_json,
+        "interpreted_filters": interpreted_filters,
+        "period": {
+            "range": range,
+            "days": range_days,
+            "start": period_start.to_rfc3339(),
+            "end": generated_at.to_rfc3339(),
+        },
+        "grouping": grouping_label,
+        "comparison": comparison,
+        "comparison_definition": if intent == "spikes" {
+            format!("Текущий период сравнивается с предыдущим равным периодом. Всплеск: не менее {QUERY_SPIKE_MIN_COUNT} обращений и объём выше предыдущего периода более чем в {QUERY_SPIKE_MIN_RATIO} раза.")
+        } else {
+            "Текущий период сопоставляется с предыдущим периодом такой же длительности; для регионов и тем также показано изменение по группам.".to_owned()
+        },
+        "generated_at": report.generated_at,
+        "source": forecast.map(|value| value.source.as_str()).unwrap_or(&report.source),
+        "forecast_status": forecast.map(|value| value.status.as_str()),
+        "forecast_insufficient_history": forecast.map(|value| value.insufficient_history),
+        "forecast_start": forecast.and_then(|value| value.forecast_start.clone()),
+        "forecast_model_version": forecast.map(|value| value.model_version.as_str()),
+        "forecast_model": forecast.map(|value| value.model.as_str()),
+        "forecast_horizon_days": horizon,
+        "forecast_history": forecast.map(|value| &value.history),
+        "forecast_points": forecast.map(|value| &value.points),
+        "expected_peaks": forecast.map(|value| &value.expected_peaks),
+        "backtest": forecast.map(|value| &value.backtest),
+    }))
+}
+
 /// Execute a deliberately small allow-listed analytics language.  The public
 /// endpoint accepts an intent object, never SQL, so an optional LLM adapter can
 /// only propose parameters that Core validates before reading the store.
@@ -3976,25 +4501,14 @@ async fn analytics_query(
 ) -> Result<Json<Value>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
     let mut query = query;
-    let intent = resolved_query_intent(&query).ok_or_else(|| {
-        ApiError::BadRequest(
-            "QueryIntent must provide intent or text for count, trend, compare_regions, top_topics, spikes or forecast".to_owned(),
-        )
-    })?;
+    let intent = validate_query_intent(&query).map_err(ApiError::BadRequest)?;
     query.intent = Some(intent.clone());
-    let allowed = [
-        "count",
-        "trend",
-        "compare",
-        "compare_regions",
-        "top_topics",
-        "spikes",
-        "forecast",
-    ];
-    if !allowed.contains(&intent.as_str()) {
-        return Err(ApiError::BadRequest(format!(
-            "unsupported QueryIntent: {intent}"
-        )));
+    query.text = None;
+    let filters = query_analytics_filters(&query).map_err(ApiError::BadRequest)?;
+    if state.repository().is_none() && (filters.district.is_some() || filters.channel.is_some()) {
+        return Err(ApiError::BadRequest(
+            "district and channel filters are unavailable in the memory demo source".to_owned(),
+        ));
     }
     if let Some(repository) = state.repository() {
         return repository
@@ -4004,102 +4518,28 @@ async fn analytics_query(
             .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
-    let region_id = query.region_id.clone().or_else(|| {
-        query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.region_id.clone())
-    });
-    let topic_id = query.topic_id.clone().or_else(|| {
-        query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.topic_id.clone())
-    });
-    let range = query.range.clone().or_else(|| {
-        query
-            .filters
-            .as_ref()
-            .and_then(|filters| filters.range.clone())
-    });
-    let intent = if intent == "compare" {
-        "compare_regions".to_owned()
+    let report = memory_analytics_response(&store, &filters)?;
+    let forecast = if intent == "forecast" {
+        Some(memory_forecast_response(
+            &store,
+            &ForecastQuery {
+                horizon: Some(query.horizon_days.unwrap_or(30)),
+                horizon_days: None,
+                region_id: filters.region_id.clone(),
+                topic_id: filters.topic_id.clone(),
+                service_id: filters.service_id.clone(),
+                status: filters.status.clone(),
+                district: filters.district.clone(),
+                channel: filters.channel.clone(),
+            },
+            query.horizon_days.unwrap_or(30),
+        )?)
     } else {
-        intent
+        None
     };
-    let filtered = store.tickets.values().filter(|ticket| {
-        region_id
-            .as_deref()
-            .is_none_or(|value| ticket.region_id == value)
-            && topic_id
-                .as_deref()
-                .is_none_or(|value| ticket.topic_id == value)
-    });
-    let total = filtered.count();
-    let rows = if matches!(intent.as_str(), "compare_regions" | "top_topics") {
-        let buckets = if intent == "compare_regions" {
-            store
-                .regions
-                .iter()
-                .map(|region| {
-                    let count = store
-                        .tickets
-                        .values()
-                        .filter(|ticket| ticket.region_id == region.id)
-                        .count();
-                    json!({"key": region.id, "label": region.name, "count": count})
-                })
-                .collect::<Vec<_>>()
-        } else {
-            store
-                .topics
-                .iter()
-                .map(|topic| {
-                    let count = store
-                        .tickets
-                        .values()
-                        .filter(|ticket| ticket.topic_id == topic.id)
-                        .count();
-                    json!({"key": topic.id, "label": topic.label, "count": count})
-                })
-                .collect::<Vec<_>>()
-        };
-        buckets
-    } else {
-        vec![json!({
-            "period": range.clone().unwrap_or_else(|| "7d".to_owned()),
-            "count": total,
-        })]
-    };
-    let rows = if let Some(limit) = query.limit {
-        rows.into_iter()
-            .take(limit.clamp(1, 100))
-            .collect::<Vec<_>>()
-    } else {
-        rows
-    };
-    Ok(Json(json!({
-        "intent": intent,
-        "filters": {
-            "region_id": region_id,
-            "topic_id": topic_id,
-            "range": range.unwrap_or_else(|| "7d".to_owned()),
-        },
-        "number": total,
-        "rows": rows.clone(),
-        "table": rows.clone(),
-        "series": rows,
-        "chart": {
-            "type": if intent == "trend" { "line" } else { "bar" },
-            "x": "label",
-            "y": "count",
-        },
-        "interpreted_filters": {
-            "group_by": query.group_by,
-            "limit": query.limit,
-        },
-        "source": "deterministic-demo",
-    })))
+    let result = build_query_intent_result(&query, &filters, &report, forecast.as_ref())
+        .map_err(ApiError::Internal)?;
+    Ok(Json(result))
 }
 
 fn crc32(bytes: &[u8]) -> u32 {
@@ -6605,7 +7045,48 @@ mod tests {
         assert_eq!(value["filters"]["region_id"], "R01");
         assert!(value["table"].as_array().is_some());
 
+        for (question, expected_intent) in [
+            ("Сколько обращений за последние 30 дней?", "count"),
+            ("Покажи динамику обращений за 30 дней", "trend"),
+            ("Сравни обращения по регионам", "compare_regions"),
+            ("Топ тем обращений", "top_topics"),
+            ("Найди всплески обращений", "spikes"),
+            ("Прогноз обращений на 30 дней", "forecast"),
+        ] {
+            let mut payload = json!({"text": question, "range": "30d", "limit": 8});
+            if expected_intent == "forecast" {
+                payload["horizon_days"] = json!(30);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/analytics/query")
+                        .header("content-type", "application/json")
+                        .header("x-pulse-role", "MANAGER")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{question}");
+            let value = body_json(response).await;
+            assert_eq!(value["intent"], expected_intent, "{question}");
+            assert!(value["summary"]["text"].as_str().is_some(), "{question}");
+            assert!(value["table"].as_array().is_some(), "{question}");
+            assert!(value["table_columns"].as_array().is_some(), "{question}");
+            assert!(value["series"].as_array().is_some(), "{question}");
+            assert!(value["chart"]["type"].as_str().is_some(), "{question}");
+            assert_eq!(value["filters"]["range"], "30d", "{question}");
+            assert_eq!(value["period"]["days"], 30, "{question}");
+            assert!(
+                value["comparison_definition"].as_str().is_some(),
+                "{question}"
+            );
+            assert!(value["source"].as_str().is_some(), "{question}");
+        }
+
         let response = app
+            .clone()
             .oneshot(
                 Request::post("/api/v1/analytics/query")
                     .header("content-type", "application/json")
@@ -6616,6 +7097,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        for invalid_payload in [
+            r#"{"intent":"count","filters":{"region_id":"R01","unexpected":"x"}}"#,
+            r#"{"intent":"count","region_id":"R01","filters":{"region_id":"R02"}}"#,
+            r#"{"intent":"trend","group_by":"district"}"#,
+            r#"{"intent":"count","range":"0d"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/analytics/query")
+                        .header("content-type", "application/json")
+                        .header("x-pulse-role", "MANAGER")
+                        .body(Body::from(invalid_payload))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+                ),
+                "unexpected status {} for {invalid_payload}",
+                response.status()
+            );
+        }
     }
 
     #[tokio::test]
