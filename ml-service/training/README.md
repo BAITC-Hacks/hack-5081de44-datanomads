@@ -125,6 +125,31 @@ HF_HUB_OFFLINE=1 .venv/bin/python ml-service/train_classifier.py \
   --output-dir ml-service/artifacts/classifier-reviewed-v1
 ```
 
+Use `--input-length-strategy head-tail` with either `--max-length 384` or
+`--max-length 512` to keep tokens from both ends of a long appeal. The default
+is `head`. Run the four combinations (`head` and `head-tail` at 384 and 512)
+with `--validation-only` into separate output directories. Those runs leave
+`metrics.test=null` and cannot be packaged as evaluated candidates. Compare
+their validation metrics, fix the chosen configuration, then run that
+configuration once without `--validation-only` for frozen-test reporting.
+The token audit alone cannot select a strategy. The selected strategy is stored
+in the model manifest and applied by offline feedback retraining and runtime
+inference as well.
+
+```bash
+.venv/bin/python scripts/compare_classifier_input_strategies.py \
+  --artifact /path/to/head-384-selection \
+  --artifact /path/to/head-tail-384-selection \
+  --artifact /path/to/head-512-selection \
+  --artifact /path/to/head-tail-512-selection \
+  --output data/processed/reports/input-strategy-comparison.json
+```
+
+The comparison checks shared dataset, tokenizer audit, base model and training
+settings, verifies model weight checksums, and reports only validation scores.
+It picks the highest validation macro-F1; ties prefer 384 tokens, then `head`.
+The report recommends a configuration, not a model promotion.
+
 The output directory must be new and outside the dataset package. The trainer
 uses only local model files in reviewed mode. Current reviewed package schema
 is synthetic; its holdout metrics are not real-citizen quality evidence. This

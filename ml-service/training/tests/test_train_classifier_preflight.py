@@ -57,8 +57,11 @@ class TrainClassifierPreflightTests(unittest.TestCase):
             self.assertEqual(loaded_manifest.content_sha256, manifest.content_sha256)
             self.assertTrue(base_checksum.startswith("sha256:"))
             self.assertEqual({row["topic_id"] for row in splits["train"]}, set(LABELS))
+            load_reviewed_splits(package, audit_path, base_model, 384, "head-tail")
             with self.assertRaisesRegex(ValueError, "max-length"):
                 load_reviewed_splits(package, audit_path, base_model, 96)
+            with self.assertRaisesRegex(ValueError, "input strategy"):
+                load_reviewed_splits(package, audit_path, base_model, 384, "unsupported")
 
             audit["dataset_content_sha256"] = "sha256:" + "0" * 64
             audit_path.write_text(json.dumps(audit), encoding="utf-8")

@@ -7,8 +7,8 @@ import sys
 import tempfile
 import unittest
 
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import AutoTokenizer, PreTrainedTokenizerFast, XLMRobertaConfig, XLMRobertaForSequenceClassification
+from tokenizers import Tokenizer, models, pre_tokenizers, processors
+from transformers import AutoTokenizer, XLMRobertaConfig, XLMRobertaForSequenceClassification, XLMRobertaTokenizerFast
 
 from app.trained_classifier import TrainedClassifierService
 from train_classifier import LABELS
@@ -39,8 +39,10 @@ class FeedbackTrainerTests(unittest.TestCase):
             production.mkdir()
             raw_tokenizer = Tokenizer(models.WordLevel({"[PAD]": 0, "[UNK]": 1, "<s>": 2, "</s>": 3}, unk_token="[UNK]"))
             raw_tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-            tokenizer = PreTrainedTokenizerFast(tokenizer_object=raw_tokenizer, unk_token="[UNK]",
-                                                pad_token="[PAD]", bos_token="<s>", eos_token="</s>")
+            raw_tokenizer.post_processor = processors.TemplateProcessing(
+                single="<s> $A </s>", special_tokens=[("<s>", 2), ("</s>", 3)])
+            tokenizer = XLMRobertaTokenizerFast(tokenizer_object=raw_tokenizer, unk_token="[UNK]",
+                                                pad_token="[PAD]", cls_token="<s>", sep_token="</s>")
             tokenizer.save_pretrained(production)
             config = XLMRobertaConfig(vocab_size=4, hidden_size=16, intermediate_size=32,
                                       num_hidden_layers=1, num_attention_heads=2,
@@ -54,7 +56,7 @@ class FeedbackTrainerTests(unittest.TestCase):
                 "frozen_evaluation_version": "eval_v1",
                 "created_at": "2026-09-27T00:00:00Z", "metrics": {"status": "reviewed_synthetic_holdout_only"},
                 "languages": ["RU", "KZ", "MIXED"], "labels": list(LABELS),
-                "training_config": {"max_length": 32, "temperature": 1.0, "input_length_strategy": "head-32"},
+                "training_config": {"max_length": 32, "temperature": 1.0, "input_length_strategy": "head-tail-32"},
                 "artifact_checksum": checksum(production / "model.safetensors"),
             }), encoding="utf-8")
             output = root / "candidate"
@@ -68,6 +70,7 @@ class FeedbackTrainerTests(unittest.TestCase):
             self.assertEqual(candidate.classify("Проверка модели.").needs_review, True)
             self.assertFalse(candidate.confidence_policy.confident_enabled)
             self.assertEqual(candidate.metadata.dataset_version, "candidate_v1")
+            self.assertEqual(candidate.input_length_strategy, "head-tail-32")
             self.assertEqual(candidate.metadata.model_extra["base_model_artifact_checksum"],
                              checksum(production / "model.safetensors"))
             production_tokens = AutoTokenizer.from_pretrained(production, local_files_only=True)("Проверка модели.")

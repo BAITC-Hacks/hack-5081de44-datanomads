@@ -11,6 +11,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from transformers import AutoTokenizer
 
+from app.classifier_input import encode_classifier_texts
 from app.schemas import ModelMetadata
 from app.trained_classifier import TrainedClassifierService
 from training.classifier_baselines import evaluate_predictions, load_verified_classifier_package
@@ -72,10 +73,13 @@ def compare_classifiers(package: Path, production_dir: Path, candidate_dir: Path
         for name, path in (("production", production_dir), ("candidate", candidate_dir))
     }
     max_length = production.training_config["max_length"]
+    strategy = production.training_config["input_length_strategy"]
     for row in rows:
-        encoded = [tokenizer(row["text"], truncation=True, max_length=max_length)
+        encoded = [encode_classifier_texts(tokenizer, [row["text"]], max_length=max_length,
+                                           strategy=strategy, pad_to_max_length=False)
                    for tokenizer in tokenizers.values()]
-        if dict(encoded[0]) != dict(encoded[1]):
+        if (encoded[0].keys() != encoded[1].keys() or
+                any(not torch.equal(encoded[0][key], encoded[1][key]) for key in encoded[0])):
             raise ValueError("classifier tokenization differs on frozen evaluation text")
     del tokenizers
 

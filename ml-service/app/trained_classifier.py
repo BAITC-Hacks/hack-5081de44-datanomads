@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from .classifier_input import encode_classifier_texts
 from .confidence import ConfidencePolicy
 from .constants import TOPIC_BY_ID
 from .schemas import Alternative, Classification, ModelMetadata
@@ -19,6 +20,8 @@ class TrainedClassifierService:
     def __init__(self, model_dir: Path) -> None:
         metadata_path = model_dir / "manifest.json"
         self.metadata = ModelMetadata.model_validate(json.loads(metadata_path.read_text(encoding="utf-8")))
+        if self.metadata.metrics.get("status") == "validation_only":
+            raise ValueError("validation-only classifier artifact cannot serve predictions")
         if set(self.metadata.labels) != set(TOPIC_BY_ID) - {"other"}:
             raise ValueError("classifier artifact labels do not match the canonical taxonomy")
         model_file = model_dir / "model.safetensors"
@@ -29,6 +32,10 @@ class TrainedClassifierService:
 
         self.model_version = self.metadata.model_version
         self.max_length = int(self.metadata.training_config["max_length"])
+        self.input_length_strategy = self.metadata.training_config.get(
+            "input_length_strategy", f"head-{self.max_length}")
+        if self.input_length_strategy not in (f"head-{self.max_length}", f"head-tail-{self.max_length}"):
+            raise ValueError("classifier artifact has unsupported input length strategy")
         self.temperature = float(self.metadata.training_config["temperature"])
         if self.temperature < 1.0:
             raise ValueError("classifier temperature must be at least 1")
@@ -43,7 +50,8 @@ class TrainedClassifierService:
     @torch.inference_mode()
     def classify(self, text: str, language: str | None = None, top_k: int = 3) -> Classification:
         detected = detect_language(text, language)
-        encoded = self.tokenizer(text, truncation=True, max_length=self.max_length, return_tensors="pt")
+        encoded = encode_classifier_texts(self.tokenizer, [text], max_length=self.max_length,
+                                          strategy=self.input_length_strategy, pad_to_max_length=False)
         logits = self.model(**{key: value.to(self.device) for key, value in encoded.items()}).logits[0]
         probabilities = torch.softmax(logits.float() / self.temperature, dim=-1)
         values, indices = probabilities.topk(min(top_k, len(self.metadata.labels)))

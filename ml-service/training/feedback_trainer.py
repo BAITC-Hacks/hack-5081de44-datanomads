@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from app.confidence import POLICY_VERSION
+from app.classifier_input import encode_classifier_texts
 from app.trained_classifier import TrainedClassifierService
 from training.dataset_builder import checksum
 from training.feedback_dataset import ID_RE, load_verified_candidate
@@ -58,8 +59,9 @@ def train_feedback_candidate(
     tokenizer = production.tokenizer
     model = production.model
     device = production.device
-    encoded = tokenizer([sample.text for sample in samples], padding="max_length", truncation=True,
-                        max_length=max_length, return_tensors="pt")
+    encoded = encode_classifier_texts(tokenizer, [sample.text for sample in samples],
+                                      max_length=max_length, strategy=production.input_length_strategy,
+                                      pad_to_max_length=True)
     labels = torch.tensor([base.labels.index(sample.topic_id) for sample in samples], dtype=torch.long)
     loader = DataLoader(TensorDataset(encoded["input_ids"], encoded["attention_mask"], labels),
                         batch_size=batch_size, shuffle=True)
@@ -110,7 +112,7 @@ def train_feedback_candidate(
                 "learning_rate": learning_rate,
                 "seed": seed,
                 "max_length": max_length,
-                "input_length_strategy": base.training_config.get("input_length_strategy", f"head-{max_length}"),
+                "input_length_strategy": production.input_length_strategy,
                 "temperature": 1.0,
                 "feedback_candidate": True,
                 "train_samples": len(samples),

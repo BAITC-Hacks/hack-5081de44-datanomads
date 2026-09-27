@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
+import tempfile
 
 import torch
 
@@ -9,6 +11,7 @@ from app.confidence import ConfidencePolicy, POLICY_VERSION
 from app.schemas import ModelMetadata
 from app.trained_classifier import TrainedClassifierService
 from train_classifier import confidence_state_report, select_confidence_policy
+from test_classifier_input import toy_tokenizer
 
 
 def metadata(*, enabled: bool, status: str) -> ModelMetadata:
@@ -27,12 +30,20 @@ def metadata(*, enabled: bool, status: str) -> ModelMetadata:
 
 
 class ConfidencePolicyTests(unittest.TestCase):
+    def test_validation_only_artifact_cannot_serve(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = metadata(enabled=False, status="validation_only")
+            (Path(directory) / "manifest.json").write_text(manifest.model_dump_json(), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "validation-only"):
+                TrainedClassifierService(Path(directory))
+
     def test_runtime_uncertain_returns_two_alternatives(self) -> None:
         service = TrainedClassifierService.__new__(TrainedClassifierService)
         service.metadata = metadata(enabled=False, status="synthetic_holdout_only")
         service.metadata.labels = ["roads", "water_supply", "electricity"]
         service.model_version = "classifier-test"
         service.max_length = 16
+        service.input_length_strategy = "head-16"
         service.temperature = 1.0
         service.device = torch.device("cpu")
         service.confidence_policy = ConfidencePolicy.from_metadata(service.metadata)
@@ -42,6 +53,27 @@ class ConfidencePolicyTests(unittest.TestCase):
         self.assertEqual(result.confidence_state, "UNCERTAIN")
         self.assertEqual(len(result.alternatives), 2)
         self.assertTrue(result.needs_review)
+
+    def test_runtime_uses_artifact_head_tail_strategy(self) -> None:
+        service = TrainedClassifierService.__new__(TrainedClassifierService)
+        service.metadata = metadata(enabled=False, status="synthetic_holdout_only")
+        service.metadata.labels = ["roads", "water_supply", "electricity"]
+        service.model_version = "classifier-test"
+        service.max_length = 8
+        service.input_length_strategy = "head-tail-8"
+        service.temperature = 1.0
+        service.device = torch.device("cpu")
+        service.confidence_policy = ConfidencePolicy.from_metadata(service.metadata)
+        service.tokenizer = toy_tokenizer()
+        observed = {}
+
+        def predict(**inputs):
+            observed["input_ids"] = inputs["input_ids"].tolist()
+            return SimpleNamespace(logits=torch.tensor([[2.0, 1.0, 0.0]]))
+
+        service.model = predict
+        service.classify(" ".join(f"w{index}" for index in range(10)), language="RU")
+        self.assertEqual(observed["input_ids"], [[2, 4, 5, 6, 11, 12, 13, 3]])
 
     def test_validation_selects_candidate_but_synthetic_stays_in_review(self) -> None:
         logits = torch.tensor([[3.0, 0.0]] * 20 + [[0.0, 3.0]] * 20)

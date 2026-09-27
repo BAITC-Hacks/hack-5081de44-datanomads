@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 import weakref
 
+import torch
+
 from training.classifier_baselines import load_verified_classifier_package
 from training.classifier_pair_eval import compare_classifiers
 from training.dataset_builder import build_package, checksum
@@ -62,8 +64,9 @@ class ClassifierPairEvaluationTests(unittest.TestCase):
                     def __init__(self, offset: int):
                         self.offset = offset
 
-                    def __call__(self, text: str, **kwargs):
-                        return {"input_ids": [len(text) + self.offset], "attention_mask": [1]}
+                    def __call__(self, texts: list[str], **kwargs):
+                        return {"input_ids": torch.tensor([[len(texts[0]) + self.offset]]),
+                                "attention_mask": torch.tensor([[1]])}
 
                 def load_classifier(path: Path):
                     self.assertEqual(active[0], 0, "both classifiers were held in memory")

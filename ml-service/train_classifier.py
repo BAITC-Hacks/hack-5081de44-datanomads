@@ -23,6 +23,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from app.constants import TOPICS
 from app.confidence import ConfidencePolicy, POLICY_VERSION
+from app.classifier_input import encode_classifier_texts
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum as file_checksum
 
@@ -59,7 +60,8 @@ def validate_splits(splits: dict[str, list[dict[str, str]]]) -> None:
         seen_texts.update(texts)
 
 
-def load_reviewed_splits(package: Path, audit_path: Path, base_model: Path, max_length: int):
+def load_reviewed_splits(package: Path, audit_path: Path, base_model: Path, max_length: int,
+                         input_length_strategy: str = "head"):
     if not base_model.is_dir():
         raise ValueError("reviewed training requires a local base-model directory")
     weights = base_model / "model.safetensors"
@@ -67,6 +69,8 @@ def load_reviewed_splits(package: Path, audit_path: Path, base_model: Path, max_
         raise ValueError("reviewed training requires local safetensors base weights")
     if max_length not in (384, 512):
         raise ValueError("reviewed training requires max-length 384 or 512")
+    if input_length_strategy not in ("head", "head-tail"):
+        raise ValueError("reviewed training requires head or head-tail input strategy")
     manifest, splits = load_verified_classifier_package(package)
     if any({row["topic_id"] for row in rows} != set(LABELS) for rows in splits.values()):
         raise ValueError("reviewed classifier requires all canonical runtime labels in every split")
@@ -79,19 +83,17 @@ def load_reviewed_splits(package: Path, audit_path: Path, base_model: Path, max_
             audit.get("frozen_evaluation_version") != manifest.frozen_evaluation_version or
             audit.get("tokenizer_file_checksums") != expected_checksums or
             audit.get("test_token_lengths_computed") is not False or
-            f"head-{max_length}" not in audit.get("strategies_to_evaluate", [])):
+            f"{input_length_strategy}-{max_length}" not in audit.get("strategies_to_evaluate", [])):
         raise ValueError("token length audit does not match reviewed dataset and local tokenizer")
     return manifest, splits, file_checksum(weights)
 
 
-def make_loader(rows: list[dict[str, str]], tokenizer, batch_size: int, max_length: int, shuffle: bool) -> DataLoader:
-    encoded = tokenizer(
-        [row["text"] for row in rows],
-        padding="max_length",
-        truncation=True,
-        max_length=max_length,
-        return_tensors="pt",
-    )
+def make_loader(rows: list[dict[str, str]], tokenizer, batch_size: int, max_length: int,
+                shuffle: bool, input_length_strategy: str = "head") -> DataLoader:
+    encoded = encode_classifier_texts(tokenizer, [row["text"] for row in rows],
+                                      max_length=max_length,
+                                      strategy=f"{input_length_strategy}-{max_length}",
+                                      pad_to_max_length=True)
     labels = torch.tensor([LABELS.index(row["topic_id"]) for row in rows], dtype=torch.long)
     dataset = TensorDataset(encoded["input_ids"], encoded["attention_mask"], labels)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, pin_memory=torch.cuda.is_available())
@@ -277,6 +279,9 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=96)
+    parser.add_argument("--input-length-strategy", choices=("head", "head-tail"), default="head")
+    parser.add_argument("--validation-only", action="store_true",
+                        help="select a training configuration without evaluating the frozen test")
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     args = parser.parse_args()
     if args.epochs < 1 or args.batch_size < 1 or args.max_length < 16:
@@ -293,6 +298,7 @@ def main() -> None:
         try:
             reviewed_manifest, splits, base_model_checksum = load_reviewed_splits(
                 args.reviewed_dataset, args.token_audit, Path(args.base_model), args.max_length,
+                args.input_length_strategy,
             )
         except (OSError, ValueError, KeyError, TypeError) as error:
             parser.error(f"reviewed dataset preflight failed: {error}")
@@ -327,9 +333,13 @@ def main() -> None:
         id2label={index: label for index, label in enumerate(LABELS)},
         label2id={label: index for index, label in enumerate(LABELS)},
     ).to(device)
-    train_loader = make_loader(splits["train"], tokenizer, args.batch_size, args.max_length, True)
-    validation_loader = make_loader(splits["validation"], tokenizer, args.batch_size * 2, args.max_length, False)
-    test_loader = make_loader(splits["test"], tokenizer, args.batch_size * 2, args.max_length, False)
+    train_loader = make_loader(splits["train"], tokenizer, args.batch_size, args.max_length,
+                               True, args.input_length_strategy)
+    validation_loader = make_loader(splits["validation"], tokenizer, args.batch_size * 2,
+                                    args.max_length, False, args.input_length_strategy)
+    test_loader = (None if args.validation_only else
+                   make_loader(splits["test"], tokenizer, args.batch_size * 2, args.max_length,
+                               False, args.input_length_strategy))
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -378,16 +388,20 @@ def main() -> None:
         best_validation["confidence_states"] = confidence_state_report(
             validation_logits, splits["validation"], temperature, confidence_policy,
         )
-        test = evaluate(model, test_loader, splits["test"], device)
-        test_logits, test_labels = collect_logits(model, test_loader, device)
-        test["calibration"] = calibration_report(test_logits, test_labels, splits["test"], temperature)
-        test["confidence_states"] = confidence_state_report(
-            test_logits, splits["test"], temperature, confidence_policy,
-        )
+        test = None
+        if test_loader is not None:
+            test = evaluate(model, test_loader, splits["test"], device)
+            test_logits, test_labels = collect_logits(model, test_loader, device)
+            test["calibration"] = calibration_report(test_logits, test_labels, splits["test"], temperature)
+            test["confidence_states"] = confidence_state_report(
+                test_logits, splits["test"], temperature, confidence_policy,
+            )
         model_file = artifact_dir / "model.safetensors"
         with model_file.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
-        version = f"classifier-xlm-r-{'reviewed' if args.reviewed_dataset else 'synthetic-v1'}-{checksum[:12]}-t{round(temperature * 10):03d}"
+        version = (f"classifier-xlm-r-{'reviewed' if args.reviewed_dataset else 'synthetic-v1'}-"
+                   f"{'selection-' if args.validation_only else ''}"
+                   f"{args.input_length_strategy}-{args.max_length}-{checksum[:12]}-t{round(temperature * 10):03d}")
         metadata = {
             "model_version": version,
             "model_family": "xlm-roberta-sequence-classification",
@@ -398,7 +412,10 @@ def main() -> None:
             "frozen_evaluation_version": reviewed_manifest.frozen_evaluation_version if args.reviewed_dataset else None,
             "token_audit_sha256": token_audit_checksum if args.reviewed_dataset else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "metrics": {"status": "reviewed_synthetic_holdout_only" if args.reviewed_dataset else "synthetic_holdout_only", "validation": best_validation, "test": test},
+            "metrics": {"status": ("validation_only" if args.validation_only else
+                                   "reviewed_synthetic_holdout_only" if args.reviewed_dataset else
+                                   "synthetic_holdout_only"),
+                        "validation": best_validation, "test": test},
             "confidence_policy_version": POLICY_VERSION,
             "confidence_thresholds": {
                 "low_confidence_below": confidence_policy.low_confidence_below,
@@ -415,7 +432,8 @@ def main() -> None:
                 "learning_rate": args.learning_rate,
                 "temperature": temperature,
                 "seed": seed,
-                "input_length_strategy": f"head-{args.max_length}",
+                "input_length_strategy": f"{args.input_length_strategy}-{args.max_length}",
+                "validation_only": args.validation_only,
                 "reviewed_dataset": bool(args.reviewed_dataset),
                 "train_samples": len(splits["train"]),
                 "train_scenarios": len({row["scenario_id"] for row in splits["train"]}),
@@ -426,7 +444,10 @@ def main() -> None:
         }
         (artifact_dir / "manifest.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         artifact_dir.rename(args.output_dir)
-        print(json.dumps({"stage": "complete", "model_version": version, "validation_macro_f1": best_f1, "test_macro_f1": test["macro_f1"], "test_accuracy": test["accuracy"]}), flush=True)
+        print(json.dumps({"stage": "complete", "model_version": version,
+                          "validation_macro_f1": best_f1,
+                          "test_macro_f1": test["macro_f1"] if test is not None else None,
+                          "test_accuracy": test["accuracy"] if test is not None else None}), flush=True)
 
 
 if __name__ == "__main__":
