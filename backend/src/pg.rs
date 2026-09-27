@@ -10,19 +10,20 @@ use crate::anomaly::{
 };
 use crate::{
     actionable_context_for_candidates, actionable_context_manual_review,
-    actionable_context_needs_candidates, build_query_intent_result, known_routing_value,
-    manual_response_template, metric_rate, query_analytics_filters, related_ticket_candidate,
-    render_template_body, validate_query_intent, ActionableContextOption, Alert, AlertQuery,
-    AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsDrilldownResponse,
+    actionable_context_needs_candidates, build_context_handoff_package, build_query_intent_result,
+    known_routing_value, manual_response_template, metric_rate, query_analytics_filters,
+    related_ticket_candidate, render_template_body, validate_query_intent, ActionableContextOption,
+    Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsDrilldownResponse,
     AnalyticsDrilldownTicket, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
     AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
-    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
-    ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
-    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
-    ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
-    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
-    ResponseTemplatesResponse, RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics,
-    Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    ContextHandoffLocationSource, ContextHandoffPackage, CreateLearningCycleRequest,
+    DatasetProvenance, DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse,
+    ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
+    LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
+    Prediction, QueryIntentRequest, RelationSuggestionSnapshot, ResponseTemplate,
+    ResponseTemplateInput, ResponseTemplateRecord, ResponseTemplatesResponse,
+    RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
+    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
     ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
 };
 use chrono::{DateTime, NaiveDate, Utc};
@@ -745,6 +746,14 @@ struct DbTicket {
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DbContextHandoffLocation {
+    district: Option<String>,
+    address: Option<String>,
+    object: Option<String>,
+    attachment_count: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -2987,6 +2996,43 @@ impl PgRepository {
             prediction,
             latest_decision: decision,
         })
+    }
+
+    pub async fn context_handoff_package(
+        &self,
+        ticket_id: &str,
+    ) -> Result<ContextHandoffPackage, String> {
+        let ticket = self.fetch_ticket(ticket_id).await?;
+        let numeric_id = ticket
+            .id
+            .parse::<i64>()
+            .map_err(|_| "stored ticket has invalid database id".to_owned())?;
+        let decision = self
+            .fetch_latest_decision(numeric_id)
+            .await?
+            .ok_or_else(|| {
+                "an operator decision is required before preparing a handoff".to_owned()
+            })?;
+        let location: DbContextHandoffLocation = sqlx::query_as(
+            "SELECT district, address, object, CASE WHEN jsonb_typeof(attachments) = 'array' THEN jsonb_array_length(attachments) ELSE 0 END::bigint AS attachment_count FROM tickets WHERE id = $1",
+        )
+        .bind(numeric_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("fetch context handoff location: {error}"))?;
+        let attachment_count = usize::try_from(location.attachment_count)
+            .map_err(|_| "stored ticket has invalid attachment count".to_owned())?;
+
+        build_context_handoff_package(
+            &ticket,
+            &decision,
+            ContextHandoffLocationSource {
+                district: location.district,
+                address: location.address,
+                object: location.object,
+                attachment_count,
+            },
+        )
     }
 
     pub async fn get_prediction(&self, ticket_id: &str) -> Result<Prediction, String> {

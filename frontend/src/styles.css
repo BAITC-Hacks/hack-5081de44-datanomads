@@ -322,6 +322,17 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .routing-feedback-record p { margin: 0; color: #9fb2a9; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
 .routing-feedback-error { color: #ff9d9d; font-size: 10px; line-height: 1.45; }
 .routing-feedback-notice { color: #8cf0c8; font-size: 10px; line-height: 1.45; }
+.context-handoff-panel { background: rgba(112,175,255,.025); }
+.handoff-version { color: #90b6e8; font-size: 8px; font-weight: 700; letter-spacing: .07em; }
+.handoff-package { display: grid; gap: 10px; margin-top: 12px; }
+.handoff-fields { display: grid; gap: 7px; margin: 0; }
+.handoff-fields > div { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid rgba(214,236,225,.08); border-radius: 6px; background: rgba(6,17,14,.32); }
+.handoff-fields dt { color: #8b9e95; font-size: 9px; }
+.handoff-fields dd { display: grid; gap: 4px; margin: 0; color: #d2e2d9; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.handoff-fact-group { display: grid; gap: 6px; color: #b8cec2; font-size: 10px; }
+.handoff-fact-group ul { display: grid; gap: 6px; margin: 0; padding-left: 17px; color: #a8bdb2; line-height: 1.5; }
+.handoff-fact-group li { padding-left: 1px; overflow-wrap: anywhere; }
+.handoff-fact-group li small, .handoff-fields dd small { display: block; color: #758c80; font-size: 8px; overflow-wrap: anywhere; }
 .related-ticket-state { display: grid; justify-items: start; gap: 14px; padding: 24px 20px; color: #aabbb3; font-size: 12px; }
 @media (max-width: 720px) {
   .similar-main-column { width: 100%; }

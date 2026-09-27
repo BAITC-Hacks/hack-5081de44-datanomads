@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -193,6 +193,44 @@ interface BackendRoutingFeedbackRecord {
 
 interface BackendRoutingFeedbackListResponse {
   items: BackendRoutingFeedbackRecord[]
+}
+
+interface BackendContextHandoffEvidenceReference {
+  source_type: 'ticket' | 'operator_decision'
+  record_id: string
+  field: string
+  label: string
+}
+
+interface BackendContextHandoffPackage {
+  package_version: 'context-handoff.v1'
+  ticket_id: string
+  what_happened: string
+  where: {
+    region_id: string
+    region_name: string
+    district: string | null
+    address: string | null
+    object: string | null
+  }
+  when_or_since: { received_at: string; reported_since: string | null }
+  scale: string | null
+  confirmed_facts: Array<{
+    label: string
+    value: string
+    evidence: BackendContextHandoffEvidenceReference
+  }>
+  unknown_facts: string[]
+  route: {
+    recommended_service: string | null
+    confirmed_service: string
+    operator_decision_id: string
+    explanation: string
+    provenance_source: 'OFFICIAL' | 'LABEL_HISTORY' | 'MANUAL'
+    provenance_version: number | null
+  }
+  linked_attachment_count: number
+  evidence_references: BackendContextHandoffEvidenceReference[]
 }
 
 interface BackendDecisionResponse {
@@ -834,6 +872,56 @@ export async function submitRoutingFeedback(
     },
   )
   return mapRoutingFeedback(response)
+}
+
+export async function loadContextHandoffPackage(ticketId: string): Promise<ContextHandoffPackage> {
+  const item = await request<BackendContextHandoffPackage>(
+    `/tickets/${encodeURIComponent(ticketId)}/handoff-package`,
+  )
+  const optionalValue = (value: string | null | undefined) => value?.trim() || undefined
+  return {
+    packageVersion: item.package_version,
+    ticketId: item.ticket_id,
+    whatHappened: item.what_happened,
+    where: {
+      regionId: item.where.region_id,
+      regionName: item.where.region_name,
+      district: optionalValue(item.where.district),
+      address: optionalValue(item.where.address),
+      object: optionalValue(item.where.object),
+    },
+    whenOrSince: {
+      receivedAt: item.when_or_since.received_at,
+      reportedSince: optionalValue(item.when_or_since.reported_since),
+    },
+    scale: optionalValue(item.scale),
+    confirmedFacts: item.confirmed_facts.map((fact) => ({
+      label: fact.label,
+      value: fact.value,
+      evidence: {
+        sourceType: fact.evidence.source_type,
+        recordId: fact.evidence.record_id,
+        field: fact.evidence.field,
+        label: fact.evidence.label,
+      },
+    })),
+    unknownFacts: item.unknown_facts,
+    route: {
+      recommendedService: optionalValue(item.route.recommended_service),
+      confirmedService: item.route.confirmed_service,
+      operatorDecisionId: item.route.operator_decision_id,
+      explanation: item.route.explanation,
+      provenanceSource: item.route.provenance_source,
+      provenanceVersion: item.route.provenance_version ?? undefined,
+    },
+    linkedAttachmentCount: item.linked_attachment_count,
+    evidenceReferences: item.evidence_references.map((reference) => ({
+      sourceType: reference.source_type,
+      recordId: reference.record_id,
+      field: reference.field,
+      label: reference.label,
+    })),
+  }
 }
 
 export async function acknowledgeAlert(alertId: string): Promise<Pick<BackendAlert, 'id' | 'status'>> {

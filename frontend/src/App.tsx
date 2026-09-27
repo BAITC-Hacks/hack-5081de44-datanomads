@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
@@ -678,6 +678,10 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
       {!hasOperatorDecision && ticket.status !== 'new' && (
         <p className="panel-note" role="status">Статус записи отмечен как разобранный, но данные подтверждённого решения не предоставлены.</p>
       )}
+      <ContextHandoffPanel
+        ticket={ticket}
+        hasConfirmedRoute={ticket.confirmedDecisionAvailable === true || Boolean(ticket.latestDecision?.service)}
+      />
       <RoutingFeedbackPanel ticket={ticket} taxonomy={taxonomy} />
       <div className="detail-section">
         <div className="field-label">Ответ оператору <span className="language-chip">{hasApprovedTemplate ? (ticket.responseTemplateVersion ? `Утверждённый · v${ticket.responseTemplateVersion}` : 'Утверждённый шаблон') : 'Ручной ответ'}</span></div>
@@ -845,6 +849,118 @@ function RoutingFeedbackPanel({ ticket, taxonomy }: { ticket: Ticket; taxonomy: 
         {item.correctedTargetService && <p>Исправленный адресат: {item.correctedTargetService}</p>}
         <small>Статус: ожидает контролируемой офлайн-проверки. Production-правила не изменены.</small>
       </article>)}
+    </div>}
+  </section>
+}
+
+function ContextHandoffPanel({ ticket, hasConfirmedRoute }: { ticket: Ticket; hasConfirmedRoute: boolean }) {
+  const requestSequence = useRef(0)
+  const [handoffPackage, setHandoffPackage] = useState<ContextHandoffPackage | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  useEffect(() => {
+    requestSequence.current += 1
+    setHandoffPackage(null)
+    setLoading(false)
+    setError('')
+    setNotice('')
+  }, [
+    ticket.id,
+    ticket.originalText,
+    ticket.regionId,
+    ticket.region,
+    ticket.createdAt,
+    ticket.confirmedDecisionAvailable,
+    ticket.latestDecision?.createdAt,
+    ticket.latestDecision?.service,
+  ])
+
+  const preparePackage = async () => {
+    const requestId = requestSequence.current + 1
+    requestSequence.current = requestId
+    setLoading(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await loadContextHandoffPackage(ticket.id)
+      if (requestSequence.current === requestId) setHandoffPackage(result)
+    } catch (requestError) {
+      if (requestSequence.current === requestId) {
+        setError(requestError instanceof Error ? requestError.message : 'ошибка API')
+      }
+    } finally {
+      if (requestSequence.current === requestId) setLoading(false)
+    }
+  }
+
+  const copyPackage = async () => {
+    if (!handoffPackage) return
+    setError('')
+    setNotice('')
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Буфер обмена недоступен в этом браузере')
+      await navigator.clipboard.writeText(JSON.stringify(handoffPackage, null, 2))
+      setNotice('Пакет скопирован локально. Отправка или изменение обращения не выполнялись.')
+    } catch (copyError) {
+      setError(copyError instanceof Error ? copyError.message : 'не удалось скопировать пакет')
+    }
+  }
+
+  return <section className="detail-section context-handoff-panel" aria-label="Пакет контекстной передачи">
+    <div className="section-inline-heading">
+      <div className="field-label">Пакет передачи с контекстом</div>
+      <span className="handoff-version">context-handoff.v1</span>
+    </div>
+    <p className="panel-note">Пакет собирается только из полей обращения и подтверждённого решения. Исходный текст остаётся доступен отдельно; ничего не отправляется и карточка не меняется.</p>
+    <button className="button button-secondary" type="button" onClick={() => void preparePackage()} disabled={!hasConfirmedRoute || loading}>
+      {loading ? 'Собираем…' : handoffPackage ? 'Обновить пакет' : 'Подготовить пакет'}
+    </button>
+    {!hasConfirmedRoute && <p className="panel-note">Сначала сохраните operator-confirmed route. Рекомендации модели сами по себе не передаются.</p>}
+    {error && <p className="routing-feedback-error" role="alert">Не удалось подготовить или скопировать пакет: {error}</p>}
+    {notice && <p className="routing-feedback-notice" role="status">{notice}</p>}
+    {handoffPackage && <div className="handoff-package" aria-label="Сформированный пакет">
+      <dl className="handoff-fields">
+        <div><dt>Что произошло</dt><dd>{handoffPackage.whatHappened}</dd></div>
+        <div><dt>Где</dt><dd>
+          <span>{handoffPackage.where.regionName} ({handoffPackage.where.regionId})</span>
+          {handoffPackage.where.district && <span>Район: {handoffPackage.where.district}</span>}
+          {handoffPackage.where.address && <span>Адрес: {handoffPackage.where.address}</span>}
+          {handoffPackage.where.object && <span>Объект: {handoffPackage.where.object}</span>}
+        </dd></div>
+        <div><dt>Когда / с какого момента</dt><dd>
+          <span>Обращение зарегистрировано: {handoffPackage.whenOrSince.receivedAt}</span>
+          <span>Начало события: {handoffPackage.whenOrSince.reportedSince ?? 'не указано в структурированных данных'}</span>
+        </dd></div>
+        <div><dt>Масштаб</dt><dd>{handoffPackage.scale ?? 'не указан в структурированных данных'}</dd></div>
+      </dl>
+      <div className="handoff-fact-group">
+        <strong>Подтверждено решением оператора</strong>
+        {handoffPackage.confirmedFacts.length > 0
+          ? <ul>{handoffPackage.confirmedFacts.map((fact) => <li key={`${fact.evidence.field}:${fact.label}`}><span>{fact.label}: {fact.value}</span><small>{fact.evidence.sourceType}/{fact.evidence.recordId}.{fact.evidence.field}</small></li>)}</ul>
+          : <p className="panel-note">Подтверждённые классификационные поля не сохранены.</p>}
+      </div>
+      <div className="handoff-fact-group">
+        <strong>Неизвестно или требует отдельной проверки</strong>
+        <ul>{handoffPackage.unknownFacts.map((fact) => <li key={fact}>{fact}</li>)}</ul>
+      </div>
+      <dl className="handoff-fields">
+        <div><dt>Почему выбран маршрут</dt><dd>
+          <span>Снимок рекомендации: {handoffPackage.route.recommendedService ?? 'не сохранён'}</span>
+          <span>Подтверждено оператором: {handoffPackage.route.confirmedService}</span>
+          <span>{handoffPackage.route.explanation}</span>
+          <small>{handoffPackage.route.provenanceSource}{handoffPackage.route.provenanceVersion ? ` · v${handoffPackage.route.provenanceVersion}` : ''} · решение {handoffPackage.route.operatorDecisionId}</small>
+        </dd></div>
+        {handoffPackage.linkedAttachmentCount > 0 && <div><dt>Вложения</dt><dd>{handoffPackage.linkedAttachmentCount} доступны отдельно в исходной карточке; содержимое не копировалось.</dd></div>}
+      </dl>
+      <div className="handoff-fact-group">
+        <strong>Ссылки на источники</strong>
+        <ul>{handoffPackage.evidenceReferences.map((reference) => <li key={`${reference.sourceType}:${reference.recordId}:${reference.field}`}>
+          <span>{reference.label}</span><small>{reference.sourceType}/{reference.recordId}.{reference.field}</small>
+        </li>)}</ul>
+      </div>
+      <button className="button button-quiet" type="button" onClick={() => void copyPackage()}>Скопировать JSON пакета</button>
     </div>}
   </section>
 }

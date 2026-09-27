@@ -1068,6 +1068,116 @@ async fn routing_feedback_requires_a_confirmed_route_and_rejects_invalid_targets
 }
 
 #[tokio::test]
+async fn context_handoff_package_preserves_sources_and_requires_a_confirmed_route() {
+    let application = app(AppState::demo());
+    let before = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), 200);
+    let before: serde_json::Value =
+        serde_json::from_slice(&to_bytes(before.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let response = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002/handoff-package")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let package: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(package["package_version"], "context-handoff.v1");
+    assert_eq!(package["ticket_id"], before["ticket"]["id"]);
+    assert_eq!(package["what_happened"], before["ticket"]["text"]);
+    assert_eq!(package["where"]["region_id"], before["ticket"]["region_id"]);
+    assert_eq!(
+        package["when_or_since"]["received_at"],
+        before["ticket"]["created_at"]
+    );
+    assert!(package["when_or_since"]["reported_since"].is_null());
+    assert!(package["scale"].is_null());
+    assert!(package["unknown_facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|fact| fact.as_str().unwrap().contains("Масштаб")));
+    assert_eq!(
+        package["route"]["recommended_service"],
+        before["latest_decision"]["predicted_service"]
+    );
+    assert_eq!(
+        package["route"]["confirmed_service"],
+        before["latest_decision"]["service"]
+    );
+    assert_eq!(
+        package["route"]["operator_decision_id"],
+        before["latest_decision"]["id"]
+    );
+    assert!(package["confirmed_facts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|fact| fact["label"] == "Служба, подтверждённая оператором"));
+    assert!(package["evidence_references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reference| reference["field"] == "original_text"));
+    assert!(!package["evidence_references"]
+        .to_string()
+        .contains(before["ticket"]["text"].as_str().unwrap()));
+
+    let after = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&to_bytes(after.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(after["ticket"]["text"], before["ticket"]["text"]);
+    assert_eq!(after["latest_decision"], before["latest_decision"]);
+
+    let missing_decision = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001/handoff-package")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_decision.status(), 409);
+
+    let denied = application
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002/handoff-package")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
 async fn corrected_decision_updates_template_without_rewriting_prediction() {
     let application = app(AppState::demo());
     let corrected = application

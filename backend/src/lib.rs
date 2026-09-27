@@ -54,6 +54,7 @@ pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
 const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
 pub(crate) const ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM: &str = "DEMO_SIMULATION";
 pub(crate) const ROUTING_FEEDBACK_PENDING_STATUS: &str = "PENDING_OFFLINE_REVIEW";
+pub(crate) const CONTEXT_HANDOFF_PACKAGE_VERSION: &str = "context-handoff.v1";
 const MAX_RESPONSE_TEMPLATE_BODY_CHARS: usize = 4_000;
 const MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS: usize = 200;
 const DEFAULT_LEARNING_CYCLE_DURATION_HOURS: i32 = 168;
@@ -1680,6 +1681,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/datasets/provenance", get(dataset_provenance))
         .route("/api/v1/tickets/{ticket_id}", get(get_ticket))
         .route(
+            "/api/v1/tickets/{ticket_id}/handoff-package",
+            get(get_context_handoff_package),
+        )
+        .route(
             "/api/v1/tickets/{ticket_id}/vector",
             delete(delete_ticket_vector),
         )
@@ -2060,6 +2065,239 @@ pub struct TicketDetailResponse {
     pub latest_decision: Option<OperatorDecision>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ContextHandoffLocationSource {
+    pub district: Option<String>,
+    pub address: Option<String>,
+    pub object: Option<String>,
+    pub attachment_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextHandoffEvidenceReference {
+    pub source_type: String,
+    pub record_id: String,
+    pub field: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextHandoffFact {
+    pub label: String,
+    pub value: String,
+    pub evidence: ContextHandoffEvidenceReference,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextHandoffLocation {
+    pub region_id: String,
+    pub region_name: String,
+    pub district: Option<String>,
+    pub address: Option<String>,
+    pub object: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextHandoffTiming {
+    pub received_at: String,
+    pub reported_since: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextHandoffRoute {
+    pub recommended_service: Option<String>,
+    pub confirmed_service: String,
+    pub operator_decision_id: String,
+    pub explanation: String,
+    pub provenance_source: RuleSource,
+    pub provenance_version: Option<i32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContextHandoffPackage {
+    pub package_version: String,
+    pub ticket_id: String,
+    pub what_happened: String,
+    #[serde(rename = "where")]
+    pub location: ContextHandoffLocation,
+    pub when_or_since: ContextHandoffTiming,
+    pub scale: Option<String>,
+    pub confirmed_facts: Vec<ContextHandoffFact>,
+    pub unknown_facts: Vec<String>,
+    pub route: ContextHandoffRoute,
+    pub linked_attachment_count: usize,
+    pub evidence_references: Vec<ContextHandoffEvidenceReference>,
+}
+
+pub(crate) fn build_context_handoff_package(
+    ticket: &Ticket,
+    decision: &OperatorDecision,
+    location_source: ContextHandoffLocationSource,
+) -> Result<ContextHandoffPackage, String> {
+    if !known_routing_value(&decision.service) {
+        return Err("an operator-confirmed route is required before handoff".to_owned());
+    }
+
+    let mut evidence_references = vec![
+        context_handoff_evidence(
+            "ticket",
+            &ticket.id,
+            "original_text",
+            "Исходный текст обращения",
+        ),
+        context_handoff_evidence("ticket", &ticket.id, "region_id", "Код региона"),
+        context_handoff_evidence("ticket", &ticket.id, "created_at", "Время регистрации"),
+    ];
+    for (field, label, value) in [
+        ("district", "Район", location_source.district.as_ref()),
+        ("address", "Адрес", location_source.address.as_ref()),
+        ("object", "Объект", location_source.object.as_ref()),
+    ] {
+        if value.is_some_and(|value| !value.trim().is_empty()) {
+            evidence_references.push(context_handoff_evidence("ticket", &ticket.id, field, label));
+        }
+    }
+    if location_source.attachment_count > 0 {
+        evidence_references.push(context_handoff_evidence(
+            "ticket",
+            &ticket.id,
+            "attachments",
+            "Связанные вложения, доступны отдельно",
+        ));
+    }
+
+    let mut confirmed_facts = Vec::new();
+    for (label, value, field, source_label) in [
+        (
+            "Тема, подтверждённая оператором",
+            decision.confirmed_topic_label.as_str(),
+            "confirmed_topic_id",
+            "Тема в решении оператора",
+        ),
+        (
+            "Служба, подтверждённая оператором",
+            decision.service.as_str(),
+            "service",
+            "Служба в решении оператора",
+        ),
+        (
+            "Приоритет, подтверждённый оператором",
+            decision.priority.as_str(),
+            "priority",
+            "Приоритет в решении оператора",
+        ),
+    ] {
+        if known_routing_value(value) {
+            let evidence =
+                context_handoff_evidence("operator_decision", &decision.id, field, source_label);
+            evidence_references.push(evidence.clone());
+            confirmed_facts.push(ContextHandoffFact {
+                label: label.to_owned(),
+                value: value.to_owned(),
+                evidence,
+            });
+        }
+    }
+
+    evidence_references.push(context_handoff_evidence(
+        "operator_decision",
+        &decision.id,
+        "service_provenance.reason",
+        "Основание подтверждённого маршрута",
+    ));
+    let recommended_service = decision
+        .predicted_service
+        .as_deref()
+        .filter(|value| known_routing_value(value))
+        .map(ToOwned::to_owned);
+    if recommended_service.is_some() {
+        evidence_references.push(context_handoff_evidence(
+            "operator_decision",
+            &decision.id,
+            "predicted_service",
+            "Снимок первоначальной рекомендации",
+        ));
+    }
+
+    let district = location_source
+        .district
+        .filter(|value| !value.trim().is_empty());
+    let address = location_source
+        .address
+        .filter(|value| !value.trim().is_empty());
+    let object = location_source
+        .object
+        .filter(|value| !value.trim().is_empty());
+    let mut unknown_facts = vec![
+        "Время начала события не выделено в структурированном поле; сверьте исходный текст обращения."
+            .to_owned(),
+        "Масштаб воздействия не представлен в структурированном поле; сверьте исходный текст обращения."
+            .to_owned(),
+        "Текст отражает сообщение заявителя и не является независимой проверкой фактов."
+            .to_owned(),
+    ];
+    if address.is_none() && object.is_none() {
+        unknown_facts.push(
+            "Точный адрес или объект не указан в структурированных полях; сверьте исходный текст обращения."
+                .to_owned(),
+        );
+    }
+    if location_source.attachment_count > 0 {
+        unknown_facts.push(
+            "Содержимое вложений не включено в пакет; откройте их отдельно в карточке обращения."
+                .to_owned(),
+        );
+    }
+    if recommended_service.is_none() {
+        unknown_facts
+            .push("Исходная рекомендация службы не сохранена в решении оператора.".to_owned());
+    }
+
+    Ok(ContextHandoffPackage {
+        package_version: CONTEXT_HANDOFF_PACKAGE_VERSION.to_owned(),
+        ticket_id: ticket.id.clone(),
+        what_happened: ticket.text.clone(),
+        location: ContextHandoffLocation {
+            region_id: ticket.region_id.clone(),
+            region_name: ticket.region_name.clone(),
+            district,
+            address,
+            object,
+        },
+        when_or_since: ContextHandoffTiming {
+            received_at: ticket.created_at.clone(),
+            reported_since: None,
+        },
+        scale: None,
+        confirmed_facts,
+        unknown_facts,
+        route: ContextHandoffRoute {
+            recommended_service,
+            confirmed_service: decision.service.clone(),
+            operator_decision_id: decision.id.clone(),
+            explanation: decision.service_provenance.reason.clone(),
+            provenance_source: decision.service_provenance.source,
+            provenance_version: decision.service_provenance.version,
+        },
+        linked_attachment_count: location_source.attachment_count,
+        evidence_references,
+    })
+}
+
+fn context_handoff_evidence(
+    source_type: &str,
+    record_id: &str,
+    field: &str,
+    label: &str,
+) -> ContextHandoffEvidenceReference {
+    ContextHandoffEvidenceReference {
+        source_type: source_type.to_owned(),
+        record_id: record_id.to_owned(),
+        field: field.to_owned(),
+        label: label.to_owned(),
+    }
+}
+
 async fn create_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2408,6 +2646,71 @@ async fn get_ticket(
         prediction,
         latest_decision,
     }))
+}
+
+async fn get_context_handoff_package(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+) -> Result<Json<ContextHandoffPackage>, ApiError> {
+    let actor = require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        let package = repository
+            .context_handoff_package(&ticket_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("operator decision is required")
+                    || error.contains("operator-confirmed route is required")
+                {
+                    ApiError::Conflict(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "CONTEXT_HANDOFF_PACKAGE_PREVIEWED",
+                "ticket",
+                Some(&ticket_id),
+                Some(&log_request_id_from_headers(&headers)),
+                Some("context handoff package previewed"),
+                json!({
+                    "package_version": &package.package_version,
+                    "operator_decision_id": &package.route.operator_decision_id,
+                    "linked_attachment_count": package.linked_attachment_count,
+                    "has_structured_address": package.location.address.is_some(),
+                }),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(Json(package));
+    }
+
+    let store = state.read_store()?;
+    let ticket = store
+        .tickets
+        .get(&ticket_id)
+        .ok_or_else(|| ApiError::NotFound(format!("ticket {ticket_id} not found")))?;
+    let decision = store
+        .decisions
+        .iter()
+        .rev()
+        .find(|decision| decision.ticket_id == ticket_id)
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "an operator decision is required before preparing a handoff".to_owned(),
+            )
+        })?;
+    build_context_handoff_package(ticket, decision, ContextHandoffLocationSource::default())
+        .map(Json)
+        .map_err(ApiError::Conflict)
 }
 
 async fn get_prediction(
@@ -7768,6 +8071,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
             "/api/v1/audit": { "get": { "summary": "Privacy-safe audit log for managers and admins" } },
             "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
+            "/api/v1/tickets/{ticket_id}/handoff-package": { "get": { "summary": "Prepare a deterministic context handoff package" } },
             "/api/v1/tickets/{ticket_id}/prediction": { "get": { "summary": "Get current ticket prediction" } },
             "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
             "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
@@ -8150,6 +8454,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn context_handoff_uses_only_available_location_and_attachment_references() {
+        let store = Store::demo();
+        let ticket = store.tickets.get("ticket-002").unwrap();
+        let decision = store
+            .decisions
+            .iter()
+            .find(|decision| decision.ticket_id == ticket.id)
+            .unwrap();
+        let package = build_context_handoff_package(
+            ticket,
+            decision,
+            ContextHandoffLocationSource {
+                district: Some("Синтетический район".to_owned()),
+                address: Some("Синтетический адрес".to_owned()),
+                object: Some("Синтетический объект".to_owned()),
+                attachment_count: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            package.location.district.as_deref(),
+            Some("Синтетический район")
+        );
+        assert_eq!(
+            package.location.address.as_deref(),
+            Some("Синтетический адрес")
+        );
+        assert_eq!(
+            package.location.object.as_deref(),
+            Some("Синтетический объект")
+        );
+        assert_eq!(package.linked_attachment_count, 2);
+        assert!(package
+            .evidence_references
+            .iter()
+            .any(|reference| reference.field == "address"));
+        assert!(package
+            .evidence_references
+            .iter()
+            .any(|reference| reference.field == "attachments"));
+        assert!(package
+            .unknown_facts
+            .iter()
+            .any(|fact| fact.contains("вложений не включено")));
     }
 
     #[tokio::test]

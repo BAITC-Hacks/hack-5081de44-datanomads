@@ -715,6 +715,27 @@ paths:
               schema: { $ref: '#/components/schemas/TicketDetailResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tickets/{ticket_id}/handoff-package:
+    get:
+      tags: [tickets]
+      summary: Prepare a deterministic context handoff package
+      description: Returns source-backed handoff context for an operator-confirmed route. It does not send a response, alter the ticket, or replace its separately available original text. Address and object fields are included only when present in the ticket record.
+      parameters:
+        - name: ticket_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Deterministic context handoff package
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContextHandoffPackage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/tickets/{ticket_id}/prediction:
     get:
       tags: [tickets]
@@ -1387,6 +1408,67 @@ components:
           nullable: true
           allOf:
             - $ref: '#/components/schemas/OperatorDecision'
+    ContextHandoffEvidenceReference:
+      type: object
+      required: [source_type, record_id, field, label]
+      properties:
+        source_type: { type: string, enum: [ticket, operator_decision] }
+        record_id: { type: string }
+        field: { type: string }
+        label: { type: string }
+    ContextHandoffFact:
+      type: object
+      required: [label, value, evidence]
+      properties:
+        label: { type: string }
+        value: { type: string }
+        evidence: { $ref: '#/components/schemas/ContextHandoffEvidenceReference' }
+    ContextHandoffLocation:
+      type: object
+      required: [region_id, region_name, district, address, object]
+      properties:
+        region_id: { type: string }
+        region_name: { type: string }
+        district: { type: string, nullable: true }
+        address: { type: string, nullable: true }
+        object: { type: string, nullable: true }
+    ContextHandoffTiming:
+      type: object
+      required: [received_at, reported_since]
+      properties:
+        received_at: { type: string, format: date-time }
+        reported_since: { type: string, nullable: true, description: No structured onset value is inferred from the ticket text. }
+    ContextHandoffRoute:
+      type: object
+      required: [recommended_service, confirmed_service, operator_decision_id, explanation, provenance_source, provenance_version]
+      properties:
+        recommended_service: { type: string, nullable: true, description: Original route snapshot captured with the operator decision. }
+        confirmed_service: { type: string }
+        operator_decision_id: { type: string }
+        explanation: { type: string }
+        provenance_source: { type: string, enum: [OFFICIAL, LABEL_HISTORY, MANUAL] }
+        provenance_version: { type: integer, nullable: true }
+    ContextHandoffPackage:
+      type: object
+      required: [package_version, ticket_id, what_happened, where, when_or_since, scale, confirmed_facts, unknown_facts, route, linked_attachment_count, evidence_references]
+      properties:
+        package_version: { type: string, enum: [context-handoff.v1] }
+        ticket_id: { type: string }
+        what_happened: { type: string, description: Verbatim source ticket text, not an AI-generated summary. }
+        where: { $ref: '#/components/schemas/ContextHandoffLocation' }
+        when_or_since: { $ref: '#/components/schemas/ContextHandoffTiming' }
+        scale: { type: string, nullable: true, description: No scale is inferred when a structured impact value is unavailable. }
+        confirmed_facts:
+          type: array
+          items: { $ref: '#/components/schemas/ContextHandoffFact' }
+        unknown_facts:
+          type: array
+          items: { type: string }
+        route: { $ref: '#/components/schemas/ContextHandoffRoute' }
+        linked_attachment_count: { type: integer, minimum: 0, description: Attachments remain available in the original ticket and are not copied into the package. }
+        evidence_references:
+          type: array
+          items: { $ref: '#/components/schemas/ContextHandoffEvidenceReference' }
     DecisionResponse:
       type: object
       required: [ticket, prediction, decision, learning_feedback_status, learning_feedback_cycle_id]

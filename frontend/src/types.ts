@@ -112,6 +112,55 @@ export interface RoutingFeedbackRecord {
   createdAt: string
 }
 
+export interface ContextHandoffEvidenceReference {
+  sourceType: 'ticket' | 'operator_decision'
+  recordId: string
+  field: string
+  label: string
+}
+
+export interface ContextHandoffFact {
+  label: string
+  value: string
+  evidence: ContextHandoffEvidenceReference
+}
+
+export interface ContextHandoffLocation {
+  regionId: string
+  regionName: string
+  district?: string
+  address?: string
+  object?: string
+}
+
+export interface ContextHandoffTiming {
+  receivedAt: string
+  reportedSince?: string
+}
+
+export interface ContextHandoffRoute {
+  recommendedService?: string
+  confirmedService: string
+  operatorDecisionId: string
+  explanation: string
+  provenanceSource: RuleSource
+  provenanceVersion?: number
+}
+
+export interface ContextHandoffPackage {
+  packageVersion: 'context-handoff.v1'
+  ticketId: string
+  whatHappened: string
+  where: ContextHandoffLocation
+  whenOrSince: ContextHandoffTiming
+  scale?: string
+  confirmedFacts: ContextHandoffFact[]
+  unknownFacts: string[]
+  route: ContextHandoffRoute
+  linkedAttachmentCount: number
+  evidenceReferences: ContextHandoffEvidenceReference[]
+}
+
 export interface Ticket {
   id: string
   originalText: string
