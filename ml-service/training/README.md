@@ -90,6 +90,25 @@ are explicit. Model settings are fixed before test evaluation; the output is
 synthetic evidence only until a real reviewed dataset is available. The output
 path must be new.
 
+## Classifier input length
+
+Before selecting a truncation strategy for a reviewed classifier candidate,
+audit only its train and validation splits with a local tokenizer:
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/audit_classifier_tokens.py \
+  --dataset data/processed/reviewed-v1 \
+  --tokenizer /path/to/local/xlm-roberta-tokenizer \
+  --output data/processed/reports/reviewed-v1-token-lengths.json
+```
+
+The report records p50/p95/p99/max and counts above 384 and 512 tokens for
+RU, KZ, MIXED and all examples. It identifies head-384, head-512 and both
+head+tail variants as strategies to compare on validation. Length counts alone
+do not select a strategy or prove model quality. Frozen test examples are
+verified by package checksum, but their token lengths are not computed. The
+current unreviewed synthetic demo is not evidence about customer appeal lengths.
+
 ## Retrieval baselines
 
 Evaluate relation groups from the same reviewed package:
