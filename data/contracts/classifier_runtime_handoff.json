@@ -1,0 +1,27 @@
+{
+  "contract_version": "classifier-runtime-handoff.v1",
+  "producer": "data-ml",
+  "consumer": "runtime-platform",
+  "artifact_source": "scripts/package_classifier_candidate.py",
+  "bundle_manifest": "manifest.json",
+  "bundle_model_directory": "model",
+  "candidate_status": "CANDIDATE_REQUIRES_HUMAN_PROMOTION",
+  "current_runtime_gap": {
+    "location": "ml-service/app/trained_classifier.py",
+    "behavior": "PULSE_CLASSIFIER_MODEL_DIR loads the model directory after checking only model.safetensors against the inner manifest.",
+    "unverified_files": ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]
+  },
+  "required_integration": {
+    "owner": "runtime-platform",
+    "before_load": "Verify the complete handoff bundle manifest, every artifact_files and bundle_files SHA-256, exact file layout, dataset/evaluation lineage and promoted model version before loading tokenizer or model files.",
+    "on_missing_or_mismatched_evidence": "fail closed; do not load the classifier",
+    "legacy_model_directory_without_bundle_manifest": "not approved for production"
+  },
+  "acceptance_evidence": [
+    "runtime rejects changed model.safetensors",
+    "runtime rejects changed config.json",
+    "runtime rejects changed tokenizer.json and tokenizer metadata",
+    "runtime rejects missing, extra and symlinked bundle files",
+    "runtime accepts only the human-promoted model version with matching dataset and evaluation evidence"
+  ]
+}
