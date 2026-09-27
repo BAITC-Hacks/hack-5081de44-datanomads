@@ -89,7 +89,7 @@ def generate(output_dir: Path, *, check: bool = False) -> dict:
             assert primary_result.tickets[-1].topic_id == "unknown"
             assert "synthetic@example.invalid" not in primary_result.tickets[2].original_text
             assert (alternate_result.valid_count, alternate_result.quarantine_count) == (1, 0)
-            assert (malformed_result.valid_count, [item.reason for item in malformed_result.quarantine]) == (1, ["BAD_CSV_STRUCTURE"])
+            assert (malformed_result.valid_count, [item.reason for item in malformed_result.quarantine]) == (0, ["BAD_CSV_STRUCTURE"])
             assert (unknown_result.valid_count, [item.reason for item in unknown_result.quarantine]) == (0, ["UNKNOWN_SCHEMA"])
         sources.append({
             "source_system": importer.source_system,

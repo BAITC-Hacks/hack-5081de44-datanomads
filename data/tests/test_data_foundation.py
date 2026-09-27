@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 
 from data.importers import IKOMEK109Importer, get_importer
 from data.normalization import minimize_text, scan_pii
@@ -144,6 +145,70 @@ class ImporterTests(unittest.TestCase):
             path.write_bytes(b"appealId,region,registeredAt,messageText\nsynthetic-1,Astana,2026-01-01,ok\n\xff")
             result = get_importer("AIKEY").import_file(path)
         self.assertEqual([row.reason for row in result.quarantine], ["BAD_CSV_STRUCTURE"])
+        self.assertEqual(result.valid_count, 0)
+
+    def test_csv_quarantine_keeps_physical_lines_after_bad_and_multiline_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.csv"
+            path.write_text(
+                'appealId,region,registeredAt,messageText\n'
+                'one,Астана,2026-01-01,"Первая\nстрока"\n'
+                'two,Астана,2026-01-02\n'
+                'three,Астана,bad,Текст\n', encoding="utf-8",
+            )
+            result = get_importer("AIKEY").import_file(path)
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual([(row.reason, row.row_number) for row in result.quarantine],
+                         [("BAD_CSV_STRUCTURE", 4), ("INVALID_DATE", 5)])
+
+    def test_unrecoverable_csv_parse_rejects_entire_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.csv"
+            path.write_text(
+                'appealId,region,registeredAt,messageText\n'
+                'one,Астана,2026-01-01,Текст\n'
+                'two,Астана,2026-01-02,"unterminated\n', encoding="utf-8",
+            )
+            result = get_importer("AIKEY").import_file(path)
+        self.assertEqual(result.valid_count, 0)
+        self.assertEqual([(row.reason, row.row_number) for row in result.quarantine],
+                         [("BAD_CSV_STRUCTURE", 3)])
+        self.assertIn("entire file rejected", result.quarantine[0].detail)
+
+    def test_jsonl_quarantine_keeps_physical_lines_after_bad_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.jsonl"
+            path.write_text(
+                '{"appealId":"one","region":"Астана","registeredAt":"2026-01-01","messageText":"Текст"}\n'
+                '{broken json}\n'
+                '{"appealId":"three","region":"Астана","registeredAt":"bad","messageText":"Текст"}\n',
+                encoding="utf-8",
+            )
+            result = get_importer("AIKEY").import_file(path)
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual([(row.reason, row.row_number) for row in result.quarantine],
+                         [("UNKNOWN_SCHEMA", 2), ("INVALID_DATE", 3)])
+
+    def test_xlsx_quarantine_uses_sheet_row_number(self) -> None:
+        def cells(values: tuple[str, ...]) -> str:
+            return "".join(f'<c t="inlineStr"><is><t>{value}</t></is></c>' for value in values)
+
+        sheet = (
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData>'
+            f'<row r="1">{cells(("appealId", "region", "registeredAt", "messageText"))}</row>'
+            f'<row r="3">{cells(("one", "Астана", "2026-01-01", "Текст"))}</row>'
+            f'<row r="5">{cells(("two", "Астана", "bad", "Текст"))}</row>'
+            '</sheetData></worksheet>'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.xlsx"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("xl/worksheets/sheet1.xml", sheet)
+            result = get_importer("AIKEY").import_file(path)
+        self.assertEqual(result.valid_count, 1)
+        self.assertEqual([(row.reason, row.row_number) for row in result.quarantine],
+                         [("INVALID_DATE", 5)])
 
     def test_source_specific_aliases_and_bad_rows(self) -> None:
         importer = IKOMEK109Importer()
