@@ -17,6 +17,45 @@ from training.contracts import _checksum
 from training.feedback_dataset import FeedbackRecord, ID_RE
 
 
+FEEDBACK_QUERY = """
+SELECT lf.id AS feedback_id, lf.ticket_id AS db_ticket_id,
+       lf.production_model_version, lf.production_prediction::text,
+       lf.operator_confirmed_decision::text, lf.accepted_or_corrected,
+       lf.validation_status, lf.feedback_created_at,
+       t.original_text, t.language,
+       od.id AS operator_decision_id, od.decision AS operator_decision_kind,
+       od.confirmed_topic_id,
+       tp.model_version AS prediction_model_version, tp.topic_id AS prediction_topic_id,
+       tp.confidence AS prediction_confidence,
+       COALESCE((
+           SELECT json_agg(json_build_object(
+               'dataset_version', dv.dataset_version,
+               'is_synthetic', dv.is_synthetic,
+               'manifest_sha256', dv.manifest_sha256,
+               'content_sha256', dv.content_sha256
+           ) ORDER BY dv.dataset_version)::text
+           FROM dataset_ticket_links dtl
+           JOIN dataset_versions dv ON dv.dataset_version = dtl.dataset_version
+           WHERE dtl.ticket_id = lf.ticket_id
+       ), '[]') AS source_lineage
+FROM learning_feedback lf
+JOIN learning_cycles lc ON lc.id = lf.cycle_id
+JOIN tickets t ON t.id = lf.ticket_id
+LEFT JOIN operator_decisions od
+    ON od.ticket_id = lf.ticket_id
+   AND od.id::text = lf.operator_confirmed_decision->>'decision_id'
+LEFT JOIN LATERAL (
+    SELECT model_version, topic_id, confidence
+    FROM ticket_predictions
+    WHERE ticket_id = lf.ticket_id AND model_version = lf.production_model_version
+      AND created_at <= lf.feedback_created_at
+    ORDER BY created_at DESC, id DESC LIMIT 1
+) tp ON TRUE
+WHERE lc.cycle_id = $1 OR lc.id::text = $1
+ORDER BY lf.id
+"""
+
+
 class ReviewedFeedbackLink(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 

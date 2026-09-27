@@ -18,8 +18,9 @@
   горизонты до 366 точек (30/60/90 поддерживаются параметром `horizon`);
 - `POST /internal/v1/anomaly` — rolling median/MAD anomaly detector;
 - `POST /internal/v1/training[/<model_type>]` — возвращает
-  `TRAINER_NOT_CONFIGURED` до подключения реального offline trainer; тестовый
-  адаптер доступен только при `PULSE_TEST_FAKE_TRAINER=true`;
+  `TRAINER_NOT_CONFIGURED`: обычный feedback job обучается отдельным offline
+  worker только при наличии проверенных входов; тестовый адаптер доступен
+  только при `PULSE_TEST_FAKE_TRAINER=true`;
 - `POST /internal/v1/evaluation[/<model_type>]` — classifier/forecast/anomaly
   baseline metrics;
 - `GET /internal/v1/models` и `/internal/v1/models/<model_type>` — immutable
@@ -71,8 +72,8 @@ scripts/smoke
 `docker-compose.ml.yml` ставит CPU PyTorch в ML image и монтирует
 локальный артефакт read-only. Без override основной compose продолжает
 использовать лёгкий baseline. Offline-обучение не меняет операторские решения
-и не включает online retraining; endpoint feedback training остаётся
-`TRAINER_NOT_CONFIGURED`.
+и не включает online retraining. Feedback jobs в worker настраиваются отдельно,
+как описано в [learning-loop.md](../docs/learning-loop.md).
 
 ## Локальный запуск
 

@@ -100,8 +100,13 @@ async def fail_job(pool: Any, job_id: int, error: str) -> None:
 
 
 def safe_job_error(error: Exception) -> str:
-    if isinstance(error, RuntimeError) and str(error) == "TRAINER_NOT_CONFIGURED":
-        return "TRAINER_NOT_CONFIGURED"
+    if isinstance(error, RuntimeError) and str(error) in {
+        "TRAINER_NOT_CONFIGURED", "TRAINING_INPUT_MISSING", "INVALID_TRAINING_ROOT",
+        "INVALID_REVIEW_LINKS", "INVALID_JOB_PAYLOAD", "INVALID_CANDIDATE_DATASET",
+        "INVALID_PRODUCTION_ARTIFACT", "CANDIDATE_SANITY_FAILED",
+        "CANDIDATE_VERSION_EXISTS", "DATASET_VERSION_EXISTS", "TRAINING_CYCLE_CHANGED",
+    }:
+        return str(error)
     if isinstance(error, (ValidationError, json.JSONDecodeError)):
         return "INVALID_JOB_PAYLOAD"
     return "JOB_FAILED"
@@ -121,19 +126,42 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
     result = result or {}
     candidate = result.get("candidate_model_version")
     manifest = result.get("manifest") or {}
-    if candidate:
-        await pool.execute(
-            "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, 'classifier-baseline-candidate', $2, 'CANDIDATE', $3, $4) ON CONFLICT (model_version) DO UPDATE SET status = 'CANDIDATE', manifest_uri = EXCLUDED.manifest_uri, artifact_checksum = EXCLUDED.artifact_checksum",
-            str(candidate),
-            str(result.get("dataset_version") or payload.get("dataset_version") or "unknown"),
-            json.dumps(manifest.get("artifact_uri")) if manifest.get("artifact_uri") else None,
-            manifest.get("artifact_checksum"),
-        )
-    await pool.execute(
-        "UPDATE learning_cycles SET state = 'EVALUATE', updated_at = now(), decision_note = $2 WHERE cycle_id = $1 OR id::text = $1",
-        str(cycle_id),
-        "FAKE_TRAINER_COMPLETED" if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"} else "TRAINER_NOT_CONFIGURED",
-    )
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            if result.get("state") == "INSUFFICIENT_FEEDBACK":
+                updated = await connection.fetchval(
+                    "UPDATE learning_cycles SET state = 'INSUFFICIENT_FEEDBACK', updated_at = now(), decision_note = 'INSUFFICIENT_FEEDBACK' WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
+                    str(cycle_id),
+                )
+                if updated is None:
+                    raise RuntimeError("TRAINING_CYCLE_CHANGED")
+                return
+            if candidate:
+                dataset_uri = result.get("dataset_manifest_uri")
+                if dataset_uri:
+                    updated = await connection.fetchval(
+                        "UPDATE dataset_versions SET schema_version = 'feedback-candidate.v1', manifest_uri = $2, manifest_sha256 = $3, content_sha256 = $4, record_count = $5 WHERE dataset_version = $1 AND manifest_sha256 = 'pending' RETURNING dataset_version",
+                        result["dataset_version"], dataset_uri, result["dataset_manifest_sha256"],
+                        result["dataset_content_sha256"], result["sample_count"],
+                    )
+                    if updated is None:
+                        raise RuntimeError("DATASET_VERSION_EXISTS")
+                inserted = await connection.fetchval(
+                    "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, $2, $3, 'CANDIDATE', $4, $5) ON CONFLICT (model_version) DO NOTHING RETURNING model_version",
+                    str(candidate), manifest.get("model_family") or "classifier-feedback-candidate",
+                    str(result.get("dataset_version") or payload.get("dataset_version")),
+                    manifest.get("artifact_uri"), manifest.get("artifact_checksum"),
+                )
+                if inserted is None:
+                    raise RuntimeError("CANDIDATE_VERSION_EXISTS")
+            updated = await connection.fetchval(
+                "UPDATE learning_cycles SET state = 'EVALUATE', updated_at = now(), decision_note = $2 WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
+                str(cycle_id),
+                "FAKE_TRAINER_COMPLETED" if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"}
+                else "CANDIDATE_TRAINED" if candidate else "TRAINER_NOT_CONFIGURED",
+            )
+            if updated is None:
+                raise RuntimeError("TRAINING_CYCLE_CHANGED")
 
 
 async def _qdrant_existing_ids(client: Any, qdrant_url: str, collection: str) -> list[int]:
@@ -277,15 +305,21 @@ async def process_job(pool: Any, job: Any) -> None:
             await complete_job(pool, job_id, result)
             return
         if kind == "train_classifier":
-            if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() not in {"1", "true", "yes"}:
-                raise RuntimeError("TRAINER_NOT_CONFIGURED")
-            # The fake trainer is an integration-test adapter only.  It creates
-            # a deterministic candidate artifact from one synthetic sample and
-            # is never enabled by the normal Compose profile.
-            if not payload.get("samples"):
-                payload["samples"] = [{"text": "test-only fake sample", "label": "unknown", "topic_id": "unknown"}]
-            payload["min_samples"] = 1
-            kind = "training"
+            if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"}:
+                # The fake trainer remains an integration-test adapter only.
+                if not payload.get("samples"):
+                    payload["samples"] = [{"text": "test-only fake sample", "label": "unknown", "topic_id": "unknown"}]
+                payload["min_samples"] = 1
+                kind = "training"
+            else:
+                if not os.environ.get("PULSE_TRAINING_ROOT"):
+                    raise RuntimeError("TRAINER_NOT_CONFIGURED")
+                from training.feedback_job import train_classifier_job
+
+                result = await train_classifier_job(pool, payload)
+                await complete_job(pool, job_id, result)
+                await update_learning_cycle(pool, payload, result=result)
+                return
         if kind in {"training", "train"}:
             result = trainer.train(TrainingRequest.model_validate(payload)).model_dump(mode="json")
             if result["state"] == "TRAINER_NOT_CONFIGURED":

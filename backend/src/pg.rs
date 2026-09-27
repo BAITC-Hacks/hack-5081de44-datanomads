@@ -2043,7 +2043,7 @@ impl PgRepository {
             controlled_loop: json!({
                 "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTE", "REJECT"],
                 "production_auto_update": false,
-                "trainer": "TRAINER_NOT_CONFIGURED unless PULSE_TEST_FAKE_TRAINER=true",
+                "trainer": "OFFLINE_TRAINER_REQUIRES_REVIEWED_INPUTS",
             }),
         })
     }
@@ -2052,16 +2052,16 @@ impl PgRepository {
         &self,
         request: &CreateLearningCycleRequest,
     ) -> Result<LearningCycle, String> {
+        let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let dataset_version = request
             .dataset_version
             .clone()
-            .unwrap_or_else(|| format!("operator-feedback-{}", Utc::now().date_naive()));
-        sqlx::query("INSERT INTO dataset_versions (dataset_version, schema_version, manifest_uri, manifest_sha256, record_count) VALUES ($1, 'unified-ticket.v1', 'postgres://operator-feedback', 'pending', 0) ON CONFLICT (dataset_version) DO NOTHING")
+            .unwrap_or_else(|| format!("operator-feedback-{suffix}"));
+        sqlx::query("INSERT INTO dataset_versions (dataset_version, schema_version, manifest_uri, manifest_sha256, record_count) VALUES ($1, 'unified-ticket.v1', 'postgres://operator-feedback', 'pending', 0)")
             .bind(&dataset_version)
             .execute(&self.pool)
             .await
             .map_err(|error| format!("ensure learning dataset: {error}"))?;
-        let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let cycle_id = format!("cycle-{suffix}");
         let candidate_model_version = request
             .candidate_model_version

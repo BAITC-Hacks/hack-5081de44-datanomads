@@ -86,10 +86,41 @@ critical_regressions, sample_size, decision, created_at
 7. **Human decision**: только `ML_REVIEWER`/`ADMIN` переводит candidate в
    `PROMOTED` или `REJECTED`.
 
-Пока реальный trainer не подключён, обычный ML runtime возвращает
-`TRAINER_NOT_CONFIGURED` и не создаёт candidate. Тестовый fake trainer включается
-только через `PULSE_TEST_FAKE_TRAINER=true` для проверки state machine; его
-результат не является обученной моделью или валидной ML-метрикой. Само наличие
+Обычный ML API `/internal/v1/training` возвращает `TRAINER_NOT_CONFIGURED`:
+обучение по feedback выполняет отдельный offline worker. Без настройки его job
+завершается `TRAINER_NOT_CONFIGURED`, при неполном комплекте входов —
+`TRAINING_INPUT_MISSING`. Для worker с CPU
+PyTorch используйте `docker-compose.training.yml` вместе с основным Compose.
+Каталог `PULSE_TRAINING_INPUT_DIR` должен содержать `review-links.jsonl`,
+`frozen/` (проверенный frozen package) и `production/` (действующий обученный
+classifier artifact). Review links должны быть вручную утверждены; наличие
+двух CSV заказчика этого условия не выполняет. Worker читает feedback из
+PostgreSQL по ID закрытого цикла, экспортирует только проверенные тексты,
+исключает frozen IDs/groups/text, сохраняет versioned dataset и обучает новый
+immutable candidate в закрытом каталоге `ml-training`. При недостатке пригодных
+записей цикл получает `INSUFFICIENT_FEEDBACK`; сбой сохраняет код без текста
+обращения. Production pointer не меняется. Image и реальный training job пока
+не проверены на данных заказчика, поскольку исходных текстов и reviewed links
+нет.
+
+```bash
+PULSE_TRAINING_INPUT_DIR=/absolute/path/to/reviewed-inputs \
+  docker compose -f docker-compose.yml -f docker-compose.training.yml \
+  --profile demo config
+PULSE_TRAINING_INPUT_DIR=/absolute/path/to/reviewed-inputs \
+  docker compose -f docker-compose.yml -f docker-compose.training.yml \
+  --profile demo up -d --build ml-worker
+```
+
+Формат `review-links.jsonl` и обязательные проверки описаны в
+[feedback-candidate-dataset.md](feedback-candidate-dataset.md). Каталог входов
+держите за пределами репозитория: эти файлы содержат чувствительные связи и
+не коммитятся. Каждый цикл по умолчанию
+получает собственную версию candidate dataset.
+
+Тестовый fake trainer включается только через `PULSE_TEST_FAKE_TRAINER=true`
+для проверки state machine; его результат не является обученной моделью или
+валидной ML-метрикой. Само наличие
 candidate artifact больше не создаёт фиктивный `READY_TO_REVIEW`. Promotion
 требует сохранённые offline и shadow reports на тех же версиях моделей,
 достаточный sample size, отсутствие критичных регрессий и совпадение checksums;
