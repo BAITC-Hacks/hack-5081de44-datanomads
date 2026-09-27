@@ -376,6 +376,21 @@ pub struct RuleProvenance {
     pub source: RuleSource,
     pub version: Option<i32>,
     pub reason: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub facts_used: Vec<ExplainabilityFact>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainabilityFactField {
+    TopicId,
+    RegionId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ExplainabilityFact {
+    pub field: ExplainabilityFactField,
+    pub value: String,
 }
 
 impl RuleProvenance {
@@ -384,7 +399,28 @@ impl RuleProvenance {
             source: RuleSource::Manual,
             version: None,
             reason: reason.into(),
+            facts_used: Vec::new(),
         }
+    }
+
+    pub fn with_fact(mut self, field: ExplainabilityFactField, value: impl Into<String>) -> Self {
+        let value = value.into();
+        let value = value.trim();
+        if !value.is_empty() {
+            self.facts_used.push(ExplainabilityFact {
+                field,
+                value: value.to_owned(),
+            });
+        }
+        self
+    }
+
+    pub fn with_facts(mut self, facts_used: Vec<ExplainabilityFact>) -> Self {
+        self.facts_used = facts_used
+            .into_iter()
+            .filter(|fact| !fact.value.trim().is_empty())
+            .collect();
+        self
     }
 }
 
@@ -1093,6 +1129,14 @@ fn prediction_for_ticket(ticket: &Ticket, topics: &[Topic]) -> Prediction {
             confidence: (0.17 - index as f32 * 0.05).max(0.05),
         })
         .collect();
+    let service_provenance = RuleProvenance::manual(
+        "Демонстрационное сопоставление; официальные правила 109 не предоставлены",
+    );
+    let service_provenance = if ticket.topic_id.is_empty() {
+        service_provenance
+    } else {
+        service_provenance.with_fact(ExplainabilityFactField::TopicId, &topic_id)
+    };
     Prediction {
         ticket_id: ticket.id.clone(),
         model_version: "classifier-demo-2026-09-001".to_owned(),
@@ -1104,9 +1148,7 @@ fn prediction_for_ticket(ticket: &Ticket, topics: &[Topic]) -> Prediction {
         predicted_priority: priority,
         routing_reason: "Демонстрационное сопоставление; официальные правила 109 не предоставлены"
             .to_owned(),
-        service_provenance: RuleProvenance::manual(
-            "Демонстрационное сопоставление; официальные правила 109 не предоставлены",
-        ),
+        service_provenance,
         priority_provenance: RuleProvenance::manual(
             "Демонстрационный приоритет; официальные правила 109 не предоставлены",
         ),
@@ -7174,6 +7216,24 @@ mod tests {
         http::{Request, StatusCode},
     };
     use tower::ServiceExt;
+
+    #[test]
+    fn provenance_serializes_only_captured_routing_facts() {
+        let empty = serde_json::to_value(RuleProvenance::manual("Ручная проверка")).unwrap();
+        assert!(empty.get("facts_used").is_none());
+
+        let provenance = RuleProvenance::manual("Проверено по входным данным")
+            .with_fact(ExplainabilityFactField::TopicId, "TOPIC-WATER")
+            .with_fact(ExplainabilityFactField::RegionId, "KZ-ASTANA");
+        let value = serde_json::to_value(provenance).unwrap();
+        assert_eq!(
+            value["facts_used"],
+            json!([
+                {"field": "topic_id", "value": "TOPIC-WATER"},
+                {"field": "region_id", "value": "KZ-ASTANA"}
+            ])
+        );
+    }
 
     async fn body_json(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();

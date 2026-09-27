@@ -1,9 +1,9 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
-import { combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../operator'
+import { combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, topRelatedCandidates } from '../operator'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -73,6 +73,13 @@ interface BackendAlternative {
   confidence: number
 }
 
+interface BackendRuleProvenance {
+  source?: string
+  version?: number | null
+  reason?: string
+  facts_used?: Array<{ field?: string; value?: string }>
+}
+
 interface BackendPrediction {
   ticket_id: string
   model_version: string
@@ -83,8 +90,8 @@ interface BackendPrediction {
   recommended_service: string
   predicted_priority: string
   routing_reason?: string
-  service_provenance?: RuleProvenance
-  priority_provenance?: RuleProvenance
+  service_provenance?: BackendRuleProvenance
+  priority_provenance?: BackendRuleProvenance
   alternatives: BackendAlternative[]
 }
 
@@ -136,8 +143,8 @@ interface BackendTicketDetail {
     confirmed_topic_label?: string
     service: string
     priority: string
-    service_provenance?: RuleProvenance
-    priority_provenance?: RuleProvenance
+    service_provenance?: BackendRuleProvenance
+    priority_provenance?: BackendRuleProvenance
     created_at?: string
   }
 }
@@ -331,7 +338,6 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   const prediction = detail?.prediction ?? preview?.prediction
   const latest = detail?.latest_decision
   const related = topRelatedCandidates(combineRelatedCandidates(preview?.similar_tickets, preview?.duplicate_candidates, preview?.repeat_candidates))
-  const relationTopicId = latest?.confirmed_topic_id ?? item.topic_id
   const topic = latest
     ? latest.confirmed_topic_label ?? latest.confirmed_topic_id
     : prediction?.topic_label ?? 'Не определено'
@@ -339,8 +345,23 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   const confidenceAvailable = Boolean(prediction && prediction.model_version !== 'unavailable')
   const confidenceState = normalizeConfidenceState(prediction?.confidence_state, prediction?.confidence ?? 0, confidenceAvailable)
   const text = item.text?.trim() || 'Текст обращения не предоставлен'
+  const recommendedService = prediction?.recommended_service?.trim()
+  const recommendedServiceIsKnown = Boolean(
+    recommendedService && !['UNKNOWN', 'unavailable'].includes(recommendedService.toLowerCase()),
+  )
+  const recommendedServiceProvenance = prediction
+    ? mapRuleProvenance(
+      prediction.service_provenance,
+      'Источник рекомендованной службы не сохранён; проверьте вручную',
+    )
+    : undefined
+  const recommendedPriorityProvenance = prediction
+    ? mapRuleProvenance(
+      prediction.priority_provenance,
+      'Источник рекомендованного приоритета не сохранён; проверьте вручную',
+    )
+    : undefined
   const similar = related.map((candidate) => {
-    const matchedFactors = mapRelatedFactors(candidate.matched_factors)
     return {
       id: candidate.ticket_id,
       title: knownTickets.find((ticket) => ticket.id === candidate.ticket_id)?.text ?? 'Связанное обращение',
@@ -348,9 +369,7 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
       createdAt: candidate.created_at?.trim() || 'Дата не загружена',
       relation: mapRelation(candidate.relation),
       candidateTypes: candidate.candidateTypes,
-      matchedFactors: matchedFactors.length
-        ? matchedFactors
-        : matchingTicketFactors(relationTopicId, item.region_id, candidate.topic_id, candidate.region_id),
+      matchedFactors: mapRelatedFactors(candidate.matched_factors),
       suggestion: candidate.suggestion ? {
         score: candidate.suggestion.score,
         threshold: candidate.suggestion.threshold,
@@ -375,6 +394,11 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     alternatives: classificationAlternatives(confidenceState, prediction?.topic_id ?? '', alternatives).map((alternative) => ({ topic: alternative.topic_label, confidence: alternative.confidence })),
     service: latest?.service ?? (prediction?.recommended_service && !['UNKNOWN', 'unavailable'].includes(prediction.recommended_service) ? prediction.recommended_service : 'Не определена'),
     priority: mapPriority(latest?.priority ?? prediction?.predicted_priority ?? item.priority),
+    recommendedService: recommendedServiceIsKnown ? recommendedService : undefined,
+    recommendedPriority: prediction ? mapPriority(prediction.predicted_priority) : undefined,
+    recommendedServiceProvenance,
+    recommendedPriorityProvenance,
+    confirmedDecisionAvailable: Boolean(latest),
     routingReason: prediction?.routing_reason,
     serviceProvenance: mapRuleProvenance(
       latest?.service_provenance ?? prediction?.service_provenance,

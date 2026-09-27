@@ -5,6 +5,11 @@ export interface RuleProvenance {
   source: RuleSource
   version?: number | null
   reason: string
+  factsUsed?: ExplainabilityFact[]
+}
+export interface ExplainabilityFact {
+  field: 'topic_id' | 'region_id'
+  value: string
 }
 export type PreviewLanguage = 'RU' | 'KZ' | 'MIXED' | 'UNKNOWN'
 export type ClassificationConfidenceState = 'CONFIDENT' | 'UNCERTAIN' | 'LOW_CONFIDENCE' | 'UNAVAILABLE'
@@ -85,6 +90,11 @@ export interface Ticket {
   alternatives: TicketAlternative[]
   service: string
   priority: Priority
+  recommendedService?: string
+  recommendedPriority?: Priority
+  recommendedServiceProvenance?: RuleProvenance
+  recommendedPriorityProvenance?: RuleProvenance
+  confirmedDecisionAvailable?: boolean
   routingReason?: string
   serviceProvenance?: RuleProvenance
   priorityProvenance?: RuleProvenance

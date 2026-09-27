@@ -1204,6 +1204,16 @@ components:
           description: OFFICIAL is reserved for provisioned verified rules; demo defaults and operator decisions are MANUAL.
         version: { type: integer, minimum: 1, nullable: true, description: Null for direct historical labels and operator decisions. }
         reason: { type: string }
+        facts_used:
+          type: array
+          description: Exact structured values used by the routing or priority lookup. Omitted when no facts were captured.
+          items: { $ref: '#/components/schemas/ExplainabilityFact' }
+    ExplainabilityFact:
+      type: object
+      required: [field, value]
+      properties:
+        field: { type: string, enum: [topic_id, region_id] }
+        value: { type: string }
     DecisionRequest:
       type: object
       properties:

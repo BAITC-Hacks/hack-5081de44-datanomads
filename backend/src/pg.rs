@@ -1358,6 +1358,7 @@ impl PgRepository {
                         reason: row
                             .try_get::<String, _>("reason")
                             .map_err(|error| format!("routing reason: {error}"))?,
+                        facts_used: routing_lookup_facts(topic_id, region_id),
                     },
                 )
             } else if input_source == RuleSource::LabelHistory {
@@ -1369,6 +1370,7 @@ impl PgRepository {
                             source: RuleSource::LabelHistory,
                             version: None,
                             reason: "Служба из исторической метки обращения".to_owned(),
+                            facts_used: routing_lookup_facts(topic_id, region_id),
                         },
                     )
                 } else {
@@ -1386,6 +1388,7 @@ impl PgRepository {
                             reason: row
                                 .try_get::<String, _>("reason")
                                 .map_err(|error| format!("routing reason: {error}"))?,
+                            facts_used: routing_lookup_facts(topic_id, region_id),
                         },
                     )
                 }
@@ -1404,6 +1407,7 @@ impl PgRepository {
                         reason: row
                             .try_get::<String, _>("reason")
                             .map_err(|error| format!("routing reason: {error}"))?,
+                        facts_used: routing_lookup_facts(topic_id, region_id),
                     },
                 )
             }
@@ -1421,6 +1425,7 @@ impl PgRepository {
                         RuleSource::Manual => "Служба введена вручную".to_owned(),
                         RuleSource::Official => "Официальная метка службы".to_owned(),
                     },
+                    facts_used: routing_lookup_facts(topic_id, region_id),
                 },
             )
         } else {
@@ -1429,7 +1434,8 @@ impl PgRepository {
                 "Другая служба".to_owned(),
                 RuleProvenance::manual(
                     "Проверенное правило маршрутизации не предоставлено; выберите службу вручную",
-                ),
+                )
+                .with_facts(routing_lookup_facts(topic_id, region_id)),
             )
         };
 
@@ -1455,6 +1461,7 @@ impl PgRepository {
                             source: RuleSource::LabelHistory,
                             version: None,
                             reason: "Приоритет из исторического значения обращения".to_owned(),
+                            facts_used: routing_lookup_facts(topic_id, region_id),
                         },
                     )
                 } else {
@@ -1470,6 +1477,7 @@ impl PgRepository {
                             reason: row
                                 .try_get::<String, _>("reason")
                                 .map_err(|error| format!("priority reason: {error}"))?,
+                            facts_used: routing_lookup_facts(topic_id, region_id),
                         },
                     )
                 }
@@ -1486,6 +1494,7 @@ impl PgRepository {
                         reason: row
                             .try_get::<String, _>("reason")
                             .map_err(|error| format!("priority reason: {error}"))?,
+                        facts_used: routing_lookup_facts(topic_id, region_id),
                     },
                 )
             }
@@ -1502,6 +1511,7 @@ impl PgRepository {
                         RuleSource::Manual => "Приоритет введён вручную".to_owned(),
                         RuleSource::Official => "Официальное значение приоритета".to_owned(),
                     },
+                    facts_used: routing_lookup_facts(topic_id, region_id),
                 },
             )
         } else {
@@ -1509,7 +1519,8 @@ impl PgRepository {
                 "medium".to_owned(),
                 RuleProvenance::manual(
                     "Правило приоритета не предоставлено; используется ручной средний уровень",
-                ),
+                )
+                .with_facts(routing_lookup_facts(topic_id, region_id)),
             )
         };
         let reason = format!(
@@ -5505,6 +5516,43 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
     }
 }
 
+fn routing_lookup_facts(topic_id: &str, region_id: &str) -> Vec<crate::ExplainabilityFact> {
+    vec![
+        crate::ExplainabilityFact {
+            field: crate::ExplainabilityFactField::TopicId,
+            value: topic_id.to_owned(),
+        },
+        crate::ExplainabilityFact {
+            field: crate::ExplainabilityFactField::RegionId,
+            value: region_id.to_owned(),
+        },
+    ]
+}
+
+fn explainability_facts_from_db(value: &Value) -> Vec<crate::ExplainabilityFact> {
+    value
+        .get("facts_used")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|fact| {
+            let field = match fact.get("field").and_then(Value::as_str)? {
+                "topic_id" => crate::ExplainabilityFactField::TopicId,
+                "region_id" => crate::ExplainabilityFactField::RegionId,
+                _ => return None,
+            };
+            let value = fact.get("value").and_then(Value::as_str)?.trim();
+            if value.is_empty() {
+                return None;
+            }
+            Some(crate::ExplainabilityFact {
+                field,
+                value: value.to_owned(),
+            })
+        })
+        .collect()
+}
+
 fn rule_provenance_from_db(prediction: &Value, key: &str, fallback_reason: &str) -> RuleProvenance {
     let stored = prediction.get(key);
     let source = stored
@@ -5528,6 +5576,7 @@ fn rule_provenance_from_db(prediction: &Value, key: &str, fallback_reason: &str)
         source,
         version,
         reason,
+        facts_used: stored.map(explainability_facts_from_db).unwrap_or_default(),
     }
 }
 
@@ -6039,7 +6088,11 @@ mod routing_provenance_tests {
                 "service_provenance": {
                     "source": "OFFICIAL",
                     "version": 3,
-                    "reason": "Утверждённое правило"
+                    "reason": "Утверждённое правило",
+                    "facts_used": [
+                        {"field": "topic_id", "value": "TOPIC-WATER"},
+                        {"field": "region_id", "value": "KZ-ASTANA"}
+                    ]
                 }
             }),
             "service_provenance",
@@ -6049,6 +6102,10 @@ mod routing_provenance_tests {
         assert_eq!(provenance.source, RuleSource::Official);
         assert_eq!(provenance.version, Some(3));
         assert_eq!(provenance.reason, "Утверждённое правило");
+        assert_eq!(
+            provenance.facts_used,
+            routing_lookup_facts("TOPIC-WATER", "KZ-ASTANA")
+        );
 
         let history = rule_provenance_from_db(
             &json!({
@@ -6099,9 +6156,27 @@ mod routing_provenance_tests {
         assert_eq!(legacy.source, RuleSource::Manual);
         assert_eq!(legacy.version, None);
         assert_eq!(legacy.reason, "Проверьте вручную");
+        assert!(legacy.facts_used.is_empty());
         assert_eq!(unknown.source, RuleSource::Manual);
         assert_eq!(unknown.version, None);
         assert_eq!(unknown.reason, "Проверьте вручную");
+    }
+
+    #[test]
+    fn routing_lookup_facts_are_limited_to_actual_query_inputs() {
+        assert_eq!(
+            routing_lookup_facts("TOPIC-WATER", "KZ-ASTANA"),
+            vec![
+                crate::ExplainabilityFact {
+                    field: crate::ExplainabilityFactField::TopicId,
+                    value: "TOPIC-WATER".to_owned(),
+                },
+                crate::ExplainabilityFact {
+                    field: crate::ExplainabilityFactField::RegionId,
+                    value: "KZ-ASTANA".to_owned(),
+                },
+            ]
+        );
     }
 }
 

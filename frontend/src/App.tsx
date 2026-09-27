@@ -8,6 +8,7 @@ import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
 import { confidenceStateLabel, confidenceStateNotice, normalizeConfidenceState } from './classification'
 import { formatDecisionTime, formatRuntimeRate } from './operator'
+import { formatExplainabilityFact } from './routing'
 
 type Route =
   | '/operator'
@@ -444,6 +445,14 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
   const [priority, setPriority] = useState<Priority>(ticket.priority)
   const confidenceState = normalizeConfidenceState(ticket.confidenceState, ticket.confidence, ticket.confidenceAvailable !== false)
   const confidenceAvailable = ticket.confidenceAvailable !== false && confidenceState !== 'UNAVAILABLE'
+  const hasOperatorDecision = ticket.confirmedDecisionAvailable ?? (ticket.status !== 'new')
+  const demoRecommendationFallback = ticket.confirmedDecisionAvailable === undefined && ticket.status === 'new'
+  const recommendedService = ticket.recommendedService ?? (demoRecommendationFallback ? ticket.service : undefined)
+  const recommendedPriority = ticket.recommendedPriority ?? (demoRecommendationFallback ? ticket.priority : undefined)
+  const recommendedServiceProvenance = ticket.recommendedServiceProvenance
+    ?? (demoRecommendationFallback ? ticket.serviceProvenance : undefined)
+  const recommendedPriorityProvenance = ticket.recommendedPriorityProvenance
+    ?? (demoRecommendationFallback ? ticket.priorityProvenance : undefined)
   const hasApprovedTemplate = ticket.responseTemplateApproved === true && ticket.responseTemplateSource === 'APPROVED_TEMPLATE'
   const preview = ticket.assistPreview
   const retrievalStage = preview?.stages.find((stage) => stage.name === 'retrieval')
@@ -551,27 +560,53 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
         </div>
       )}
       <div className="detail-section">
-        <div className="field-label">Маршрутизация и приоритет</div>
+        <div className="field-label">Рекомендация Pulse · маршрутизация и приоритет</div>
         <div className="routing-grid">
           <div className="routing-field">
             <span>Служба</span>
-            <strong>{ticket.service}</strong>
+            <strong>{recommendedService ?? 'Не предоставлена'}</strong>
             <RoutingProvenance
-              provenance={ticket.serviceProvenance}
-              fallbackReason="Демонстрационная рекомендация; официальный источник не предоставлен"
+              provenance={recommendedServiceProvenance}
+              fallbackReason="Источник рекомендованной службы не сохранён; проверьте вручную"
             />
           </div>
           <div className="routing-field">
             <span>Приоритет</span>
-            <PriorityBadge priority={ticket.priority} />
+            <PriorityBadge priority={recommendedPriority ?? 'Не определён'} />
             <RoutingProvenance
-              provenance={ticket.priorityProvenance}
-              fallbackReason="Демонстрационное значение; официальное правило не предоставлено"
+              provenance={recommendedPriorityProvenance}
+              fallbackReason="Источник рекомендованного приоритета не сохранён; проверьте вручную"
             />
           </div>
         </div>
         <p className="panel-note"><strong>Основание маршрутизации:</strong> {ticket.routingReason?.trim() || 'Не предоставлено; проверьте службу и приоритет вручную.'}</p>
       </div>
+      {hasOperatorDecision && (
+        <div className="detail-section">
+          <div className="field-label">{ticket.status === 'corrected' ? 'Исправление оператора' : 'Подтверждённое решение оператора'}</div>
+          <div className="routing-grid">
+            <div className="routing-field">
+              <span>Служба</span>
+              <strong>{ticket.service}</strong>
+              <RoutingProvenance
+                provenance={ticket.serviceProvenance}
+                fallbackReason="Источник подтверждённой службы не сохранён; проверьте решение вручную"
+              />
+            </div>
+            <div className="routing-field">
+              <span>Приоритет</span>
+              <PriorityBadge priority={ticket.priority} />
+              <RoutingProvenance
+                provenance={ticket.priorityProvenance}
+                fallbackReason="Источник подтверждённого приоритета не сохранён; проверьте решение вручную"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+      {!hasOperatorDecision && ticket.status !== 'new' && (
+        <p className="panel-note" role="status">Статус записи отмечен как разобранный, но данные подтверждённого решения не предоставлены.</p>
+      )}
       <div className="detail-section">
         <div className="field-label">Ответ оператору <span className="language-chip">{hasApprovedTemplate ? (ticket.responseTemplateVersion ? `Утверждённый · v${ticket.responseTemplateVersion}` : 'Утверждённый шаблон') : 'Ручной ответ'}</span></div>
         {hasApprovedTemplate && !templateIgnored && (
@@ -621,6 +656,9 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
                   <strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} />
                 </button>
                 <span className="similar-factors">{item.matchedFactors?.length ? item.matchedFactors.join(' · ') : 'Совпадающие признаки не предоставлены'}</span>
+                {item.suggestion
+                  ? <small>Отбор top-K: score {formatPercent(item.similarity)} · порог {formatPercent(item.suggestion.threshold)}</small>
+                  : <small>Порог отбора top-K не сохранён</small>}
               </div>
               <div className="similar-meta">
                 <span className={`relation-badge ${item.relation === 'Возможный дубликат' ? 'relation-duplicate' : item.relation === 'Возможное повторное обращение' ? 'relation-repeat' : ''}`}>{item.relation}</span>
@@ -712,6 +750,9 @@ function RoutingProvenance({ provenance, fallbackReason }: { provenance?: RulePr
     <span className={`routing-provenance routing-source-${value.source.toLowerCase()}`}>
       <strong>{value.source} · {sourceLabel}{value.version ? ` · версия ${value.version}` : ''}</strong>
       <span>{value.reason}</span>
+      {value.factsUsed?.length
+        ? <span>Использованные факты: {value.factsUsed.map(formatExplainabilityFact).join(' · ')}</span>
+        : <span>Факты выбора не сохранены</span>}
     </span>
   )
 }
