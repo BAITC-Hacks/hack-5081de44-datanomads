@@ -79,18 +79,23 @@ export interface RelatedTicketDetail {
   externalRef?: string
   originalText: string
   topic: string
+  topicId?: string
+  regionId?: string
   region: string
   createdAt: string
   closedAt?: string
   status: string
   channel: Ticket['channel']
-  latestDecision?: {
-    action: string
-    confirmedTopicId: string
-    service?: string
-    priority?: Priority
-    createdAt?: string
-  }
+  latestDecision?: ConfirmedDecisionSummary
+}
+
+export interface ConfirmedDecisionSummary {
+  action: string
+  confirmedTopicId: string
+  confirmedTopicLabel?: string
+  service?: string
+  priority?: Priority
+  createdAt?: string
 }
 
 export interface Ticket {
@@ -101,7 +106,9 @@ export interface Ticket {
   modelVersion?: string
   language: PreviewLanguage
   topic: string
+  topicId?: string
   predictedTopic?: string
+  predictedTopicId?: string
   confidence: number
   confidenceState?: ClassificationConfidenceState
   confidenceAvailable?: boolean
@@ -127,6 +134,9 @@ export interface Ticket {
   responseTemplateKey?: string
   responseTemplateVersion?: number
   actionableContext?: ActionableContext
+  sourceStatus?: string
+  closedAt?: string | null
+  latestDecision?: ConfirmedDecisionSummary
   assistPreview?: AssistPreviewState
   channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp' | 'Не указан'
 }

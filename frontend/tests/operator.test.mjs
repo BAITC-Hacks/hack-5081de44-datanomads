@@ -1,6 +1,69 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildContextPreviewText, combineRelatedCandidates, formatDecisionTime, formatRuntimeRate, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../src/operator.ts'
+import { buildContextPreviewText, combineRelatedCandidates, compareRelatedTicketContext, formatDecisionTime, formatRuntimeRate, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../src/operator.ts'
+
+test('compares related tickets using recorded fields and leaves missing facts unknown', () => {
+  const current = {
+    topic: 'Дороги',
+    topicId: 'roads',
+    predictedTopic: 'Дороги',
+    predictedTopicId: 'roads',
+    region: 'Область А',
+    regionId: 'KZ-REGION-A',
+    createdAt: '2026-01-03T12:00:00Z',
+    sourceStatus: 'OPEN',
+    latestDecision: {
+      action: 'correct',
+      confirmedTopicId: 'roads',
+      confirmedTopicLabel: 'Дороги',
+      service: 'Служба дорог',
+      priority: 'Высокий',
+    },
+  }
+  const related = {
+    id: 'related-1',
+    originalText: 'synthetic fixture',
+    topic: 'Дороги',
+    topicId: 'roads',
+    region: 'Область А',
+    regionId: 'KZ-REGION-A',
+    createdAt: '2026-01-02T12:00:00Z',
+    status: 'CLOSED',
+    channel: 'Не указан',
+    latestDecision: {
+      action: 'confirm',
+      confirmedTopicId: 'roads',
+      confirmedTopicLabel: 'Дороги',
+      service: 'Служба транспорта',
+      priority: 'Высокий',
+    },
+  }
+
+  const comparisons = Object.fromEntries(compareRelatedTicketContext(current, related).map((fact) => [fact.key, fact]))
+  assert.equal(comparisons.topic.state, 'same')
+  assert.equal(comparisons.topic.currentSource, 'решение оператора')
+  assert.equal(comparisons.topic.relatedSource, 'решение оператора')
+  assert.equal(comparisons.object_type.state, 'unavailable')
+  assert.equal(comparisons.region.state, 'same')
+  assert.equal(comparisons.created_at.state, 'different')
+  assert.equal(comparisons.closed_at.state, 'unavailable')
+  assert.equal(comparisons.source_status.state, 'different')
+  assert.equal(comparisons.confirmed_service.state, 'different')
+  assert.equal(comparisons.confirmed_action.state, 'different')
+  assert.equal(comparisons.confirmed_priority.state, 'same')
+
+  const withoutDecisions = compareRelatedTicketContext({ ...current, latestDecision: undefined }, { ...related, latestDecision: undefined })
+  assert.equal(withoutDecisions.find((fact) => fact.key === 'confirmed_service').state, 'unavailable')
+  assert.equal(withoutDecisions.find((fact) => fact.key === 'confirmed_action').state, 'unavailable')
+
+  const missingFields = compareRelatedTicketContext(
+    { ...current, topic: 'Не определено', topicId: undefined, predictedTopic: 'Не определено', predictedTopicId: undefined, region: 'Регион не указан', regionId: undefined, sourceStatus: 'Статус не указан', latestDecision: undefined },
+    { ...related, topic: 'Тема не указана', topicId: undefined, region: 'Регион не указан', regionId: undefined, status: 'Статус не указан', latestDecision: undefined },
+  )
+  assert.equal(missingFields.find((fact) => fact.key === 'topic').state, 'unavailable')
+  assert.equal(missingFields.find((fact) => fact.key === 'region').state, 'unavailable')
+  assert.equal(missingFields.find((fact) => fact.key === 'source_status').state, 'unavailable')
+})
 
 test('builds a trimmed, transient context preview and rejects empty or overlong answers', () => {
   assert.equal(

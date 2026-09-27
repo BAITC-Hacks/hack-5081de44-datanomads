@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -416,7 +416,9 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     modelVersion: prediction?.model_version === 'unavailable' ? undefined : prediction?.model_version,
     language: mapLanguage(preview?.orchestration?.language ?? item.language),
     topic,
+    topicId: latest?.confirmed_topic_id ?? prediction?.topic_id ?? item.topic_id,
     predictedTopic: prediction?.topic_label ?? 'Не определено',
+    predictedTopicId: prediction?.topic_id,
     confidence: prediction?.confidence ?? 0,
     confidenceState,
     confidenceAvailable: confidenceAvailable && confidenceState !== 'UNAVAILABLE',
@@ -469,8 +471,24 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
         priority: mapPriority(option.priority),
       })),
     } : undefined,
+    sourceStatus: item.status?.trim() || undefined,
+    closedAt: item.closed_at === null ? null : item.closed_at?.trim() || undefined,
+    latestDecision: latest ? mapConfirmedDecision(latest) : undefined,
     assistPreview: preview?.orchestration,
     channel: mapTicketChannel(item.source),
+  }
+}
+
+function mapConfirmedDecision(decision: NonNullable<BackendTicketDetail['latest_decision']>): ConfirmedDecisionSummary {
+  const service = decision.service?.trim()
+  const priority = decision.priority?.trim()
+  return {
+    action: decision.action,
+    confirmedTopicId: decision.confirmed_topic_id,
+    confirmedTopicLabel: decision.confirmed_topic_label?.trim() || undefined,
+    service: service && !['unknown', 'unavailable'].includes(service.toLowerCase()) ? service : undefined,
+    priority: priority && !['unknown', 'unavailable'].includes(priority.toLowerCase()) ? mapPriority(priority) : undefined,
+    createdAt: decision.created_at?.trim() || undefined,
   }
 }
 
@@ -485,7 +503,9 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
     id: ticket.id,
     externalRef: ticket.external_ref?.trim() || undefined,
     originalText: ticket.text?.trim() || 'Текст обращения не предоставлен',
-    topic: ticket.topic_label?.trim() || 'Тема не указана',
+    topic: decision?.confirmed_topic_label?.trim() || ticket.topic_label?.trim() || 'Тема не указана',
+    topicId: decision?.confirmed_topic_id ?? ticket.topic_id,
+    regionId: ticket.region_id?.trim() || undefined,
     region: ticket.region_name?.trim() || 'Регион не указан',
     createdAt: ticket.created_at?.trim() || 'Время не указано',
     closedAt: ticket.closed_at?.trim() || undefined,
@@ -494,6 +514,7 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
     latestDecision: decision ? {
       action: decision.action,
       confirmedTopicId: decision.confirmed_topic_id,
+      confirmedTopicLabel: decision.confirmed_topic_label?.trim() || undefined,
       service: decisionService && !['unknown', 'unavailable'].includes(decisionService.toLowerCase()) ? decisionService : undefined,
       priority: decisionPriority && !['unknown', 'unavailable'].includes(decisionPriority.toLowerCase()) ? mapPriority(decisionPriority) : undefined,
       createdAt: decision.created_at?.trim() || undefined,

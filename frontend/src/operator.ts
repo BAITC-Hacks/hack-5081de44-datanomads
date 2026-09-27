@@ -1,3 +1,5 @@
+import type { RelatedTicketDetail, Ticket } from './types'
+
 export interface RelatedCandidateInput {
   ticket_id: string
   score: number
@@ -39,6 +41,123 @@ export function buildContextPreviewText(originalText: string, answer: string): s
     throw new Error('Текст с уточнением превышает лимит 10000 символов')
   }
   return text
+}
+
+export type TicketContextComparisonState = 'same' | 'different' | 'unavailable'
+
+export interface TicketContextComparison {
+  key: string
+  label: string
+  currentValue?: string
+  relatedValue?: string
+  state: TicketContextComparisonState
+  currentSource?: string
+  relatedSource?: string
+}
+
+function normalizedComparisonValue(value?: string | null): string | undefined {
+  const normalized = value?.trim().toLocaleLowerCase()
+  if (!normalized || [
+    '—',
+    'не указано',
+    'не указан',
+    'не определено',
+    'не определён',
+    'не определена',
+    'не определены',
+    'не предоставлено',
+    'регион не указан',
+    'тема не указана',
+    'статус не указан',
+    'время не указано',
+    'unknown',
+    'unavailable',
+  ].includes(normalized)) {
+    return undefined
+  }
+  return normalized
+}
+
+function compareTextFact(
+  key: string,
+  label: string,
+  currentValue?: string | null,
+  relatedValue?: string | null,
+  currentComparisonValue?: string | null,
+  relatedComparisonValue?: string | null,
+): TicketContextComparison {
+  const currentKey = normalizedComparisonValue(currentComparisonValue) ?? normalizedComparisonValue(currentValue)
+  const relatedKey = normalizedComparisonValue(relatedComparisonValue) ?? normalizedComparisonValue(relatedValue)
+  return {
+    key,
+    label,
+    currentValue: currentValue?.trim() || undefined,
+    relatedValue: relatedValue?.trim() || undefined,
+    state: currentKey && relatedKey ? currentKey === relatedKey ? 'same' : 'different' : 'unavailable',
+  }
+}
+
+function compareTimeFact(
+  key: string,
+  label: string,
+  currentValue?: string | null,
+  relatedValue?: string | null,
+): TicketContextComparison {
+  const currentTime = currentValue ? Date.parse(currentValue) : Number.NaN
+  const relatedTime = relatedValue ? Date.parse(relatedValue) : Number.NaN
+  return {
+    key,
+    label,
+    currentValue: currentValue?.trim() || undefined,
+    relatedValue: relatedValue?.trim() || undefined,
+    state: Number.isFinite(currentTime) && Number.isFinite(relatedTime)
+      ? currentTime === relatedTime ? 'same' : 'different'
+      : 'unavailable',
+  }
+}
+
+export function compareRelatedTicketContext(
+  current: Ticket & { objectType?: string },
+  related: RelatedTicketDetail & { objectType?: string },
+): TicketContextComparison[] {
+  const currentDecision = current.latestDecision
+  const relatedDecision = related.latestDecision
+  const confirmedTopic = (decision: Ticket['latestDecision']) =>
+    decision?.confirmedTopicLabel ?? decision?.confirmedTopicId
+  const topicComparison = compareTextFact(
+    'topic',
+    'Тема',
+    current.topic,
+    related.topic,
+    currentDecision?.confirmedTopicId ?? current.predictedTopicId ?? current.topicId
+      ?? (current.latestDecision ? confirmedTopic(currentDecision) : current.predictedTopic ?? current.topic),
+    relatedDecision?.confirmedTopicId ?? related.topicId
+      ?? (relatedDecision ? confirmedTopic(relatedDecision) : related.topic),
+  )
+
+  return [
+    {
+      ...topicComparison,
+      currentSource: currentDecision ? 'решение оператора' : 'рекомендация Pulse',
+      relatedSource: relatedDecision ? 'решение оператора' : 'значение записи источника',
+    },
+    compareTextFact(
+      'object_type',
+      'Тип объекта',
+      current.objectType,
+      related.objectType,
+    ),
+    compareTextFact('region', 'Регион', current.region, related.region, current.regionId, related.regionId),
+    compareTimeFact('created_at', 'Создано', current.createdAt, related.createdAt),
+    compareTimeFact('closed_at', 'Закрыто', current.closedAt, related.closedAt),
+    compareTextFact('source_status', 'Статус источника', current.sourceStatus, related.status),
+    compareTextFact('confirmed_topic', 'Подтверждённая тема',
+      currentDecision ? confirmedTopic(currentDecision) : undefined,
+      relatedDecision ? confirmedTopic(relatedDecision) : undefined),
+    compareTextFact('confirmed_service', 'Подтверждённая служба', currentDecision?.service, relatedDecision?.service),
+    compareTextFact('confirmed_action', 'Действие оператора', currentDecision?.action, relatedDecision?.action),
+    compareTextFact('confirmed_priority', 'Подтверждённый приоритет', currentDecision?.priority, relatedDecision?.priority),
+  ]
 }
 
 function relationType(value: string): 'similar' | 'repeat' | 'duplicate' {

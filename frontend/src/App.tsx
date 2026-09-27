@@ -8,7 +8,7 @@ import { QueryIntentResultView } from './components/QueryIntentResultView'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
 import { confidenceStateLabel, confidenceStateNotice, normalizeConfidenceState } from './classification'
-import { formatDecisionTime, formatRuntimeRate } from './operator'
+import { compareRelatedTicketContext, formatDecisionTime, formatRuntimeRate } from './operator'
 import { formatExplainabilityFact } from './routing'
 
 type Route =
@@ -30,6 +30,7 @@ type DrilldownState = { label: string; items: AnalyticsDrilldownTicket[]; total:
 type RelatedTicketPanelState = {
   ticketId: string
   matchedFactors: string[]
+  currentTicket: Ticket
   loading: boolean
   detail?: RelatedTicketDetail
   error?: string
@@ -400,19 +401,20 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
     }
   }
 
-  const openRelatedTicket = async (ticketId: string, matchedFactors: string[]) => {
+  const openRelatedTicket = async (ticketId: string, matchedFactors: string[], currentTicket: Ticket) => {
     const requestId = relatedDetailRequestId.current + 1
     relatedDetailRequestId.current = requestId
-    setRelatedDetail({ ticketId, matchedFactors, loading: true })
+    setRelatedDetail({ ticketId, matchedFactors, currentTicket, loading: true })
     try {
       const detail = await loadRelatedTicketDetail(ticketId)
       if (relatedDetailRequestId.current !== requestId) return
-      setRelatedDetail({ ticketId, matchedFactors, loading: false, detail })
+      setRelatedDetail({ ticketId, matchedFactors, currentTicket, loading: false, detail })
     } catch (error) {
       if (relatedDetailRequestId.current !== requestId) return
       setRelatedDetail({
         ticketId,
         matchedFactors,
+        currentTicket,
         loading: false,
         error: error instanceof Error ? error.message : 'ошибка API',
       })
@@ -436,11 +438,11 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
       </section>
       {selected && <TicketDetail ticket={selected} taxonomy={taxonomy} open={mobileDetailOpen} onClose={() => setMobileDetailOpen(false)} onDecision={updateTicket} onRelationFeedback={updateRelation} onOpenRelated={openRelatedTicket} />}
     </div>
-    {relatedDetail && <RelatedTicketDetailPanel state={relatedDetail} taxonomy={taxonomy} onClose={closeRelatedTicket} onRetry={() => { void openRelatedTicket(relatedDetail.ticketId, relatedDetail.matchedFactors) }} />}
+    {relatedDetail && <RelatedTicketDetailPanel state={relatedDetail} taxonomy={taxonomy} onClose={closeRelatedTicket} onRetry={() => { void openRelatedTicket(relatedDetail.ticketId, relatedDetail.matchedFactors, relatedDetail.currentTicket) }} />}
   </div>
 }
 
-function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[]) => void }) {
+function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[], currentTicket: Ticket) => void }) {
   const contextRequestId = useRef(0)
   const [correctionOpen, setCorrectionOpen] = useState(false)
   const [contextAnswer, setContextAnswer] = useState('')
@@ -721,7 +723,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
             const relation = relationFeedbackType(item.relation)
             return <div className="similar-item" key={item.id}>
               <div className="similar-main-column">
-                <button className="similar-main similar-open" aria-label={`Открыть оригинал ${item.id}`} onClick={() => onOpenRelated(item.id, item.matchedFactors ?? [])}>
+                <button className="similar-main similar-open" aria-label={`Открыть оригинал ${item.id}`} onClick={() => onOpenRelated(item.id, item.matchedFactors ?? [], ticket)}>
                   <strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} />
                 </button>
                 <span className="similar-factors">{item.matchedFactors?.length ? item.matchedFactors.join(' · ') : 'Совпадающие признаки не предоставлены'}</span>
@@ -748,8 +750,9 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
 function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state: RelatedTicketPanelState; taxonomy: DashboardData['filterOptions']; onClose: () => void; onRetry: () => void }) {
   const detail = state.detail
   const decision = detail?.latestDecision
+  const comparisons = detail ? compareRelatedTicketContext(state.currentTicket, detail) : []
   const decisionTopic = decision
-    ? taxonomy.topics.find((item) => item.id === decision.confirmedTopicId)?.label ?? decision.confirmedTopicId
+    ? decision.confirmedTopicLabel ?? taxonomy.topics.find((item) => item.id === decision.confirmedTopicId)?.label ?? decision.confirmedTopicId
     : ''
   const decisionAction = decision?.action.toLowerCase() === 'confirm'
     ? 'Подтверждение предложенной темы'
@@ -793,9 +796,38 @@ function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state
           {state.matchedFactors.length ? <div className="related-factor-list">{state.matchedFactors.map((factor) => <span className="relation-badge" key={factor}>{factor}</span>)}</div> : <p className="panel-note">Совпадение по теме или региону не подтверждено доступными полями.</p>}
         </section>
         <p className="related-ticket-note">Это возможное сходство для проверки оператором. Оно не подтверждает, что объект или проблема те же, и не создаёт связь автоматически.</p>
+        <section className="related-ticket-section key-comparison" aria-label="Фактические сходства и различия">
+          <div>
+            <div className="field-label">Фактическое сравнение</div>
+            <p className="panel-note">Текущая запись сопоставлена со связанной по структурированным полям. Это сравнение не оценивает правильность прошлого решения.</p>
+          </div>
+          <div className="key-comparison-group">
+            <strong>ПОХОЖЕ</strong>
+            {comparisons.filter((item) => ['topic', 'object_type', 'region'].includes(item.key)).map((item) => <ComparisonFact key={item.key} fact={item} />)}
+          </div>
+          <div className="key-comparison-group">
+            <strong>ОТЛИЧАЕТСЯ</strong>
+            {comparisons.filter((item) => ['created_at', 'closed_at', 'source_status', 'confirmed_topic', 'confirmed_service', 'confirmed_action', 'confirmed_priority'].includes(item.key)).map((item) => <ComparisonFact key={item.key} fact={item} />)}
+            <div className="comparison-fact comparison-fact-unavailable"><span>Адрес</span><small>Не сравнивается: точный адрес недоступен в безопасном контуре.</small></div>
+          </div>
+          <p className="panel-note">Тип объекта не передан как безопасное структурированное поле. Неизвестные значения не считаются совпадением или различием.</p>
+        </section>
       </div>}
     </section>
   </div>
+}
+
+function ComparisonFact({ fact }: { fact: ReturnType<typeof compareRelatedTicketContext>[number] }) {
+  const stateLabel = fact.state === 'same' ? 'совпадает' : fact.state === 'different' ? 'различается' : 'недостаточно данных'
+  const stateClass = `comparison-fact-${fact.state}`
+  const currentLabel = fact.currentSource ? `Текущее (${fact.currentSource})` : 'Текущее'
+  const relatedLabel = fact.relatedSource ? `связанное (${fact.relatedSource})` : 'связанное'
+  return (
+    <div className={`comparison-fact ${stateClass}`}>
+      <div><span>{fact.label}</span><small>{stateLabel}</small></div>
+      <p>{currentLabel}: {fact.currentValue ?? 'не указано'} · {relatedLabel}: {fact.relatedValue ?? 'не указано'}</p>
+    </div>
+  )
 }
 
 function Confidence({ value, state, compact = false, available = true }: { value: number; state?: Ticket['confidenceState']; compact?: boolean; available?: boolean }) {
