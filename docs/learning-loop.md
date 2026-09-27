@@ -95,6 +95,12 @@ candidate artifact больше не создаёт фиктивный `READY_TO
 достаточный sample size, отсутствие критичных регрессий и совпадение checksums;
 fake candidate не проходит этот gate.
 
+В новой установке production pointer для встроенного rule-based classifier
+совпадает с версией, которую сообщает ML `/readyz`. Этот pointer не обозначает
+обученный artifact. Core `/readyz` проверяет совпадение версии в PostgreSQL и
+ML runtime; после promotion нужно отдельно запустить serving утверждённой
+версии, иначе readiness сообщает о расхождении.
+
 Операторское исправление никогда не вызывает serving replacement или
 автоматический retraining.
 

@@ -294,10 +294,27 @@ impl PgRepository {
             .map_err(|error| format!("ml service: {error}"))?
             .error_for_status()
             .map_err(|error| format!("ml service: {error}"))?;
+        let ml_health: Value = ml
+            .json()
+            .await
+            .map_err(|error| format!("ml service readiness response: {error}"))?;
+        let production_version: String = sqlx::query_scalar("SELECT model_version FROM model_versions WHERE status = 'PRODUCTION' ORDER BY promoted_at DESC NULLS LAST, id DESC LIMIT 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("production model registry: {error}"))?
+            .ok_or_else(|| "production classifier pointer is missing".to_owned())?;
+        let served_version = ml_health["model_versions"]["classifier"]
+            .as_str()
+            .ok_or_else(|| "ML classifier version is missing from readiness response".to_owned())?;
+        if production_version != served_version {
+            return Err(
+                "ML classifier version differs from PostgreSQL production pointer".to_owned(),
+            );
+        }
         Ok(json!({
             "postgres": true,
             "qdrant": qdrant.status().is_success(),
-            "ml_service": ml.status().is_success(),
+            "ml_service": true,
             "collection": self.qdrant_collection,
             "embedding_dimension": self.embedding_dimension,
             "embedder_version": self.embedder_version,
