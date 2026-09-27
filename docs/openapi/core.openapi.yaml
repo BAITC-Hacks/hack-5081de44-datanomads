@@ -106,6 +106,127 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/DependencyUnavailable' }
+  /api/v1/response-templates:
+    get:
+      tags: [assist]
+      summary: List response template versions
+      description: Manager or admin only. Template bodies are reviewed separately from CRM records.
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Template versions, including pending drafts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResponseTemplatesResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [assist]
+      summary: Create a pending response template version
+      description: Creation never approves content. A manager or admin must call the explicit approval route.
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResponseTemplateInput' }
+      responses:
+        '200':
+          description: New pending version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResponseTemplateRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { description: Invalid JSON or an unknown request field }
+  /api/v1/response-templates/import:
+    post:
+      tags: [assist]
+      summary: Import pending response template versions
+      description: The batch is atomic and all imported templates remain unapproved.
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportResponseTemplatesRequest' }
+      responses:
+        '200':
+          description: Imported pending versions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResponseTemplatesResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { description: Invalid JSON or an unknown request field }
+  /api/v1/response-templates/{template_id}:
+    parameters:
+      - name: template_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [assist]
+      summary: Read a response template version
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Response template version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResponseTemplateRecord' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [assist]
+      summary: Edit a pending response template version
+      description: Approved versions are immutable; create a new version to change approved copy.
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateResponseTemplateRequest' }
+      responses:
+        '200':
+          description: Updated pending version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResponseTemplateRecord' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { description: Invalid JSON or an unknown request field }
+    delete:
+      tags: [assist]
+      summary: Delete a pending response template version
+      description: Approved versions cannot be deleted.
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '204': { description: Pending version deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/response-templates/{template_id}/approve:
+    parameters:
+      - name: template_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [assist]
+      summary: Explicitly approve a response template version
+      description: Records the manager or admin who approved this content and the approval time.
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Approved response template version
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResponseTemplateRecord' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/tickets/{ticket_id}/pulse-state:
     put:
       tags: [tickets]
@@ -940,10 +1061,65 @@ components:
           properties:
             body: { type: string }
             language: { type: string, enum: [ru, kz] }
-            approved: { type: boolean, description: True only for authoritative templates. }
-            source: { type: string, enum: [AUTHORITATIVE, MANUAL_DEMO, UNAVAILABLE] }
+            approved: { type: boolean, description: True only for content explicitly approved by a manager or admin. This does not make the template an official CRM record. }
+            source: { type: string, enum: [APPROVED_TEMPLATE, MANUAL_REQUIRED, UNAVAILABLE] }
+            template_key: { type: string }
+            topic_id: { type: string }
+            service_id: { type: string }
+            version: { type: integer, minimum: 1 }
         source: { type: string }
         orchestration: { $ref: '#/components/schemas/AssistOrchestration' }
+    ResponseTemplateInput:
+      type: object
+      additionalProperties: false
+      required: [template_key, language, topic_id, service_id, body]
+      properties:
+        template_key: { type: string, minLength: 1, maxLength: 100, pattern: '^[A-Za-z0-9._-]+$' }
+        language: { type: string, enum: [RU, KZ] }
+        topic_id: { type: string, minLength: 1, maxLength: 100 }
+        service_id: { type: string, minLength: 1, maxLength: 100 }
+        body: { type: string, minLength: 1, maxLength: 4000, description: 'Only {{topic}}, {{service}}, and {{region}} variables are supported.' }
+    ImportResponseTemplatesRequest:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { $ref: '#/components/schemas/ResponseTemplateInput' }
+    UpdateResponseTemplateRequest:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 4000 }
+    ResponseTemplateRecord:
+      type: object
+      required: [id, template_key, language, body, approved, version, created_at, updated_at]
+      properties:
+        id: { type: string }
+        template_key: { type: string }
+        language: { type: string, enum: [RU, KZ] }
+        topic_id: { type: string, nullable: true }
+        service_id: { type: string, nullable: true }
+        body: { type: string }
+        approved: { type: boolean }
+        version: { type: integer, minimum: 1 }
+        created_by: { type: string, nullable: true }
+        updated_by: { type: string, nullable: true }
+        approved_by: { type: string, nullable: true }
+        approved_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ResponseTemplatesResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ResponseTemplateRecord' }
     AssistOrchestration:
       type: object
       required: [request_id, trace_id, status, needs_review, language, latency_ms, model_versions, stages]
@@ -961,7 +1137,7 @@ components:
       required: [name, status, latency_ms]
       properties:
         name: { type: string, enum: [language, classification, routing, priority, retrieval, duplicate_repeat, response_template] }
-        status: { type: string, enum: [completed, partial, unavailable, skipped, unknown] }
+        status: { type: string, enum: [completed, partial, manual, unavailable, skipped, unknown] }
         latency_ms: { type: number, minimum: 0 }
         model_version: { type: string }
         error_code: { type: string }

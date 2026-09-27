@@ -58,7 +58,7 @@ async fn assist_preview_preserves_language_states_and_correlated_context() {
             Some("preview-ru"),
             Some("trace-ru"),
             false,
-            "MANUAL_DEMO",
+            "MANUAL_REQUIRED",
             "ru",
         ),
         (
@@ -66,7 +66,7 @@ async fn assist_preview_preserves_language_states_and_correlated_context() {
             Some("preview-kz"),
             Some("trace-kz"),
             false,
-            "MANUAL_DEMO",
+            "MANUAL_REQUIRED",
             "kk",
         ),
         (
@@ -455,10 +455,10 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
     assert_eq!(preview.status(), 200);
     let preview: serde_json::Value =
         serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(
-        preview["response_template"]["id"],
-        "template-ru-topic-roads"
-    );
+    assert_eq!(preview["response_template"]["id"], "manual");
+    assert_eq!(preview["response_template"]["source"], "MANUAL_REQUIRED");
+    assert_eq!(preview["response_template"]["body"], "");
+    assert_eq!(preview["response_template"]["approved"], false);
     assert_eq!(preview["ticket"]["topic_id"], "TOPIC-WATER");
     assert_eq!(preview["ticket"]["priority"], "high");
     assert_eq!(preview["ticket"]["status"], "open");
@@ -620,4 +620,295 @@ async fn alert_events_stream_snapshot_and_changes() {
         .unwrap()
         .unwrap();
     assert!(String::from_utf8_lossy(&changed).contains("event: alerts.changed"));
+}
+
+#[tokio::test]
+async fn response_templates_require_explicit_approval_and_exact_confirmed_selectors() {
+    let application = app(AppState::demo());
+    let preview_request = || {
+        Request::post("/api/v1/assist/preview")
+            .header("x-pulse-role", "OPERATOR")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"ticket_id":"ticket-002"}"#))
+            .unwrap()
+    };
+    let preview = application
+        .clone()
+        .oneshot(preview_request())
+        .await
+        .unwrap();
+    let preview: serde_json::Value =
+        serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(preview["response_template"]["source"], "MANUAL_REQUIRED");
+    assert_eq!(preview["response_template"]["body"], "");
+
+    let create = |service_id: &str, body: &str| {
+        Request::post("/api/v1/response-templates")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from(format!(
+                r#"{{"template_key":"roads-reply","language":"KZ","topic_id":"TOPIC-ROADS","service_id":"{service_id}","body":"{body}"}}"#
+            )))
+            .unwrap()
+    };
+
+    let wrong_service = application
+        .clone()
+        .oneshot(create(
+            "Водоканал",
+            "Для {{topic}} в {{region}} ответит {{service}}.",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_service.status(), 200);
+    let wrong_service: serde_json::Value = serde_json::from_slice(
+        &to_bytes(wrong_service.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wrong_service["approved"], false);
+    assert_eq!(wrong_service["version"], 1);
+
+    let operator_approval = application
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/response-templates/{}/approve",
+                wrong_service["id"].as_str().unwrap()
+            ))
+            .header("x-pulse-role", "OPERATOR")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(operator_approval.status(), 403);
+
+    let approve_wrong_service = application
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/response-templates/{}/approve",
+                wrong_service["id"].as_str().unwrap()
+            ))
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approve_wrong_service.status(), 200);
+    let preview = application
+        .clone()
+        .oneshot(preview_request())
+        .await
+        .unwrap();
+    let preview: serde_json::Value =
+        serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(preview["response_template"]["source"], "MANUAL_REQUIRED");
+
+    let matching_service = application
+        .clone()
+        .oneshot(create(
+            "Городская инфраструктура",
+            "Для {{topic}} в {{region}} ответит {{service}}.",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(matching_service.status(), 200);
+    let matching_service: serde_json::Value = serde_json::from_slice(
+        &to_bytes(matching_service.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(matching_service["approved"], false);
+    assert_eq!(matching_service["version"], 2);
+
+    let preview = application
+        .clone()
+        .oneshot(preview_request())
+        .await
+        .unwrap();
+    let preview: serde_json::Value =
+        serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(preview["response_template"]["source"], "MANUAL_REQUIRED");
+
+    let approve_matching = application
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/response-templates/{}/approve",
+                matching_service["id"].as_str().unwrap()
+            ))
+            .header("x-pulse-role", "MANAGER")
+            .header("x-user-id", "template-reviewer")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approve_matching.status(), 200);
+    let approved: serde_json::Value = serde_json::from_slice(
+        &to_bytes(approve_matching.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(approved["approved"], true);
+    assert_eq!(approved["approved_by"], "template-reviewer");
+    assert!(approved["approved_at"].as_str().is_some());
+
+    let preview = application
+        .clone()
+        .oneshot(preview_request())
+        .await
+        .unwrap();
+    let preview: serde_json::Value =
+        serde_json::from_slice(&to_bytes(preview.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(preview["response_template"]["source"], "APPROVED_TEMPLATE");
+    assert_eq!(preview["response_template"]["approved"], true);
+    assert_eq!(preview["response_template"]["version"], 2);
+    let body = preview["response_template"]["body"].as_str().unwrap();
+    assert!(body.contains("Дороги и благоустройство"));
+    assert!(body.contains("Городская инфраструктура"));
+    assert!(!body.contains("{{"));
+
+    let edit_approved = application
+        .clone()
+        .oneshot(
+            Request::put(format!(
+                "/api/v1/response-templates/{}",
+                matching_service["id"].as_str().unwrap()
+            ))
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"body":"new text"}"#))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edit_approved.status(), 409);
+
+    let delete_approved = application
+        .oneshot(
+            Request::delete(format!(
+                "/api/v1/response-templates/{}",
+                matching_service["id"].as_str().unwrap()
+            ))
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_approved.status(), 409);
+}
+
+#[tokio::test]
+async fn response_template_import_and_pending_crud_are_manager_only() {
+    let application = app(AppState::demo());
+    let operator_list = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/response-templates")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(operator_list.status(), 403);
+
+    let imported = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/response-templates/import")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"items":[{"template_key":"water-review","language":"KZ","topic_id":"TOPIC-WATER","service_id":"Водоканал","body":"{{topic}} · {{service}} · {{region}}"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), 200);
+    let imported: serde_json::Value =
+        serde_json::from_slice(&to_bytes(imported.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let record = &imported["items"][0];
+    assert_eq!(record["approved"], false);
+    assert_eq!(record["version"], 1);
+    let template_id = record["id"].as_str().unwrap();
+
+    let read = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/response-templates/{template_id}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.status(), 200);
+
+    let updated = application
+        .clone()
+        .oneshot(
+            Request::put(format!("/api/v1/response-templates/{template_id}"))
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"body":"Updated {{topic}} in {{region}}."}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+    let updated: serde_json::Value =
+        serde_json::from_slice(&to_bytes(updated.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(updated["body"], "Updated {{topic}} in {{region}}.");
+    assert_eq!(updated["approved"], false);
+
+    let deleted = application
+        .clone()
+        .oneshot(
+            Request::delete(format!("/api/v1/response-templates/{template_id}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), 204);
+
+    let invalid_variable = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/response-templates")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"template_key":"bad-variable","language":"RU","topic_id":"TOPIC-ROADS","service_id":"Городская инфраструктура","body":"{{ticket_text}}"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_variable.status(), 400);
+
+    let approval_cannot_be_injected = application
+        .oneshot(
+            Request::post("/api/v1/response-templates")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"template_key":"fake-approved","language":"RU","topic_id":"TOPIC-ROADS","service_id":"Городская инфраструктура","body":"Reply","approved":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(approval_cannot_be_injected.status(), 422);
 }

@@ -95,6 +95,9 @@ export interface Ticket {
   responseTemplate: string
   responseTemplateApproved?: boolean
   responseTemplateSource?: string
+  responseTemplateId?: string
+  responseTemplateKey?: string
+  responseTemplateVersion?: number
   assistPreview?: AssistPreviewState
   channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp' | 'Не указан'
 }

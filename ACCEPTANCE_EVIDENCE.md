@@ -60,7 +60,7 @@ forecast_model=forecast-seasonal-naive-2026-09-21-001
 
 - Authoritative 109 routing/priority rules and response templates have not
   been supplied. Current seeded mappings are `MANUAL`; templates are
-  `approved=false` and exposed as `MANUAL_DEMO`.
+  `approved=false` and exposed as `MANUAL_REQUIRED` without a draft body.
 - Production trusted-auth-gateway/JWT integration still depends on the
   deployment's external identity contract; the acceptance stack uses its
   documented demo auth mode.

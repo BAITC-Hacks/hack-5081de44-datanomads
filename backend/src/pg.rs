@@ -6,15 +6,16 @@
 //! the vector index and the ML service owns classification/embedding.
 
 use crate::{
-    metric_rate, related_ticket_candidate, Alert, AlertQuery, AlternativePrediction,
-    AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
-    AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, CreateLearningCycleRequest,
-    DatasetProvenance, DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse,
-    ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
-    LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
-    Prediction, QueryIntentRequest, RelationSuggestionSnapshot, ResponseTemplate, RuleProvenance,
-    RuleSource, RuntimeMetrics, Ticket, TicketDetailResponse, TicketListResponse, TicketQuery,
-    TimeSeriesPoint, Topic,
+    manual_response_template, metric_rate, related_ticket_candidate, render_template_body, Alert,
+    AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse,
+    AssistOrchestration, AssistPreviewResponse, AssistStage, CloseLearningCycleRequest,
+    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
+    ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
+    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
+    ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
+    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
+    ResponseTemplatesResponse, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
+    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -225,12 +226,52 @@ struct DbDecision {
     predicted_topic_id: Option<String>,
     confirmed_topic_id: Option<String>,
     confirmed_topic_label: Option<String>,
+    confirmed_service_id: Option<String>,
     confirmed_priority: String,
     service: Option<String>,
     feedback: Value,
     user_id: String,
     note: Option<String>,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DbResponseTemplate {
+    id: i64,
+    template_key: String,
+    language: String,
+    topic_id: Option<String>,
+    service_id: Option<String>,
+    body: String,
+    approved: bool,
+    version: i32,
+    created_by: Option<String>,
+    updated_by: Option<String>,
+    approved_by: Option<String>,
+    approved_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<DbResponseTemplate> for ResponseTemplateRecord {
+    fn from(row: DbResponseTemplate) -> Self {
+        Self {
+            id: row.id.to_string(),
+            template_key: row.template_key,
+            language: row.language,
+            topic_id: row.topic_id,
+            service_id: row.service_id,
+            body: row.body,
+            approved: row.approved,
+            version: row.version,
+            created_by: row.created_by,
+            updated_by: row.updated_by,
+            approved_by: row.approved_by,
+            approved_at: row.approved_at.map(|value| value.to_rfc3339()),
+            created_at: row.created_at.to_rfc3339(),
+            updated_at: row.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1114,54 +1155,244 @@ impl PgRepository {
         })
     }
 
+    pub async fn list_response_templates(&self) -> Result<ResponseTemplatesResponse, String> {
+        let rows = sqlx::query_as::<_, DbResponseTemplate>(
+            "SELECT id, template_key, language, topic_id, service_id, body, approved, version, created_by, updated_by, approved_by, approved_at, created_at, updated_at FROM response_templates ORDER BY template_key, language, version DESC, id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list response templates: {error}"))?;
+        Ok(ResponseTemplatesResponse {
+            items: rows.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    pub async fn get_response_template(
+        &self,
+        template_id: &str,
+    ) -> Result<ResponseTemplateRecord, String> {
+        let id = response_template_database_id(template_id)?;
+        let row = sqlx::query_as::<_, DbResponseTemplate>(
+            "SELECT id, template_key, language, topic_id, service_id, body, approved, version, created_by, updated_by, approved_by, approved_at, created_at, updated_at FROM response_templates WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("get response template: {error}"))?
+        .ok_or_else(|| format!("not found: response template {template_id} not found"))?;
+        Ok(row.into())
+    }
+
+    pub async fn create_response_templates(
+        &self,
+        inputs: &[ResponseTemplateInput],
+        actor_id: &str,
+    ) -> Result<Vec<ResponseTemplateRecord>, String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin response template import: {error}"))?;
+        for input in inputs {
+            let references_valid: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM topics WHERE id = $1 AND active) AND EXISTS (SELECT 1 FROM services WHERE id = $2 AND active)",
+            )
+            .bind(&input.topic_id)
+            .bind(&input.service_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("validate response template references: {error}"))?;
+            if !references_valid {
+                return Err(format!(
+                    "bad request: unknown or inactive topic_id/service_id for template {}",
+                    input.template_key
+                ));
+            }
+        }
+        let lock_keys = inputs
+            .iter()
+            .map(|input| format!("{}:{}", input.template_key, input.language))
+            .collect::<std::collections::BTreeSet<_>>();
+        for lock_key in lock_keys {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(lock_key)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("lock response template version: {error}"))?;
+        }
+
+        let mut records = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let latest_version: Option<i32> = sqlx::query_scalar(
+                "SELECT MAX(version) FROM response_templates WHERE template_key = $1 AND language = $2",
+            )
+            .bind(&input.template_key)
+            .bind(&input.language)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("read response template version: {error}"))?;
+            let row = sqlx::query_as::<_, DbResponseTemplate>(
+                "INSERT INTO response_templates (template_key, language, topic_id, service_id, body, approved, version, created_by, updated_by) VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7, $7) RETURNING id, template_key, language, topic_id, service_id, body, approved, version, created_by, updated_by, approved_by, approved_at, created_at, updated_at",
+            )
+            .bind(&input.template_key)
+            .bind(&input.language)
+            .bind(&input.topic_id)
+            .bind(&input.service_id)
+            .bind(&input.body)
+            .bind(latest_version.unwrap_or(0) + 1)
+            .bind(actor_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("create response template: {error}"))?;
+            records.push(ResponseTemplateRecord::from(row));
+        }
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit response template import: {error}"))?;
+        Ok(records)
+    }
+
+    pub async fn update_response_template(
+        &self,
+        template_id: &str,
+        body: &str,
+        actor_id: &str,
+    ) -> Result<ResponseTemplateRecord, String> {
+        let id = response_template_database_id(template_id)?;
+        let row = sqlx::query_as::<_, DbResponseTemplate>(
+            "UPDATE response_templates SET body = $2, updated_by = $3, updated_at = now() WHERE id = $1 AND approved = FALSE RETURNING id, template_key, language, topic_id, service_id, body, approved, version, created_by, updated_by, approved_by, approved_at, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(body)
+        .bind(actor_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("update response template: {error}"))?;
+        if let Some(row) = row {
+            return Ok(row.into());
+        }
+        let existing = self.get_response_template(template_id).await?;
+        if existing.approved {
+            return Err(
+                "conflict: approved template versions are immutable; create a new version"
+                    .to_owned(),
+            );
+        }
+        Err(format!(
+            "not found: response template {template_id} not found"
+        ))
+    }
+
+    pub async fn delete_response_template(&self, template_id: &str) -> Result<(), String> {
+        let id = response_template_database_id(template_id)?;
+        let deleted: Option<i64> = sqlx::query_scalar(
+            "DELETE FROM response_templates WHERE id = $1 AND approved = FALSE RETURNING id",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("delete response template: {error}"))?;
+        if deleted.is_some() {
+            return Ok(());
+        }
+        let existing = self.get_response_template(template_id).await?;
+        if existing.approved {
+            return Err("conflict: approved template versions cannot be deleted".to_owned());
+        }
+        Err(format!(
+            "not found: response template {template_id} not found"
+        ))
+    }
+
+    pub async fn approve_response_template(
+        &self,
+        template_id: &str,
+        actor_id: &str,
+    ) -> Result<ResponseTemplateRecord, String> {
+        let id = response_template_database_id(template_id)?;
+        let row = sqlx::query_as::<_, DbResponseTemplate>(
+            "UPDATE response_templates SET approved = TRUE, approved_by = $2, approved_at = now(), updated_by = $2, updated_at = now() WHERE id = $1 AND approved = FALSE RETURNING id, template_key, language, topic_id, service_id, body, approved, version, created_by, updated_by, approved_by, approved_at, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(actor_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("approve response template: {error}"))?;
+        if let Some(row) = row {
+            return Ok(row.into());
+        }
+        let existing = self.get_response_template(template_id).await?;
+        if existing.approved {
+            return Err("conflict: template version is already approved".to_owned());
+        }
+        Err(format!(
+            "not found: response template {template_id} not found"
+        ))
+    }
+
     async fn response_template(
         &self,
         language: &str,
         topic_id: &str,
-        service_name: &str,
+        service_id: &str,
+        region_name: &str,
     ) -> Result<ResponseTemplate, String> {
+        let normalized = normalize_language(language);
         let row = sqlx::query(
-            "SELECT rt.id, rt.body, rt.language, rt.approved, COALESCE(tp.name_ru, tp.name_kk, tp.id) AS topic_label, (rt.service_id IS NULL OR lower(COALESCE(s.name_ru, '')) = lower($3)) AS service_match FROM response_templates rt LEFT JOIN topics tp ON tp.id = rt.topic_id LEFT JOIN services s ON s.id = rt.service_id WHERE upper(rt.language) = upper($1) AND rt.topic_id = $2 ORDER BY service_match DESC, rt.approved DESC, rt.version DESC, rt.id DESC LIMIT 1",
+            "SELECT rt.id, rt.template_key, rt.version, rt.body, rt.language, rt.topic_id, rt.service_id, CASE WHEN $1 = 'KZ' THEN COALESCE(tp.name_kk, tp.name_ru, tp.id) ELSE COALESCE(tp.name_ru, tp.name_kk, tp.id) END AS topic_label, CASE WHEN $1 = 'KZ' THEN COALESCE(s.name_kk, s.name_ru, s.id) ELSE COALESCE(s.name_ru, s.name_kk, s.id) END AS service_label FROM response_templates rt JOIN topics tp ON tp.id = rt.topic_id JOIN services s ON s.id = rt.service_id WHERE rt.approved = TRUE AND upper(rt.language) = $1 AND rt.topic_id = $2 AND rt.service_id = $3 ORDER BY rt.version DESC, rt.id DESC LIMIT 1",
         )
-        .bind(normalize_language(language))
+        .bind(&normalized)
         .bind(topic_id)
-        .bind(service_name)
+        .bind(service_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|error| format!("fetch response template: {error}"))?;
+        .map_err(|error| format!("fetch approved response template: {error}"))?;
         let Some(row) = row else {
-            return Ok(unavailable_response_template(language));
+            return Ok(response_template_for(language, topic_id));
         };
-        if !row
-            .try_get::<bool, _>("service_match")
-            .map_err(|error| format!("template service match: {error}"))?
-        {
-            return Ok(unavailable_response_template(language));
-        }
-        let approved = row.try_get::<bool, _>("approved").unwrap_or(false);
+        let topic_label = row
+            .try_get::<String, _>("topic_label")
+            .map_err(|error| format!("template topic: {error}"))?;
+        let service_label = row
+            .try_get::<String, _>("service_label")
+            .map_err(|error| format!("template service: {error}"))?;
+        let stored_body = row
+            .try_get::<String, _>("body")
+            .map_err(|error| format!("template body: {error}"))?;
+        let Some(body) =
+            render_template_body(&stored_body, &topic_label, &service_label, region_name)
+        else {
+            return Ok(response_template_for(language, &topic_label));
+        };
         Ok(ResponseTemplate {
             id: row
                 .try_get::<i64, _>("id")
                 .map_err(|error| format!("template id: {error}"))?
                 .to_string(),
-            title: format!(
-                "Обращение: {}",
-                row.try_get::<String, _>("topic_label")
-                    .map_err(|error| format!("template topic: {error}"))?
-            ),
-            body: row
-                .try_get("body")
-                .map_err(|error| format!("template body: {error}"))?,
+            title: format!("Ответ: {topic_label} · {service_label}"),
+            body,
             language: row
                 .try_get::<String, _>("language")
                 .map_err(|error| format!("template language: {error}"))?
                 .to_ascii_lowercase(),
-            approved,
-            source: if approved {
-                "AUTHORITATIVE".to_owned()
-            } else {
-                "MANUAL_DEMO".to_owned()
-            },
+            approved: true,
+            source: "APPROVED_TEMPLATE".to_owned(),
+            template_key: Some(
+                row.try_get("template_key")
+                    .map_err(|error| format!("template key: {error}"))?,
+            ),
+            topic_id: Some(
+                row.try_get("topic_id")
+                    .map_err(|error| format!("template topic id: {error}"))?,
+            ),
+            service_id: Some(
+                row.try_get("service_id")
+                    .map_err(|error| format!("template service id: {error}"))?,
+            ),
+            version: Some(
+                row.try_get("version")
+                    .map_err(|error| format!("template version: {error}"))?,
+            ),
         })
     }
 
@@ -3638,18 +3869,6 @@ impl PgRepository {
             .filter(|item| item.relation == "repeat")
             .cloned()
             .collect();
-        let (template_topic, template_service) = latest_decision
-            .as_ref()
-            .map(|decision| {
-                (
-                    decision.confirmed_topic_id.as_str(),
-                    decision.service.as_str(),
-                )
-            })
-            .unwrap_or((
-                prediction.topic_id.as_str(),
-                prediction.recommended_service.as_str(),
-            ));
         let template_started = Instant::now();
         let response_template = if !response_template_language_supported(&language_state) {
             needs_review = true;
@@ -3661,56 +3880,71 @@ impl PgRepository {
                 Some("LANGUAGE_UNSUPPORTED"),
             ));
             unavailable_response_template(&language_state)
-        } else if template_topic.eq_ignore_ascii_case("unknown")
-            || template_service.eq_ignore_ascii_case("unknown")
-        {
+        } else if let Some(decision) = latest_decision.as_ref() {
+            if let Some(service_id) = decision.confirmed_service_id.as_deref() {
+                match self
+                    .response_template(
+                        &ticket.language,
+                        &decision.confirmed_topic_id,
+                        service_id,
+                        &ticket.region_name,
+                    )
+                    .await
+                {
+                    Ok(template) if template.approved => {
+                        stages.push(assist_stage(
+                            "response_template",
+                            "completed",
+                            template_started.elapsed().as_secs_f64() * 1000.0,
+                            None,
+                            None,
+                        ));
+                        template
+                    }
+                    Ok(template) => {
+                        needs_review = true;
+                        stages.push(assist_stage(
+                            "response_template",
+                            "manual",
+                            template_started.elapsed().as_secs_f64() * 1000.0,
+                            None,
+                            Some("APPROVED_TEMPLATE_NOT_FOUND"),
+                        ));
+                        template
+                    }
+                    Err(_) => {
+                        needs_review = true;
+                        stages.push(assist_stage(
+                            "response_template",
+                            "unavailable",
+                            template_started.elapsed().as_secs_f64() * 1000.0,
+                            None,
+                            Some("TEMPLATE_UNAVAILABLE"),
+                        ));
+                        unavailable_response_template(&language_state)
+                    }
+                }
+            } else {
+                needs_review = true;
+                stages.push(assist_stage(
+                    "response_template",
+                    "manual",
+                    template_started.elapsed().as_secs_f64() * 1000.0,
+                    None,
+                    Some("CONFIRMED_SERVICE_REQUIRED"),
+                ));
+                response_template_for(&ticket.language, &decision.confirmed_topic_label)
+            }
+        } else {
             needs_review = true;
             stages.push(assist_stage(
                 "response_template",
-                "skipped",
-                0.0,
+                "manual",
+                template_started.elapsed().as_secs_f64() * 1000.0,
                 None,
-                Some("ROUTING_UNAVAILABLE"),
+                Some("CONFIRMED_DECISION_REQUIRED"),
             ));
-            unavailable_response_template(&language_state)
-        } else {
-            match self
-                .response_template(&ticket.language, template_topic, template_service)
-                .await
-            {
-                Ok(template) if template.source != "UNAVAILABLE" => {
-                    stages.push(assist_stage(
-                        "response_template",
-                        "completed",
-                        template_started.elapsed().as_secs_f64() * 1000.0,
-                        None,
-                        None,
-                    ));
-                    template
-                }
-                Ok(template) => {
-                    needs_review = true;
-                    stages.push(assist_stage(
-                        "response_template",
-                        "unavailable",
-                        template_started.elapsed().as_secs_f64() * 1000.0,
-                        None,
-                        Some("NO_COMPATIBLE_TEMPLATE"),
-                    ));
-                    template
-                }
-                Err(_) => {
-                    needs_review = true;
-                    stages.push(assist_stage(
-                        "response_template",
-                        "unavailable",
-                        template_started.elapsed().as_secs_f64() * 1000.0,
-                        None,
-                        Some("TEMPLATE_UNAVAILABLE"),
-                    ));
-                    unavailable_response_template(&language_state)
-                }
-            }
+            response_template_for(&ticket.language, &ticket.topic_label)
         };
         let partial = stages
             .iter()
@@ -3718,7 +3952,7 @@ impl PgRepository {
         needs_review |= partial
             || matches!(language_state.as_str(), "MIXED" | "UNKNOWN")
             || latest_decision.is_none()
-            || response_template.source != "AUTHORITATIVE";
+            || !response_template.approved;
         Ok(AssistPreviewResponse {
             response_template,
             ticket,
@@ -3944,6 +4178,7 @@ impl PgRepository {
             model_version: Some(prediction.model_version.clone()),
             confirmed_topic_id: confirmed_topic,
             confirmed_topic_label,
+            confirmed_service_id: Some(service_id),
             service,
             priority,
             service_provenance,
@@ -4034,7 +4269,7 @@ impl PgRepository {
         ticket_id: i64,
     ) -> Result<Option<OperatorDecision>, String> {
         let row: Option<DbDecision> = sqlx::query_as(
-            "SELECT d.id, d.ticket_id, d.decision, COALESCE(d.feedback->>'predicted_topic_id', d.confirmed_topic_id) AS predicted_topic_id, d.confirmed_topic_id, COALESCE(tp.name_ru, tp.name_kk, d.confirmed_topic_id) AS confirmed_topic_label, COALESCE(d.confirmed_priority, 'normal') AS confirmed_priority, d.feedback->>'service' AS service, d.feedback, COALESCE(d.user_id, 'unknown') AS user_id, d.feedback->>'note' AS note, d.created_at FROM operator_decisions d LEFT JOIN topics tp ON tp.id = d.confirmed_topic_id WHERE d.ticket_id = $1 ORDER BY d.created_at DESC, d.id DESC LIMIT 1",
+            "SELECT d.id, d.ticket_id, d.decision, COALESCE(d.feedback->>'predicted_topic_id', d.confirmed_topic_id) AS predicted_topic_id, d.confirmed_topic_id, COALESCE(tp.name_ru, tp.name_kk, d.confirmed_topic_id) AS confirmed_topic_label, d.confirmed_service_id, COALESCE(d.confirmed_priority, 'normal') AS confirmed_priority, d.feedback->>'service' AS service, d.feedback, COALESCE(d.user_id, 'unknown') AS user_id, d.feedback->>'note' AS note, d.created_at FROM operator_decisions d LEFT JOIN topics tp ON tp.id = d.confirmed_topic_id WHERE d.ticket_id = $1 ORDER BY d.created_at DESC, d.id DESC LIMIT 1",
         )
         .bind(ticket_id)
         .fetch_optional(&self.pool)
@@ -4247,6 +4482,7 @@ fn decision_from_db(row: DbDecision) -> OperatorDecision {
             .map(ToOwned::to_owned),
         confirmed_topic_id,
         confirmed_topic_label,
+        confirmed_service_id: row.confirmed_service_id,
         service: row.service.unwrap_or_else(|| "Другая служба".to_owned()),
         priority: row.confirmed_priority,
         service_provenance: rule_provenance_from_db(
@@ -4265,19 +4501,15 @@ fn decision_from_db(row: DbDecision) -> OperatorDecision {
     }
 }
 
-fn response_template_for(language: &str, topic: &str) -> ResponseTemplate {
-    ResponseTemplate {
-        id: format!("db-template-{}", language.to_ascii_lowercase()),
-        title: format!("Обращение: {topic}"),
-        body: if language.eq_ignore_ascii_case("KZ") || language.eq_ignore_ascii_case("kk") {
-            "Өтінішіңіз тіркелді және жауапты қызметке жіберілді.".to_owned()
-        } else {
-            "Обращение зарегистрировано и направлено в ответственную службу.".to_owned()
-        },
-        language: language.to_ascii_lowercase(),
-        approved: false,
-        source: "MANUAL_DEMO".to_owned(),
-    }
+fn response_template_database_id(template_id: &str) -> Result<i64, String> {
+    let value = template_id.strip_prefix("template-").unwrap_or(template_id);
+    value
+        .parse::<i64>()
+        .map_err(|_| format!("not found: response template {template_id} not found"))
+}
+
+fn response_template_for(language: &str, _topic: &str) -> ResponseTemplate {
+    manual_response_template(language)
 }
 
 fn unavailable_response_template(language: &str) -> ResponseTemplate {
@@ -4299,6 +4531,10 @@ fn unavailable_response_template(language: &str) -> ResponseTemplate {
         language: if kazakh { "kz" } else { "ru" }.to_owned(),
         approved: false,
         source: "UNAVAILABLE".to_owned(),
+        template_key: None,
+        topic_id: None,
+        service_id: None,
+        version: None,
     }
 }
 
@@ -4620,7 +4856,7 @@ mod assist_preview_tests {
             preview.prediction.priority_provenance.source,
             RuleSource::Manual
         );
-        assert_eq!(preview.response_template.source, "UNAVAILABLE");
+        assert_eq!(preview.response_template.source, "MANUAL_REQUIRED");
         assert!(preview.similar_tickets.is_empty());
         assert!(preview.duplicate_candidates.is_empty());
         assert!(preview.repeat_candidates.is_empty());

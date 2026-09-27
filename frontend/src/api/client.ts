@@ -109,7 +109,16 @@ interface BackendAssistPreview {
   similar_tickets?: BackendSimilar[]
   duplicate_candidates?: BackendSimilar[]
   repeat_candidates?: BackendSimilar[]
-  response_template?: { body: string; approved?: boolean; source?: string }
+  response_template?: {
+    id?: string
+    template_key?: string
+    topic_id?: string
+    service_id?: string
+    version?: number
+    body: string
+    approved?: boolean
+    source?: string
+  }
   orchestration?: AssistPreviewState
 }
 
@@ -295,9 +304,16 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     createdAt: item.created_at?.trim() || 'Время не указано',
     status,
     similar,
-    responseTemplate: preview?.response_template?.body ?? 'Шаблон ответа сейчас недоступен. Составьте ответ вручную.',
+    responseTemplate: preview?.response_template?.source === 'UNAVAILABLE'
+      ? preview.response_template.body
+      : preview?.response_template?.source === 'APPROVED_TEMPLATE' && preview.response_template.approved === true
+        ? preview.response_template.body
+        : '',
     responseTemplateApproved: preview?.response_template?.approved,
     responseTemplateSource: preview?.response_template?.source,
+    responseTemplateId: preview?.response_template?.id,
+    responseTemplateKey: preview?.response_template?.template_key,
+    responseTemplateVersion: preview?.response_template?.version,
     assistPreview: preview?.orchestration,
     channel: mapTicketChannel(item.source),
   }

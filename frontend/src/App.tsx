@@ -354,9 +354,9 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
           ...decision,
           priority: (decision.priority as Priority | undefined) ?? item.priority,
           ...(decision.status === 'corrected' ? {
-            responseTemplate: 'Для исправленного решения шаблон недоступен. Составьте ответ вручную.',
+            responseTemplate: '',
             responseTemplateApproved: false,
-            responseTemplateSource: undefined,
+            responseTemplateSource: 'MANUAL_REQUIRED',
           } : {}),
         }
       })
@@ -418,13 +418,15 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
 
 function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[]) => void }) {
   const [correctionOpen, setCorrectionOpen] = useState(false)
-  const [templateOpen, setTemplateOpen] = useState(false)
+  const [replyDraftMode, setReplyDraftMode] = useState<'closed' | 'template' | 'manual'>('closed')
+  const [replyDraft, setReplyDraft] = useState('')
+  const [templateIgnored, setTemplateIgnored] = useState(false)
   const [topic, setTopic] = useState(ticket.topic)
   const [service, setService] = useState(ticket.service)
   const [priority, setPriority] = useState<Priority>(ticket.priority)
   const confidenceState = normalizeConfidenceState(ticket.confidenceState, ticket.confidence, ticket.confidenceAvailable !== false)
   const confidenceAvailable = ticket.confidenceAvailable !== false && confidenceState !== 'UNAVAILABLE'
-  const hasTemplate = Boolean(ticket.responseTemplateSource && ticket.responseTemplateSource !== 'UNAVAILABLE')
+  const hasApprovedTemplate = ticket.responseTemplateApproved === true && ticket.responseTemplateSource === 'APPROVED_TEMPLATE'
   const preview = ticket.assistPreview
   const retrievalStage = preview?.stages.find((stage) => stage.name === 'retrieval')
   const emptyHistoryMessage = !preview
@@ -457,8 +459,10 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     setService(ticket.service)
     setPriority(ticket.priority)
     setCorrectionOpen(ticket.status === 'new' && (confidenceState === 'LOW_CONFIDENCE' || confidenceState === 'UNAVAILABLE'))
-    setTemplateOpen(false)
-  }, [ticket.id, ticket.topic, ticket.service, ticket.priority, ticket.status, confidenceState])
+    setReplyDraftMode('closed')
+    setReplyDraft('')
+    setTemplateIgnored(false)
+  }, [ticket.id, ticket.topic, ticket.service, ticket.priority, ticket.status, ticket.responseTemplateId, ticket.responseTemplateVersion, ticket.responseTemplateSource, ticket.responseTemplate, confidenceState])
 
   return <aside className={`ticket-detail ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
     <div className="detail-header"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</div><h2>{ticket.id}</h2></div><button className="icon-button detail-close" aria-label="Закрыть детали" onClick={onClose}><Icon name="close" size={18} /></button></div>
@@ -551,13 +555,38 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
         <p className="panel-note"><strong>Основание маршрутизации:</strong> {ticket.routingReason?.trim() || 'Не предоставлено; проверьте службу и приоритет вручную.'}</p>
       </div>
       <div className="detail-section">
-        <div className="field-label">Ответ оператору {ticket.status !== 'new' && <span className="language-chip">{ticket.responseTemplateApproved ? 'Утверждённый' : hasTemplate ? 'Демо-черновик' : 'Нет шаблона'}</span>}</div>
-        {ticket.status === 'new' ? (
-          <p className="panel-note">{ticket.responseTemplateSource === 'UNAVAILABLE' ? ticket.responseTemplate : 'Подтвердите или исправьте тему и службу, чтобы увидеть ответ.'}</p>
-        ) : hasTemplate ? (
-          <div className={`response-template ${templateOpen ? 'response-template-open' : ''}`}><p>{ticket.responseTemplate}</p><button className="text-button" onClick={() => setTemplateOpen((value) => !value)}><Icon name="external" size={14} />{templateOpen ? 'Свернуть шаблон' : 'Открыть шаблон'}</button></div>
-        ) : (
-          <p className="panel-note">{ticket.responseTemplate}</p>
+        <div className="field-label">Ответ оператору <span className="language-chip">{hasApprovedTemplate ? (ticket.responseTemplateVersion ? `Утверждённый · v${ticket.responseTemplateVersion}` : 'Утверждённый шаблон') : 'Ручной ответ'}</span></div>
+        {hasApprovedTemplate && !templateIgnored && (
+          <div className="response-template">
+            <p>{ticket.responseTemplate}</p>
+            <div className="response-template-actions">
+              <button className="button button-quiet" onClick={() => { setReplyDraft(ticket.responseTemplate); setReplyDraftMode('template') }}>Использовать шаблон</button>
+              <button className="text-button" onClick={() => { setTemplateIgnored(true); setReplyDraftMode('closed'); setReplyDraft('') }}>Игнорировать</button>
+            </div>
+          </div>
+        )}
+        {!hasApprovedTemplate && replyDraftMode === 'closed' && (
+          <p className="panel-note" role="status">
+            {ticket.responseTemplateSource === 'UNAVAILABLE' && ticket.responseTemplate.trim()
+              ? ticket.responseTemplate
+              : ticket.status === 'new'
+                ? 'Утверждённый шаблон появится после подтверждения темы и службы. Ответ можно написать вручную.'
+                : 'Для этого решения нет утверждённого шаблона. Составьте ответ вручную.'}
+          </p>
+        )}
+        {templateIgnored && replyDraftMode === 'closed' && (
+          <button className="text-button" onClick={() => setTemplateIgnored(false)}>Показать утверждённый шаблон</button>
+        )}
+        {replyDraftMode === 'closed' && (
+          <button className="button button-quiet" onClick={() => { setReplyDraft(''); setReplyDraftMode('manual') }}>Написать вручную</button>
+        )}
+        {replyDraftMode !== 'closed' && (
+          <div className="response-draft">
+            <label className="field-label" htmlFor={`reply-draft-${ticket.id}`}>Черновик ответа</label>
+            <textarea id={`reply-draft-${ticket.id}`} aria-label="Черновик ответа" value={replyDraft} onChange={(event) => setReplyDraft(event.target.value)} rows={5} />
+            <p className="panel-note">Черновик доступен только на этом экране. Отправки в CRM нет.</p>
+            <button className="text-button" onClick={() => { setReplyDraftMode('closed'); setReplyDraft('') }}>Закрыть черновик</button>
+          </div>
         )}
       </div>
       <div className="detail-section">

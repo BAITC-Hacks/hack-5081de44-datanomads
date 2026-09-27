@@ -43,6 +43,8 @@ const DEMO_TIMESTAMP: &str = "2026-09-21T08:00:00Z";
 pub(crate) const RELATED_CANDIDATE_THRESHOLD: f32 = 0.78;
 pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
 const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
+const MAX_RESPONSE_TEMPLATE_BODY_CHARS: usize = 4_000;
+const MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS: usize = 200;
 
 /// Runtime configuration.  `dev_auth` is enabled by default for the local
 /// deterministic demo: a request without `x-pulse-role` acts as ADMIN, while
@@ -203,6 +205,7 @@ impl AppState {
 struct Store {
     regions: Vec<Region>,
     topics: Vec<Topic>,
+    response_templates: BTreeMap<String, ResponseTemplateRecord>,
     tickets: BTreeMap<String, Ticket>,
     predictions: BTreeMap<String, Prediction>,
     decisions: Vec<OperatorDecision>,
@@ -214,6 +217,7 @@ struct Store {
     next_decision_number: u64,
     next_cycle_number: u64,
     next_feedback_number: u64,
+    next_response_template_number: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -319,6 +323,8 @@ pub struct OperatorDecision {
     pub model_version: Option<String>,
     pub confirmed_topic_id: String,
     pub confirmed_topic_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_service_id: Option<String>,
     pub service: String,
     pub priority: String,
     pub service_provenance: RuleProvenance,
@@ -357,6 +363,59 @@ pub struct ResponseTemplate {
     pub language: String,
     pub approved: bool,
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseTemplateInput {
+    pub template_key: String,
+    pub language: String,
+    pub topic_id: String,
+    pub service_id: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportResponseTemplatesRequest {
+    pub items: Vec<ResponseTemplateInput>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateResponseTemplateRequest {
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ResponseTemplateRecord {
+    pub id: String,
+    pub template_key: String,
+    pub language: String,
+    pub topic_id: Option<String>,
+    pub service_id: Option<String>,
+    pub body: String,
+    pub approved: bool,
+    pub version: i32,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ResponseTemplatesResponse {
+    pub items: Vec<ResponseTemplateRecord>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -806,6 +865,31 @@ fn unavailable_demo_response_template(language: &str) -> ResponseTemplate {
         language: if kazakh { "kz" } else { "ru" }.to_owned(),
         approved: false,
         source: "UNAVAILABLE".to_owned(),
+        template_key: None,
+        topic_id: None,
+        service_id: None,
+        version: None,
+    }
+}
+
+fn manual_response_template(language: &str) -> ResponseTemplate {
+    let kazakh = language.eq_ignore_ascii_case("KZ") || language.eq_ignore_ascii_case("kk");
+    ResponseTemplate {
+        id: "manual".to_owned(),
+        title: if kazakh {
+            "Жауапты қолмен жазыңыз"
+        } else {
+            "Напишите ответ вручную"
+        }
+        .to_owned(),
+        body: String::new(),
+        language: if kazakh { "kz" } else { "ru" }.to_owned(),
+        approved: false,
+        source: "MANUAL_REQUIRED".to_owned(),
+        template_key: None,
+        topic_id: None,
+        service_id: None,
+        version: None,
     }
 }
 
@@ -911,20 +995,141 @@ fn prediction_for_ticket(ticket: &Ticket, topics: &[Topic]) -> Prediction {
     }
 }
 
-fn response_template(language: &str, topic_id: &str) -> ResponseTemplate {
-    let title = format!("Обращение: {}", topic_label(&demo_topics(), topic_id));
-    let body = if language == "kk" {
-        "Өтінішіңіз тіркелді. Жауапты қызметке жолданды, мәртебені осы арнадан қадағалай аласыз."
-    } else {
-        "Ваше обращение зарегистрировано и направлено в ответственную службу. Статус можно отслеживать в этом канале."
+fn validate_template_body(body: &str) -> Result<(), String> {
+    let mut cursor = 0;
+    loop {
+        let remaining = &body[cursor..];
+        let opening = remaining.find("{{");
+        let closing = remaining.find("}}");
+        let Some(start) = opening else {
+            if closing.is_some() {
+                return Err("template variable close marker has no opening marker".to_owned());
+            }
+            return Ok(());
+        };
+        if closing.is_some_and(|end| end < start) {
+            return Err("template variable close marker has no opening marker".to_owned());
+        }
+        let after_start = &remaining[start + 2..];
+        let end = after_start
+            .find("}}")
+            .ok_or_else(|| "template variable is not closed".to_owned())?;
+        let variable = &after_start[..end];
+        if !matches!(variable, "topic" | "service" | "region") {
+            return Err(format!("unsupported template variable: {variable}"));
+        }
+        cursor += start + 2 + end + 2;
+    }
+}
+
+fn render_template_body(body: &str, topic: &str, service: &str, region: &str) -> Option<String> {
+    validate_template_body(body).ok()?;
+    let mut output = String::with_capacity(body.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = body[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        output.push_str(&body[cursor..start]);
+        let variable_start = start + 2;
+        let relative_end = body[variable_start..].find("}}")?;
+        let variable_end = variable_start + relative_end;
+        let value = match &body[variable_start..variable_end] {
+            "topic" => topic,
+            "service" => service,
+            "region" => region,
+            _ => return None,
+        };
+        output.push_str(value);
+        cursor = variable_end + 2;
+    }
+    output.push_str(&body[cursor..]);
+    Some(output)
+}
+
+fn normalize_response_template_input(
+    mut input: ResponseTemplateInput,
+) -> Result<ResponseTemplateInput, ApiError> {
+    input.template_key = input.template_key.trim().to_ascii_lowercase();
+    if input.template_key.is_empty()
+        || input.template_key.len() > 100
+        || !input.template_key.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(ApiError::BadRequest(
+            "template_key must be 1 to 100 ASCII letters, digits, dots, dashes, or underscores"
+                .to_owned(),
+        ));
+    }
+    input.language = match input.language.trim().to_ascii_uppercase().as_str() {
+        "RU" | "RUS" => "RU".to_owned(),
+        "KZ" | "KK" | "KAZ" => "KZ".to_owned(),
+        _ => return Err(ApiError::BadRequest("language must be RU or KZ".to_owned())),
+    };
+    input.topic_id = input.topic_id.trim().to_owned();
+    input.service_id = input.service_id.trim().to_owned();
+    if input.topic_id.is_empty()
+        || input.topic_id.len() > 100
+        || input.service_id.is_empty()
+        || input.service_id.len() > 100
+    {
+        return Err(ApiError::BadRequest(
+            "topic_id and service_id must be between 1 and 100 characters".to_owned(),
+        ));
+    }
+    input.body = input.body.trim().to_owned();
+    let body_length = input.body.chars().count();
+    if body_length == 0 || body_length > MAX_RESPONSE_TEMPLATE_BODY_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "body must be between 1 and {MAX_RESPONSE_TEMPLATE_BODY_CHARS} characters"
+        )));
+    }
+    validate_template_body(&input.body).map_err(|_| {
+        ApiError::BadRequest("body contains an unsupported template variable".to_owned())
+    })?;
+    Ok(input)
+}
+
+fn response_template(
+    store: &Store,
+    language: &str,
+    topic_id: &str,
+    service_id: &str,
+    service_name: &str,
+    region_name: &str,
+) -> ResponseTemplate {
+    let normalized_language = match language.trim().to_ascii_uppercase().as_str() {
+        "RU" | "RUS" => "RU",
+        "KZ" | "KK" | "KAZ" => "KZ",
+        _ => return manual_response_template(language),
+    };
+    let Some(template) = store
+        .response_templates
+        .values()
+        .filter(|template| {
+            template.approved
+                && template.language == normalized_language
+                && template.topic_id.as_deref() == Some(topic_id)
+                && template.service_id.as_deref() == Some(service_id)
+        })
+        .max_by_key(|template| (template.version, template.id.as_str()))
+    else {
+        return manual_response_template(language);
+    };
+    let topic = topic_label(&store.topics, topic_id);
+    let Some(body) = render_template_body(&template.body, &topic, service_name, region_name) else {
+        return manual_response_template(language);
     };
     ResponseTemplate {
-        id: format!("template-{}-{}", language, topic_id.to_ascii_lowercase()),
-        title,
-        body: body.to_owned(),
-        language: language.to_owned(),
-        approved: false,
-        source: "MANUAL_DEMO".to_owned(),
+        id: template.id.clone(),
+        title: format!("Ответ: {topic} · {service_name}"),
+        body,
+        language: normalized_language.to_ascii_lowercase(),
+        approved: true,
+        source: "APPROVED_TEMPLATE".to_owned(),
+        template_key: Some(template.template_key.clone()),
+        topic_id: template.topic_id.clone(),
+        service_id: template.service_id.clone(),
+        version: Some(template.version),
     }
 }
 
@@ -1141,6 +1346,7 @@ impl Store {
         Self {
             regions,
             topics,
+            response_templates: BTreeMap::new(),
             tickets,
             predictions,
             decisions: vec![OperatorDecision {
@@ -1153,6 +1359,7 @@ impl Store {
                 model_version: demo_model_version,
                 confirmed_topic_id: "TOPIC-ROADS".to_owned(),
                 confirmed_topic_label: demo_confirmed_topic_label,
+                confirmed_service_id: Some("Городская инфраструктура".to_owned()),
                 service: "Городская инфраструктура".to_owned(),
                 priority: "high".to_owned(),
                 service_provenance: RuleProvenance::manual("Демо-решение оператора"),
@@ -1169,6 +1376,7 @@ impl Store {
             next_decision_number: 2,
             next_cycle_number: 2,
             next_feedback_number: 1,
+            next_response_template_number: 1,
         }
     }
 }
@@ -1198,6 +1406,24 @@ pub fn app(state: AppState) -> Router {
             get(get_prediction),
         )
         .route("/api/v1/assist/preview", post(assist_preview))
+        .route(
+            "/api/v1/response-templates",
+            get(list_response_templates).post(create_response_template),
+        )
+        .route(
+            "/api/v1/response-templates/import",
+            post(import_response_templates),
+        )
+        .route(
+            "/api/v1/response-templates/{template_id}",
+            get(get_response_template)
+                .put(update_response_template)
+                .delete(delete_response_template),
+        )
+        .route(
+            "/api/v1/response-templates/{template_id}/approve",
+            post(approve_response_template),
+        )
         .route("/api/v1/assist/{ticket_id}/confirm", post(confirm_ticket))
         .route("/api/v1/assist/{ticket_id}/correct", post(correct_ticket))
         .route("/api/v1/assist/confirm", post(confirm_ticket_from_body))
@@ -1991,6 +2217,376 @@ fn demo_related_tickets(store: &Store, ticket: &Ticket, topic_id: &str) -> Vec<S
         .collect()
 }
 
+fn require_template_manager(headers: &HeaderMap, config: &Config) -> Result<Actor, ApiError> {
+    require_role(headers, config, &[Role::Manager, Role::Admin])
+}
+
+fn template_repository_error(error: String) -> ApiError {
+    if let Some(message) = error.strip_prefix("bad request: ") {
+        ApiError::BadRequest(message.to_owned())
+    } else if let Some(message) = error.strip_prefix("not found: ") {
+        ApiError::NotFound(message.to_owned())
+    } else if let Some(message) = error.strip_prefix("conflict: ") {
+        ApiError::Conflict(message.to_owned())
+    } else {
+        ApiError::Internal(error)
+    }
+}
+
+fn validate_memory_template_references(
+    input: &ResponseTemplateInput,
+    store: &Store,
+) -> Result<(), ApiError> {
+    if !store.topics.iter().any(|topic| topic.id == input.topic_id) {
+        return Err(ApiError::BadRequest(format!(
+            "unknown topic_id: {}",
+            input.topic_id
+        )));
+    }
+    if !store
+        .topics
+        .iter()
+        .any(|topic| service_for_topic(&topic.id) == input.service_id)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "unknown service_id: {}",
+            input.service_id
+        )));
+    }
+    Ok(())
+}
+
+fn insert_memory_templates(
+    store: &mut Store,
+    inputs: &[ResponseTemplateInput],
+    actor_id: &str,
+) -> Vec<ResponseTemplateRecord> {
+    let mut records = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let version = store
+            .response_templates
+            .values()
+            .filter(|record| {
+                record.template_key == input.template_key && record.language == input.language
+            })
+            .map(|record| record.version)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let id = format!("template-{:04}", store.next_response_template_number);
+        store.next_response_template_number += 1;
+        let timestamp = Utc::now().to_rfc3339();
+        let record = ResponseTemplateRecord {
+            id: id.clone(),
+            template_key: input.template_key.clone(),
+            language: input.language.clone(),
+            topic_id: Some(input.topic_id.clone()),
+            service_id: Some(input.service_id.clone()),
+            body: input.body.clone(),
+            approved: false,
+            version,
+            created_by: Some(actor_id.to_owned()),
+            updated_by: Some(actor_id.to_owned()),
+            approved_by: None,
+            approved_at: None,
+            created_at: timestamp.clone(),
+            updated_at: timestamp,
+        };
+        store.response_templates.insert(id, record.clone());
+        records.push(record);
+    }
+    records
+}
+
+fn ordered_memory_templates(store: &Store) -> Vec<ResponseTemplateRecord> {
+    let mut items = store
+        .response_templates
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.template_key
+            .cmp(&right.template_key)
+            .then_with(|| left.language.cmp(&right.language))
+            .then_with(|| right.version.cmp(&left.version))
+    });
+    items
+}
+
+fn normalize_response_template_body(body: String) -> Result<String, ApiError> {
+    let body = body.trim().to_owned();
+    let body_length = body.chars().count();
+    if body_length == 0 || body_length > MAX_RESPONSE_TEMPLATE_BODY_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "body must be between 1 and {MAX_RESPONSE_TEMPLATE_BODY_CHARS} characters"
+        )));
+    }
+    validate_template_body(&body).map_err(|_| {
+        ApiError::BadRequest("body contains an unsupported template variable".to_owned())
+    })?;
+    Ok(body)
+}
+
+async fn list_response_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ResponseTemplatesResponse>, ApiError> {
+    require_template_manager(&headers, &state.config)?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .list_response_templates()
+            .await
+            .map(Json)
+            .map_err(template_repository_error);
+    }
+    let store = state.read_store()?;
+    Ok(Json(ResponseTemplatesResponse {
+        items: ordered_memory_templates(&store),
+    }))
+}
+
+async fn get_response_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(template_id): Path<String>,
+) -> Result<Json<ResponseTemplateRecord>, ApiError> {
+    require_template_manager(&headers, &state.config)?;
+    if let Some(repository) = state.repository() {
+        return repository
+            .get_response_template(&template_id)
+            .await
+            .map(Json)
+            .map_err(template_repository_error);
+    }
+    let store = state.read_store()?;
+    store
+        .response_templates
+        .get(&template_id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("response template {template_id} not found")))
+}
+
+async fn create_response_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ResponseTemplateInput>,
+) -> Result<Json<ResponseTemplateRecord>, ApiError> {
+    let actor = require_template_manager(&headers, &state.config)?;
+    let input = normalize_response_template_input(input)?;
+    let record = if let Some(repository) = state.repository() {
+        let mut records = repository
+            .create_response_templates(std::slice::from_ref(&input), &actor.user_id)
+            .await
+            .map_err(template_repository_error)?;
+        let record = records
+            .pop()
+            .ok_or_else(|| ApiError::Internal("template insert returned no record".to_owned()))?;
+        repository
+            .audit(
+                &actor.user_id,
+                "CREATE_RESPONSE_TEMPLATE",
+                "response_template",
+                Some(&record.id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({"template_key": record.template_key, "version": record.version}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        record
+    } else {
+        let mut store = state.write_store()?;
+        validate_memory_template_references(&input, &store)?;
+        insert_memory_templates(&mut store, &[input], &actor.user_id)
+            .into_iter()
+            .next()
+            .ok_or_else(|| ApiError::Internal("template insert returned no record".to_owned()))?
+    };
+    Ok(Json(record))
+}
+
+async fn import_response_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ImportResponseTemplatesRequest>,
+) -> Result<Json<ResponseTemplatesResponse>, ApiError> {
+    let actor = require_template_manager(&headers, &state.config)?;
+    if request.items.is_empty() || request.items.len() > MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS {
+        return Err(ApiError::BadRequest(format!(
+            "items must contain between 1 and {MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS} templates"
+        )));
+    }
+    let inputs = request
+        .items
+        .into_iter()
+        .map(normalize_response_template_input)
+        .collect::<Result<Vec<_>, _>>()?;
+    let records = if let Some(repository) = state.repository() {
+        let records = repository
+            .create_response_templates(&inputs, &actor.user_id)
+            .await
+            .map_err(template_repository_error)?;
+        let record_ids = records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>();
+        repository
+            .audit(
+                &actor.user_id,
+                "IMPORT_RESPONSE_TEMPLATES",
+                "response_template",
+                None,
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({"count": records.len(), "template_ids": record_ids}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        records
+    } else {
+        let mut store = state.write_store()?;
+        for input in &inputs {
+            validate_memory_template_references(input, &store)?;
+        }
+        insert_memory_templates(&mut store, &inputs, &actor.user_id)
+    };
+    Ok(Json(ResponseTemplatesResponse { items: records }))
+}
+
+async fn update_response_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(template_id): Path<String>,
+    Json(request): Json<UpdateResponseTemplateRequest>,
+) -> Result<Json<ResponseTemplateRecord>, ApiError> {
+    let actor = require_template_manager(&headers, &state.config)?;
+    let body = normalize_response_template_body(request.body)?;
+    let record = if let Some(repository) = state.repository() {
+        let record = repository
+            .update_response_template(&template_id, &body, &actor.user_id)
+            .await
+            .map_err(template_repository_error)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "UPDATE_RESPONSE_TEMPLATE",
+                "response_template",
+                Some(&record.id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({"template_key": record.template_key, "version": record.version}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        record
+    } else {
+        let mut store = state.write_store()?;
+        let record = store
+            .response_templates
+            .get_mut(&template_id)
+            .ok_or_else(|| {
+                ApiError::NotFound(format!("response template {template_id} not found"))
+            })?;
+        if record.approved {
+            return Err(ApiError::Conflict(
+                "approved template versions are immutable; create a new version".to_owned(),
+            ));
+        }
+        record.body = body;
+        record.updated_by = Some(actor.user_id);
+        record.updated_at = Utc::now().to_rfc3339();
+        record.clone()
+    };
+    Ok(Json(record))
+}
+
+async fn delete_response_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(template_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_template_manager(&headers, &state.config)?;
+    if let Some(repository) = state.repository() {
+        repository
+            .delete_response_template(&template_id)
+            .await
+            .map_err(template_repository_error)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "DELETE_RESPONSE_TEMPLATE",
+                "response_template",
+                Some(&template_id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+    } else {
+        let mut store = state.write_store()?;
+        let record = store.response_templates.get(&template_id).ok_or_else(|| {
+            ApiError::NotFound(format!("response template {template_id} not found"))
+        })?;
+        if record.approved {
+            return Err(ApiError::Conflict(
+                "approved template versions cannot be deleted".to_owned(),
+            ));
+        }
+        store.response_templates.remove(&template_id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn approve_response_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(template_id): Path<String>,
+) -> Result<Json<ResponseTemplateRecord>, ApiError> {
+    let actor = require_template_manager(&headers, &state.config)?;
+    let record = if let Some(repository) = state.repository() {
+        let record = repository
+            .approve_response_template(&template_id, &actor.user_id)
+            .await
+            .map_err(template_repository_error)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "APPROVE_RESPONSE_TEMPLATE",
+                "response_template",
+                Some(&record.id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({"template_key": record.template_key, "version": record.version}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        record
+    } else {
+        let mut store = state.write_store()?;
+        let record = store
+            .response_templates
+            .get_mut(&template_id)
+            .ok_or_else(|| {
+                ApiError::NotFound(format!("response template {template_id} not found"))
+            })?;
+        if record.approved {
+            return Err(ApiError::Conflict(
+                "template version is already approved".to_owned(),
+            ));
+        }
+        let timestamp = Utc::now().to_rfc3339();
+        record.approved = true;
+        record.approved_by = Some(actor.user_id.clone());
+        record.approved_at = Some(timestamp.clone());
+        record.updated_by = Some(actor.user_id);
+        record.updated_at = timestamp;
+        record.clone()
+    };
+    Ok(Json(record))
+}
+
 async fn assist_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2158,14 +2754,23 @@ async fn assist_preview(
         .filter(|item| item.relation == "repeat")
         .cloned()
         .collect();
-    let template_topic = latest_decision
-        .map(|decision| decision.confirmed_topic_id.as_str())
-        .unwrap_or(&prediction.topic_id);
     let template_started = Instant::now();
     let response_template = if uncertain_language {
         unavailable_demo_response_template(&language_state)
+    } else if let Some(decision) = latest_decision {
+        match decision.confirmed_service_id.as_deref() {
+            Some(service_id) => response_template(
+                &store,
+                &ticket.language,
+                &decision.confirmed_topic_id,
+                service_id,
+                &decision.service,
+                &ticket.region_name,
+            ),
+            None => manual_response_template(&ticket.language),
+        }
     } else {
-        response_template(&ticket.language, template_topic)
+        manual_response_template(&ticket.language)
     };
     let template_latency_ms = template_started.elapsed().as_secs_f64() * 1000.0;
     let mut model_versions = std::collections::BTreeMap::new();
@@ -2250,13 +2855,21 @@ async fn assist_preview(
             name: "response_template".to_owned(),
             status: if uncertain_language {
                 "unavailable"
-            } else {
+            } else if response_template.approved {
                 "completed"
+            } else {
+                "manual"
             }
             .to_owned(),
             latency_ms: template_latency_ms,
             model_version: None,
-            error_code: uncertain_language.then(|| "LANGUAGE_UNCERTAIN".to_owned()),
+            error_code: if uncertain_language {
+                Some("LANGUAGE_UNCERTAIN".to_owned())
+            } else if response_template.source == "MANUAL_REQUIRED" {
+                Some("APPROVED_TEMPLATE_NOT_FOUND".to_owned())
+            } else {
+                None
+            },
         },
     ];
     let partial = stages
@@ -2265,7 +2878,7 @@ async fn assist_preview(
     let needs_review = !has_human_decision
         || uncertain_language
         || prediction.confidence < 0.85
-        || response_template.source != "AUTHORITATIVE"
+        || !response_template.approved
         || partial;
     Ok(Json(AssistPreviewResponse {
         response_template,
@@ -2525,6 +3138,7 @@ async fn apply_decision(
         model_version: Some(prediction.model_version.clone()),
         confirmed_topic_id: topic_id,
         confirmed_topic_label,
+        confirmed_service_id: Some(service.clone()),
         service,
         priority,
         service_provenance: RuleProvenance::manual(if service_overridden {
@@ -4901,6 +5515,10 @@ async fn openapi() -> Json<Value> {
             "/api/v1/import": { "post": { "summary": "Import validated tickets into PostgreSQL and Qdrant" } },
             "/api/v1/datasets/provenance": { "get": { "summary": "Read synthetic, real and unassigned dataset counts" } },
             "/api/v1/assist/preview": { "post": { "summary": "Preview prediction and related tickets" } },
+            "/api/v1/response-templates": { "get": { "summary": "List response templates for managers" }, "post": { "summary": "Create an unapproved response template version" } },
+            "/api/v1/response-templates/import": { "post": { "summary": "Import unapproved response template versions" } },
+            "/api/v1/response-templates/{template_id}": { "get": { "summary": "Get response template details" }, "put": { "summary": "Edit a pending response template" }, "delete": { "summary": "Delete a pending response template" } },
+            "/api/v1/response-templates/{template_id}/approve": { "post": { "summary": "Explicitly approve a response template version" } },
             "/api/v1/assist/{ticket_id}/confirm": { "post": { "summary": "Confirm prediction" } },
             "/api/v1/assist/{ticket_id}/correct": { "post": { "summary": "Correct prediction" } },
             "/api/v1/assist/confirm": { "post": { "summary": "Confirm prediction using ticket_id in body" } },

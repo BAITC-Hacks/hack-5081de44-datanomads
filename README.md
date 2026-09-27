@@ -111,8 +111,8 @@ PROMOTE/REJECT`. Candidate не заменяет production автоматиче
   отложены по решению проекта. Demo retrieval использует deterministic
   embeddings; качество поиска на реальных обращениях пока не подтверждено.
 - Seeded routing/priority mappings are `MANUAL` demo defaults, not official
-  109 rules. Seeded response templates have `approved=false` and are exposed as
-  `MANUAL_DEMO` until authoritative rules and copy are supplied.
+  109 rules. Seeded response templates have `approved=false`; operators see
+  `MANUAL_REQUIRED` until a reviewed template is explicitly approved.
 - Production identity gateway/JWT и контракт синхронизации изменённых
   обращений внешней системы 109 не предоставлены. Demo RBAC использует
   `PULSE_DEV_AUTH`; внешняя публикация Compose без trusted identity запрещена.
