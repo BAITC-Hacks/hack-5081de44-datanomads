@@ -23,7 +23,8 @@ def offline(version: str) -> dict:
                        "metrics": {"macro_f1": 0.8, "sample_count": 30}},
         "candidate": {"model_version": version, "artifact_checksum": CHECKSUM,
                       "metrics": {"macro_f1": 0.82, "sample_count": 30}},
-        "macro_f1_delta": 0.02, "regressed_critical_topics": [],
+        "macro_f1_delta": 0.02, "insufficient_critical_topics": [],
+        "regressed_critical_topics": [],
         "decision": "PENDING_HUMAN_REVIEW",
     }
 
@@ -54,7 +55,7 @@ def shadow(version: str) -> dict:
         "real_correction_rate_delta": -0.025,
         "global_regression": False,
         "status": "VALID", "decision": "PENDING_HUMAN_REVIEW",
-        "critical_regressions": [],
+        "insufficient_critical_topics": [], "critical_regressions": [],
     }
 
 
@@ -120,10 +121,35 @@ class ChallengerEvaluationTests(unittest.TestCase):
             changed = shadow("candidate_b")
             changed["status"] = "INSUFFICIENT_EVIDENCE"
             changed["decision"] = "INSUFFICIENT_EVIDENCE"
+            changed["insufficient_critical_topics"] = ["roads"]
             inputs[1][1].write_text(json.dumps(changed), encoding="utf-8")
             report = compare_challengers(inputs)
             self.assertEqual(report["candidates"][1]["fresh_decision"], "INSUFFICIENT_EVIDENCE")
             self.assertFalse(report["candidates"][1]["ready_for_human_review"])
+
+    def test_rejects_decisions_inconsistent_with_report_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = []
+            for version in ("candidate_a", "candidate_b"):
+                offline_path = root / f"{version}-offline.json"
+                shadow_path = root / f"{version}-shadow.json"
+                offline_path.write_text(json.dumps(offline(version)), encoding="utf-8")
+                shadow_path.write_text(json.dumps(shadow(version)), encoding="utf-8")
+                inputs.append((offline_path, shadow_path))
+
+            changed_offline = offline("candidate_b")
+            changed_offline["insufficient_critical_topics"] = ["roads"]
+            inputs[1][0].write_text(json.dumps(changed_offline), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid identity or evidence"):
+                compare_challengers(inputs)
+
+            inputs[1][0].write_text(json.dumps(offline("candidate_b")), encoding="utf-8")
+            changed_shadow = shadow("candidate_b")
+            changed_shadow["critical_regressions"] = ["roads"]
+            inputs[1][1].write_text(json.dumps(changed_shadow), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid identity or evidence"):
+                compare_challengers(inputs)
 
 
 if __name__ == "__main__":

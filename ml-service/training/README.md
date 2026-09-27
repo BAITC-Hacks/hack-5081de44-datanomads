@@ -606,7 +606,9 @@ The combiner requires the same champion artifact and metrics, frozen
 evaluation version, sample IDs, policy, fresh window, operator labels and
 champion predictions across candidates. A fresh report now includes
 `champion_reference_sha256` for that last check; reports without it cannot be
-compared safely. Candidate scores and regressions stay separate in the output.
+compared safely. The combiner also checks that each input's decision and status
+agree with its sample counts and reported regressions. Candidate scores and
+regressions stay separate in the output.
 No model is selected or promoted automatically. Actual candidate artifacts,
 reviewed labels and paired fresh predictions are still required to produce the
 input reports.

@@ -96,7 +96,9 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
                     type(offline["sample_count"]) is not int or offline["sample_count"] < 1 or
                     type(shadow["sample_count"]) is not int or shadow["sample_count"] < 1 or
                     not _topics(offline["labels"]) or
+                    not _topics(offline["insufficient_critical_topics"]) or
                     not _topics(offline["regressed_critical_topics"]) or
+                    not _topics(shadow["insufficient_critical_topics"]) or
                     not _topics(shadow["critical_regressions"]) or
                     set(shadow["origin_counts"]) - {"real", "synthetic"} or
                     offline["production"]["metrics"]["sample_count"] != offline["sample_count"] or
@@ -136,6 +138,23 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
                           shadow["sample_ids_sha256"], shadow["champion_reference_sha256"],
                           shadow["policy_sha256"]):
                 _checksum(value)
+            offline_sufficient = (offline["sample_count"] >= offline["policy"]["min_total_samples"] and
+                                  not offline["insufficient_critical_topics"])
+            offline_decision = ("INSUFFICIENT_EVIDENCE" if not offline_sufficient else
+                                "CRITICAL_REGRESSION" if offline["regressed_critical_topics"] else
+                                "PENDING_HUMAN_REVIEW")
+            fresh_sufficient = (shadow["sample_count"] >= shadow["policy"]["min_samples"] and
+                                shadow["origin_counts"].get("real", 0) >=
+                                shadow["policy"]["min_real_samples"] and
+                                not shadow["insufficient_critical_topics"])
+            fresh_status = "VALID" if fresh_sufficient else "INSUFFICIENT_EVIDENCE"
+            fresh_decision = ("INSUFFICIENT_EVIDENCE" if not fresh_sufficient else
+                              "NO_GO_CRITICAL_REGRESSION" if shadow["critical_regressions"] else
+                              "NO_GO_CORRECTION_RATE" if shadow["global_regression"] else
+                              "PENDING_HUMAN_REVIEW")
+            if (offline["decision"] != offline_decision or
+                    shadow["status"] != fresh_status or shadow["decision"] != fresh_decision):
+                raise ValueError("challenger report decisions disagree with evidence")
             frozen = _offline_reference(offline)
             fresh = _fresh_reference(shadow)
         except (KeyError, TypeError, ValueError) as error:
