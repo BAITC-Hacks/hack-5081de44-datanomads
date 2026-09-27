@@ -288,6 +288,44 @@ Recall/MRR/nDCG average queries with at least one relevant candidate;
 precision includes queries without one. The report emits IDs and scores for a
 blind top-3 expert review queue, with `PENDING` status and no ticket text.
 
+## Provisional duplicate threshold
+
+After relation review, evaluate an E5-compatible local model on the same
+verified package. Save a policy **before** looking at model scores:
+
+```json
+{
+  "policy_version": "duplicate-threshold.v1",
+  "min_duplicate_count": 30,
+  "min_nonduplicate_count": 30,
+  "min_predictions": 10,
+  "min_precision": 0.95
+}
+```
+
+The counts and precision above are an example policy, not a validated runtime
+setting. Choose them with the reviewer for the actual evaluation. Then run:
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/evaluate_duplicate_thresholds.py \
+  --dataset data/processed/reviewed-v1 \
+  --model /path/to/local/e5-compatible-model \
+  --model-version embedder-v1 \
+  --policy /path/to/precommitted-duplicate-policy.json \
+  --output data/processed/reports/reviewed-v1-duplicate-threshold.json
+```
+
+The evaluator selects a threshold only from validation pairs, where only
+`DUPLICATE` is positive. `REPEAT` and related but distinct cases are negatives.
+It checks the selected threshold once on the frozen test, reports a full
+precision/recall curve, confusion counts and hashed false-positive pair IDs, and
+records policy, dataset and model checksums. A valid empirical result is still
+`PROVISIONAL` until expert review; insufficient support or test precision below
+policy never approves a threshold. No ticket text appears in the report.
+Repeat relations and temporal windows need their own reviewed calibration;
+this command does not choose a repeat threshold. The current pilot is unreviewed
+and cannot produce real threshold evidence.
+
 ## Forecast candidate comparison
 
 The daily count runner fits [Prophet](https://facebook.github.io/prophet/docs/quick_start.html)
