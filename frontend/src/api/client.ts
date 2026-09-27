@@ -3,6 +3,7 @@ import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, Forec
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
+import { combineRelatedCandidates, mapTicketChannel } from '../operator'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -93,7 +94,9 @@ interface BackendSimilar {
 
 interface BackendAssistPreview {
   prediction?: BackendPrediction
-  similar_tickets: BackendSimilar[]
+  similar_tickets?: BackendSimilar[]
+  duplicate_candidates?: BackendSimilar[]
+  repeat_candidates?: BackendSimilar[]
   response_template?: { body: string; approved?: boolean; source?: string }
   orchestration?: AssistPreviewState
 }
@@ -194,23 +197,25 @@ function serviceIdForLabel(label?: string, services: TaxonomyOption[] = []) {
 function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, knownTickets: BackendTicket[] = [], preview?: BackendAssistPreview): Ticket {
   const prediction = detail?.prediction ?? preview?.prediction
   const latest = detail?.latest_decision
-  const related = preview?.similar_tickets ?? []
+  const related = combineRelatedCandidates(preview?.similar_tickets, preview?.duplicate_candidates, preview?.repeat_candidates)
   const topic = latest ? item.topic_label : prediction?.topic_label ?? 'Не определено'
   const alternatives = prediction?.alternatives ?? []
   const confidenceAvailable = Boolean(prediction && prediction.model_version !== 'unavailable')
   const confidenceState = normalizeConfidenceState(prediction?.confidence_state, prediction?.confidence ?? 0, confidenceAvailable)
-  const text = item.text
+  const text = item.text?.trim() || 'Текст обращения не предоставлен'
   const similar = related.map((candidate) => ({
     id: candidate.ticket_id,
     title: knownTickets.find((ticket) => ticket.id === candidate.ticket_id)?.text ?? 'Связанное обращение',
     similarity: candidate.score,
     createdAt: 'недавно',
     relation: mapRelation(candidate.relation),
+    candidateTypes: candidate.candidateTypes,
   }))
   const status = latest?.action === 'correct' ? 'corrected' : latest?.action === 'confirm' || item.status === 'triaged' ? 'confirmed' : 'new'
   return {
     id: item.id,
     originalText: text,
+    externalRef: item.external_ref?.trim() || undefined,
     modelVersion: prediction?.model_version === 'unavailable' ? undefined : prediction?.model_version,
     language: mapLanguage(preview?.orchestration?.language ?? item.language),
     topic,
@@ -234,15 +239,15 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
         ? 'Источник подтверждённого приоритета не сохранён; проверьте решение вручную'
         : 'Источник рекомендованного приоритета не сохранён; проверьте вручную',
     ),
-    region: item.region_name,
-    createdAt: item.created_at,
+    region: item.region_name?.trim() || 'Регион не указан',
+    createdAt: item.created_at?.trim() || 'Время не указано',
     status,
     similar,
     responseTemplate: preview?.response_template?.body ?? 'Шаблон ответа сейчас недоступен. Составьте ответ вручную.',
     responseTemplateApproved: preview?.response_template?.approved,
     responseTemplateSource: preview?.response_template?.source,
     assistPreview: preview?.orchestration,
-    channel: item.source === 'mobile' ? 'Мобильное приложение' : item.source === 'call-center' ? 'Call-центр' : item.source === 'whatsapp' ? 'WhatsApp' : 'eGov',
+    channel: mapTicketChannel(item.source),
   }
 }
 

@@ -385,6 +385,12 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
   const confidenceAvailable = ticket.confidenceAvailable !== false && confidenceState !== 'UNAVAILABLE'
   const hasTemplate = Boolean(ticket.responseTemplateSource && ticket.responseTemplateSource !== 'UNAVAILABLE')
   const preview = ticket.assistPreview
+  const retrievalStage = preview?.stages.find((stage) => stage.name === 'retrieval')
+  const emptyHistoryMessage = !preview
+    ? 'История обращений не загружена.'
+    : retrievalStage && retrievalStage.status !== 'completed'
+      ? 'Поиск по истории недоступен. Проверьте связанные обращения вручную.'
+      : 'Подходящие похожие обращения, дубликаты и повторы не найдены.'
   const languageNotice = languageReviewNotice(ticket.language)
   const incompleteStages = preview?.stages
     .filter((stage) => ['unavailable', 'skipped', 'unknown'].includes(stage.status))
@@ -416,7 +422,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
   return <aside className={`ticket-detail ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
     <div className="detail-header"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</div><h2>{ticket.id}</h2></div><button className="icon-button detail-close" aria-label="Закрыть детали" onClick={onClose}><Icon name="close" size={18} /></button></div>
     <div className="detail-scroll">
-      <div className="original-text-block"><div className="field-label">Оригинальный текст <span className="language-chip">{languageLabel(ticket.language)}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{ticket.channel} · {ticket.createdAt} · {ticket.region}</div></div>
+      <div className="original-text-block"><div className="field-label">Оригинальный текст <span className="language-chip">{languageLabel(ticket.language)}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{ticket.channel} · {ticket.createdAt} · {ticket.region}{ticket.externalRef && ` · № ${ticket.externalRef}`}</div></div>
       {languageNotice && <p className="panel-note" role="status">{languageNotice}</p>}
       {preview?.needs_review && (preview.status === 'partial' || incompleteStages.length > 0 || confidenceState === 'CONFIDENT') && <p className="panel-note" role="status">{preview.status === 'partial' ? 'Предпросмотр неполный.' : incompleteStages.length > 0 ? 'Часть функций недоступна.' : 'Рекомендацию нужно проверить.'} {incompleteStages.length > 0 && `Недоступно: ${incompleteStages.join(', ')}. `}Подтвердите тему, службу и приоритет после ручной проверки. Запрос {preview.request_id} · {preview.latency_ms.toFixed(0)} мс{modelVersions ? ` · ${modelVersions}` : ''}.</p>}
       <div className="detail-section">
@@ -501,6 +507,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
             />
           </div>
         </div>
+        <p className="panel-note"><strong>Основание маршрутизации:</strong> {ticket.routingReason?.trim() || 'Не предоставлено; проверьте службу и приоритет вручную.'}</p>
       </div>
       <div className="detail-section">
         <div className="field-label">Ответ оператору {ticket.status !== 'new' && <span className="language-chip">{ticket.responseTemplateApproved ? 'Утверждённый' : hasTemplate ? 'Демо-черновик' : 'Нет шаблона'}</span>}</div>
@@ -512,7 +519,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
           <p className="panel-note">{ticket.responseTemplate}</p>
         )}
       </div>
-      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">Похожие обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span><span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>)}</div></div>
+      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">История и связанные обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.length ? ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span>{item.candidateTypes?.includes('duplicate') && <span className="relation-badge relation-duplicate">Кандидат на дубликат</span>}{item.candidateTypes?.includes('repeat') && <span className="relation-badge relation-repeat">Кандидат на повтор</span>}<span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>) : <p className="panel-note">{emptyHistoryMessage}</p>}</div></div>
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>

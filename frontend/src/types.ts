@@ -39,11 +39,13 @@ export interface SimilarTicket {
   similarity: number
   createdAt: string
   relation: 'Похожий' | 'Повтор' | 'Дубликат'
+  candidateTypes?: Array<'similar' | 'duplicate' | 'repeat'>
 }
 
 export interface Ticket {
   id: string
   originalText: string
+  externalRef?: string
   modelVersion?: string
   language: PreviewLanguage
   topic: string
@@ -65,7 +67,7 @@ export interface Ticket {
   responseTemplateApproved?: boolean
   responseTemplateSource?: string
   assistPreview?: AssistPreviewState
-  channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp'
+  channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp' | 'Не указан'
 }
 
 export interface RegionMetric {
