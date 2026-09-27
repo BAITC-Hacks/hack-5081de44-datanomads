@@ -31,6 +31,7 @@ def offline(version: str) -> dict:
 def shadow(version: str) -> dict:
     return {
         "report_version": "classifier-shadow-evaluation.v1",
+        "gate_population": "real_only.v1",
         "cycle_id": f"cycle_{version}",
         "production_model_version": "champion_v1", "candidate_model_version": version,
         "promotion_policy_version": "policy-v1",
@@ -42,11 +43,16 @@ def shadow(version: str) -> dict:
         "policy": {"policy_version": "classifier-shadow-policy.v1",
                    "promotion_policy_version": "policy-v1",
                    "min_samples": 30, "min_real_samples": 30,
+                   "max_correction_rate_increase": 0.05,
                    "window_start": "2026-09-01T00:00:00+00:00",
                    "window_end": "2026-09-20T00:00:00+00:00"},
         "origin_counts": {"real": 40},
         "production_agreement": 0.8, "production_correction_rate": 0.2,
         "candidate_agreement": 0.825, "correction_rate_delta": -0.025,
+        "real_production_agreement": 0.8,
+        "real_candidate_agreement": 0.825,
+        "real_correction_rate_delta": -0.025,
+        "global_regression": False,
         "status": "VALID", "decision": "PENDING_HUMAN_REVIEW",
         "critical_regressions": [],
     }
@@ -68,6 +74,7 @@ class ChallengerEvaluationTests(unittest.TestCase):
             self.assertEqual(report["fresh_sample_count"], 40)
             self.assertEqual(len(report["candidates"]), 2)
             self.assertTrue(all(item["ready_for_human_review"] for item in report["candidates"]))
+            self.assertEqual(report["candidates"][0]["fresh_real_correction_rate_delta"], -0.025)
             self.assertFalse(report["automatic_promotion"])
             self.assertNotIn("original_text", json.dumps(report))
 
@@ -75,6 +82,13 @@ class ChallengerEvaluationTests(unittest.TestCase):
             changed["champion_reference_sha256"] = "sha256:" + "b" * 64
             inputs[1][1].write_text(json.dumps(changed), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "identical frozen and fresh"):
+                compare_challengers(inputs)
+
+            inputs[1][0].write_text(json.dumps(offline("candidate_b")), encoding="utf-8")
+            legacy_shadow = shadow("candidate_b")
+            del legacy_shadow["gate_population"]
+            inputs[1][1].write_text(json.dumps(legacy_shadow), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid identity or evidence"):
                 compare_challengers(inputs)
 
             inputs[1][0].write_text(json.dumps(offline("123456789012")), encoding="utf-8")

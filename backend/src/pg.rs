@@ -3626,6 +3626,21 @@ fn promotion_evidence_ready(
     let shadow_minimum = shadow["policy"]["min_samples"].as_u64().unwrap_or(0);
     let real_count = shadow["origin_counts"]["real"].as_u64().unwrap_or(0);
     let real_minimum = shadow["policy"]["min_real_samples"].as_u64().unwrap_or(0);
+    let real_metrics_valid = match (
+        shadow["real_production_agreement"].as_f64(),
+        shadow["real_candidate_agreement"].as_f64(),
+        shadow["real_correction_rate_delta"].as_f64(),
+        shadow["policy"]["max_correction_rate_increase"].as_f64(),
+    ) {
+        (Some(production), Some(candidate), Some(delta), Some(limit)) => {
+            (0.0..=1.0).contains(&production)
+                && (0.0..=1.0).contains(&candidate)
+                && (0.0..=1.0).contains(&limit)
+                && (delta - (production - candidate)).abs() <= 0.000002
+                && delta <= limit
+        }
+        _ => false,
+    };
     evidence["decision"] == "READY_TO_REVIEW"
         && offline["report_version"] == "classifier-pair-evaluation.v1"
         && offline["decision"] == "PENDING_HUMAN_REVIEW"
@@ -3641,6 +3656,7 @@ fn promotion_evidence_ready(
         && offline_count >= offline_minimum
         && offline["regressed_critical_topics"] == json!([])
         && shadow["report_version"] == "classifier-shadow-evaluation.v1"
+        && shadow["gate_population"] == "real_only.v1"
         && shadow["status"] == "VALID"
         && shadow["decision"] == "PENDING_HUMAN_REVIEW"
         && shadow["candidate_model_version"] == candidate_model
@@ -3654,6 +3670,7 @@ fn promotion_evidence_ready(
         && shadow_count >= shadow_minimum
         && real_minimum > 0
         && real_count >= real_minimum
+        && real_metrics_valid
         && shadow["global_regression"] == false
         && evidence["sample_size"] == shadow_count
         && shadow["critical_regressions"] == json!([])
@@ -3738,6 +3755,7 @@ mod tests {
             },
             "shadow_metrics": {
                 "report_version": "classifier-shadow-evaluation.v1",
+                "gate_population": "real_only.v1",
                 "status": "VALID",
                 "candidate_model_version": "candidate-v1",
                 "production_model_version": "production-v1",
@@ -3745,8 +3763,11 @@ mod tests {
                 "blind_ab_enabled": false,
                 "sample_count": 30,
                 "origin_counts": {"real": 30},
-                "policy": {"policy_version": "classifier-shadow-policy.v1", "promotion_policy_version": "policy-v1", "min_samples": 30, "min_real_samples": 30},
+                "policy": {"policy_version": "classifier-shadow-policy.v1", "promotion_policy_version": "policy-v1", "min_samples": 30, "min_real_samples": 30, "max_correction_rate_increase": 0.05},
                 "decision": "PENDING_HUMAN_REVIEW",
+                "real_production_agreement": 0.8,
+                "real_candidate_agreement": 0.825,
+                "real_correction_rate_delta": -0.025,
                 "global_regression": false,
                 "critical_regressions": []
             },
@@ -3763,6 +3784,19 @@ mod tests {
                 &production_checksum,
             )
         };
+        assert!(ready(&evidence));
+        evidence["shadow_metrics"]["gate_population"] = Value::Null;
+        assert!(!ready(&evidence));
+        evidence["shadow_metrics"]["gate_population"] = json!("real_only.v1");
+        evidence["shadow_metrics"]["real_correction_rate_delta"] = json!(0.1);
+        assert!(!ready(&evidence));
+        evidence["shadow_metrics"]["real_correction_rate_delta"] = json!(-0.025);
+        assert!(ready(&evidence));
+        evidence["shadow_metrics"]["real_candidate_agreement"] = json!(0.74);
+        evidence["shadow_metrics"]["real_correction_rate_delta"] = json!(0.06);
+        assert!(!ready(&evidence));
+        evidence["shadow_metrics"]["real_candidate_agreement"] = json!(0.825);
+        evidence["shadow_metrics"]["real_correction_rate_delta"] = json!(-0.025);
         assert!(ready(&evidence));
         assert!(!promotion_evidence_ready(
             &evidence,

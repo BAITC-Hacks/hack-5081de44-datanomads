@@ -104,6 +104,9 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
 
     production_agreement = agreement(rows, "production_prediction")
     candidate_agreement = agreement(rows, "candidate_shadow_prediction")
+    real_rows = [row for row in rows if not row.is_synthetic]
+    real_production_agreement = agreement(real_rows, "production_prediction")
+    real_candidate_agreement = agreement(real_rows, "candidate_shadow_prediction")
     by_topic = {}
     regressions = []
     insufficient_topics = []
@@ -112,15 +115,23 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
         production = agreement(topic_rows, "production_prediction")
         candidate = agreement(topic_rows, "candidate_shadow_prediction")
         drop = round(production - candidate, 6)
+        real_topic_rows = [row for row in topic_rows if not row.is_synthetic]
+        real_production = agreement(real_topic_rows, "production_prediction")
+        real_candidate = agreement(real_topic_rows, "candidate_shadow_prediction")
         by_topic[topic] = {"sample_count": len(topic_rows),
-                           "real_sample_count": sum(not row.is_synthetic for row in topic_rows),
+                           "real_sample_count": len(real_topic_rows),
                            "production_agreement": production,
-                           "candidate_agreement": candidate, "candidate_agreement_drop": drop}
+                           "candidate_agreement": candidate, "candidate_agreement_drop": drop,
+                           "real_production_agreement": real_production,
+                           "real_candidate_agreement": real_candidate,
+                           "real_candidate_agreement_drop": (
+                               round(real_production - real_candidate, 6)
+                               if real_production is not None and real_candidate is not None else None)}
     for topic in policy.critical_topics:
         topic_metrics = by_topic.get(topic)
         if topic_metrics is None or topic_metrics["real_sample_count"] < policy.min_topic_support:
             insufficient_topics.append(topic)
-        elif topic_metrics["candidate_agreement_drop"] > policy.max_topic_agreement_drop:
+        elif topic_metrics["real_candidate_agreement_drop"] > policy.max_topic_agreement_drop:
             regressions.append(topic)
     origin_counts = dict(sorted(Counter("synthetic" if row.is_synthetic else "real" for row in rows).items()))
     sufficient = (len(rows) >= policy.min_samples and
@@ -128,8 +139,11 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
                   not insufficient_topics)
     correction_rate_delta = (round(production_agreement - candidate_agreement, 6)
                              if production_agreement is not None and candidate_agreement is not None else None)
-    global_regression = (correction_rate_delta is not None and
-                         correction_rate_delta > policy.max_correction_rate_increase)
+    real_correction_rate_delta = (round(real_production_agreement - real_candidate_agreement, 6)
+                                  if real_production_agreement is not None and
+                                  real_candidate_agreement is not None else None)
+    global_regression = (real_correction_rate_delta is not None and
+                         real_correction_rate_delta > policy.max_correction_rate_increase)
     status = "VALID" if sufficient else "INSUFFICIENT_EVIDENCE"
     decision = ("INSUFFICIENT_EVIDENCE" if not sufficient else
                 "NO_GO_CRITICAL_REGRESSION" if regressions else
@@ -166,11 +180,17 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
         "champion_reference_sha256": f"sha256:{reference_digest}",
         "source_dataset_versions": sorted({row.source_dataset_version for row in rows}),
         "origin_counts": origin_counts,
+        "gate_population": "real_only.v1",
         "production_agreement": production_agreement,
         "candidate_agreement": candidate_agreement,
         "production_correction_rate": round(1 - production_agreement, 6) if production_agreement is not None else None,
         "candidate_correction_rate": round(1 - candidate_agreement, 6) if candidate_agreement is not None else None,
         "correction_rate_delta": correction_rate_delta,
+        "real_production_agreement": real_production_agreement,
+        "real_candidate_agreement": real_candidate_agreement,
+        "real_production_correction_rate": round(1 - real_production_agreement, 6) if real_production_agreement is not None else None,
+        "real_candidate_correction_rate": round(1 - real_candidate_agreement, 6) if real_candidate_agreement is not None else None,
+        "real_correction_rate_delta": real_correction_rate_delta,
         "global_regression": global_regression,
         "by_topic": by_topic,
         "insufficient_critical_topics": insufficient_topics,

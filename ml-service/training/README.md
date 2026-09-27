@@ -259,12 +259,16 @@ candidate results.
 
 The report has production/candidate agreement, correction rates and their
 delta, per-topic slices, critical regressions, real/synthetic counts and a
-single sample-ID checksum. It records `blind_ab_enabled=false` and no
+single sample-ID checksum. Overall metrics describe every row; promotion
+gates use only real-origin rows (`gate_population=real_only.v1`), both for
+critical-topic agreement drops and the global correction-rate increase.
+It records `blind_ab_enabled=false` and no
 preference score because the current UI has no blind A/B. Too few total, real
 or critical-topic samples give `INSUFFICIENT_EVIDENCE`; an adequately sized
 report with a critical or global correction-rate regression gets a `NO_GO`
 decision. Only a `VALID` report without regressions can contribute to
-promotion evidence.
+promotion evidence. Recalculate reports created before `real_only.v1` before
+review or promotion.
 Core and the offline worker capture candidate shadow predictions for fresh
 tickets when a trained candidate and offline report exist. Export verified
 pairs from PostgreSQL after the policy window has closed:

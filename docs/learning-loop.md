@@ -118,7 +118,9 @@ evaluation window через `scripts/export_classifier_shadow.py` и
 `scripts/record_classifier_shadow_report.py`. Последняя команда пересчитывает
 пары из PostgreSQL и сохраняет метрики в `model_evaluations`; без проверенного
 происхождения текста и решения оператора строки исключаются. Отчёт с
-`INSUFFICIENT_EVIDENCE` не разрешает promotion.
+`INSUFFICIENT_EVIDENCE` не разрешает promotion. Пороги ухудшения по критическим
+темам и общей частоте исправлений проверяются только на реальных подтверждённых
+строках; synthetic строки остаются в диагностических метриках отчёта.
 
 ```bash
 PULSE_TRAINING_INPUT_DIR=/absolute/path/to/reviewed-inputs \

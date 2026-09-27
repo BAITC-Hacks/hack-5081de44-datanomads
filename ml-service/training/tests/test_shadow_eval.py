@@ -63,6 +63,8 @@ class ShadowEvaluationTests(unittest.TestCase):
             self.assertEqual(report["production_agreement"], 1.0)
             self.assertEqual(report["candidate_agreement"], 0.666667)
             self.assertEqual(report["correction_rate_delta"], 0.333333)
+            self.assertEqual(report["gate_population"], "real_only.v1")
+            self.assertEqual(report["real_correction_rate_delta"], 0.333333)
             self.assertEqual(report["by_topic"]["roads"]["sample_count"], 2)
             self.assertFalse(report["blind_ab_enabled"])
             self.assertIsNone(report["blind_ab_preference"])
@@ -91,6 +93,54 @@ class ShadowEvaluationTests(unittest.TestCase):
             self.assertEqual(empty["status"], "INSUFFICIENT_EVIDENCE")
             self.assertEqual(empty["sample_count"], 0)
             self.assertIsNone(empty["candidate_agreement"])
+            self.assertIsNone(empty["real_correction_rate_delta"])
+
+    def test_synthetic_rows_cannot_hide_real_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "shadow.jsonl"
+            policy_path = root / "policy.json"
+            rows = [shadow_row(index, "roads", "electricity") for index in (1, 2)]
+            for index in (3, 4):
+                row = shadow_row(index, "roads", "roads")
+                row["is_synthetic"] = True
+                row["production_prediction"]["topic_id"] = "electricity"
+                row["operator_confirmed_decision"]["action"] = "correct"
+                row["accepted_or_corrected"] = "CORRECTED"
+                rows.append(row)
+            input_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            policy = {
+                "policy_version": "classifier-shadow-policy.v1",
+                "promotion_policy_version": "policy-v1",
+                "window_start": "2026-09-27T10:00:00Z",
+                "window_end": "2026-09-27T11:00:00Z",
+                "min_samples": 4,
+                "min_real_samples": 2,
+                "critical_topics": ["roads"],
+                "min_topic_support": 2,
+                "max_topic_agreement_drop": 0.2,
+                "max_correction_rate_increase": 0.2,
+            }
+
+            def evaluate() -> dict:
+                policy_path.write_text(json.dumps(policy), encoding="utf-8")
+                return evaluate_shadow(input_path, policy_path, cycle_id="cycle_1",
+                                       production_model_version="production_v1",
+                                       candidate_model_version="candidate_v1")
+
+            report = evaluate()
+            self.assertEqual(report["status"], "VALID")
+            self.assertEqual(report["correction_rate_delta"], 0.0)
+            self.assertEqual(report["real_correction_rate_delta"], 1.0)
+            self.assertEqual(report["by_topic"]["roads"]["candidate_agreement_drop"], 0.0)
+            self.assertEqual(report["by_topic"]["roads"]["real_candidate_agreement_drop"], 1.0)
+            self.assertEqual(report["critical_regressions"], ["roads"])
+            self.assertEqual(report["decision"], "NO_GO_CRITICAL_REGRESSION")
+            policy["max_topic_agreement_drop"] = 1.0
+            report = evaluate()
+            self.assertEqual(report["critical_regressions"], [])
+            self.assertTrue(report["global_regression"])
+            self.assertEqual(report["decision"], "NO_GO_CORRECTION_RATE")
 
 
 if __name__ == "__main__":

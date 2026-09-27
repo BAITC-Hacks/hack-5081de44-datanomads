@@ -49,6 +49,7 @@ def _fresh_reference(report: dict) -> tuple:
         report["policy_sha256"], json.dumps(report["policy"], sort_keys=True),
         json.dumps(report["origin_counts"], sort_keys=True),
         report["production_agreement"], report["production_correction_rate"],
+        report["real_production_agreement"],
     )
 
 
@@ -70,6 +71,7 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
             window_end = datetime.fromisoformat(shadow["window_end"])
             if (offline["report_version"] != "classifier-pair-evaluation.v1" or
                     shadow["report_version"] != "classifier-shadow-evaluation.v1" or
+                    shadow["gate_population"] != "real_only.v1" or
                     any(not isinstance(value, str) or not ID_RE.fullmatch(value) or
                         scan_pii(value).detected for value in public_ids) or
                     version in seen_versions or
@@ -90,6 +92,7 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
                     shadow["policy"]["min_samples"] < 1 or
                     type(shadow["policy"].get("min_real_samples")) is not int or
                     shadow["policy"]["min_real_samples"] < 1 or
+                    not _number(shadow["policy"].get("max_correction_rate_increase"), 0, 1) or
                     type(offline["sample_count"]) is not int or offline["sample_count"] < 1 or
                     type(shadow["sample_count"]) is not int or shadow["sample_count"] < 1 or
                     not _topics(offline["labels"]) or
@@ -114,7 +117,18 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
                     abs(shadow["production_correction_rate"] -
                         round(1 - shadow["production_agreement"], 6)) > 0.000001 or
                     abs(shadow["correction_rate_delta"] - round(
-                        shadow["production_agreement"] - shadow["candidate_agreement"], 6)) > 0.000001):
+                        shadow["production_agreement"] - shadow["candidate_agreement"], 6)) > 0.000001 or
+                    (shadow["origin_counts"].get("real", 0) > 0 and (
+                        not _number(shadow["real_production_agreement"], 0, 1) or
+                        not _number(shadow["real_candidate_agreement"], 0, 1) or
+                        not _number(shadow["real_correction_rate_delta"], -1, 1) or
+                        abs(shadow["real_correction_rate_delta"] - round(
+                            shadow["real_production_agreement"] -
+                            shadow["real_candidate_agreement"], 6)) > 0.000001)) or
+                    shadow["global_regression"] is not (
+                        shadow["real_correction_rate_delta"] is not None and
+                        shadow["real_correction_rate_delta"] >
+                        shadow["policy"]["max_correction_rate_increase"])):
                 raise ValueError("challenger reports have invalid identity or evidence")
             for value in (offline["dataset_content_sha256"], offline["frozen_evaluation_sha256"],
                           offline["sample_ids_sha256"], offline["policy_sha256"],
@@ -141,6 +155,7 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
             "fresh_decision": shadow["decision"],
             "fresh_candidate_agreement": shadow["candidate_agreement"],
             "fresh_correction_rate_delta": shadow["correction_rate_delta"],
+            "fresh_real_correction_rate_delta": shadow["real_correction_rate_delta"],
             "offline_critical_regressions": offline["regressed_critical_topics"],
             "fresh_critical_regressions": shadow["critical_regressions"],
             "real_fresh_samples": shadow["origin_counts"].get("real", 0),
@@ -152,6 +167,7 @@ def compare_challengers(inputs: list[tuple[Path, Path]]) -> dict:
                 shadow["policy"]["min_real_samples"] and
                 offline["decision"] == "PENDING_HUMAN_REVIEW" and
                 shadow["decision"] == "PENDING_HUMAN_REVIEW" and
+                not shadow["global_regression"] and
                 not offline["regressed_critical_topics"] and
                 not shadow["critical_regressions"]
             ),
