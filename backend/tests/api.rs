@@ -1068,6 +1068,100 @@ async fn routing_feedback_requires_a_confirmed_route_and_rejects_invalid_targets
 }
 
 #[tokio::test]
+async fn outcome_verification_is_separate_from_official_ticket_status() {
+    let application = app(AppState::demo());
+    let initial = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002/outcome-verification")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(initial.status(), 200);
+    let initial: serde_json::Value =
+        serde_json::from_slice(&to_bytes(initial.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(initial["state"], "UNKNOWN");
+    assert_eq!(initial["official_ticket_status"], "open");
+    assert!(initial["latest"].is_null());
+    assert_eq!(initial["history"].as_array().unwrap().len(), 0);
+
+    for (index, state) in ["VERIFIED", "PARTIAL", "DISPUTED"].into_iter().enumerate() {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/tickets/ticket-002/outcome-verification")
+                    .header("x-pulse-role", "OPERATOR")
+                    .header("x-user-id", "outcome-reviewer")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "state": state }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201);
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(snapshot["state"], state);
+        assert_eq!(snapshot["latest"]["state"], state);
+        assert_eq!(snapshot["latest"]["source_system"], "DEMO_SIMULATION");
+        assert_eq!(snapshot["latest"]["channel"], "OPERATOR_PANEL_SIMULATION");
+        assert_eq!(snapshot["latest"]["actor_user_id"], "outcome-reviewer");
+        assert!(snapshot["latest"]["created_at"].as_str().is_some());
+        assert_eq!(snapshot["history"].as_array().unwrap().len(), index + 1);
+        assert!(snapshot.get("original_text").is_none());
+    }
+
+    let unchanged_ticket = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let unchanged_ticket: serde_json::Value = serde_json::from_slice(
+        &to_bytes(unchanged_ticket.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unchanged_ticket["ticket"]["status"], "open");
+
+    let unknown = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/outcome-verification")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"UNKNOWN"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 400);
+
+    let denied = application
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/outcome-verification")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"state":"VERIFIED"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
 async fn context_handoff_package_preserves_sources_and_requires_a_confirmed_route() {
     let application = app(AppState::demo());
     let before = application

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
@@ -682,6 +682,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
         ticket={ticket}
         hasConfirmedRoute={ticket.confirmedDecisionAvailable === true || Boolean(ticket.latestDecision?.service)}
       />
+      <OutcomeVerificationPanel ticket={ticket} />
       <RoutingFeedbackPanel ticket={ticket} taxonomy={taxonomy} />
       <div className="detail-section">
         <div className="field-label">Ответ оператору <span className="language-chip">{hasApprovedTemplate ? (ticket.responseTemplateVersion ? `Утверждённый · v${ticket.responseTemplateVersion}` : 'Утверждённый шаблон') : 'Ручной ответ'}</span></div>
@@ -750,6 +751,93 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>
+}
+
+function OutcomeVerificationPanel({ ticket }: { ticket: Ticket }) {
+  const [snapshot, setSnapshot] = useState<OutcomeVerificationSnapshot | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [selectedState, setSelectedState] = useState<Exclude<OutcomeVerificationState, 'UNKNOWN'> | ''>('')
+
+  useEffect(() => {
+    let active = true
+    setSnapshot(null)
+    setLoading(true)
+    setError('')
+    setNotice('')
+    setSelectedState('')
+    loadOutcomeVerification(ticket.id)
+      .then((result) => { if (active) setSnapshot(result) })
+      .catch((requestError: unknown) => {
+        if (active) setError(requestError instanceof Error ? requestError.message : 'ошибка API')
+      })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [ticket.id])
+
+  const saveVerification = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!selectedState) return
+    setSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await submitOutcomeVerification(ticket.id, selectedState)
+      setSnapshot(result)
+      setNotice('Операторская симуляция сохранена. Официальный статус обращения не менялся.')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'ошибка API')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const stateLabel = (state: OutcomeVerificationState) => ({
+    UNKNOWN: 'Нет подтверждения (UNKNOWN)',
+    VERIFIED: 'Результат подтверждён',
+    PARTIAL: 'Результат частичный',
+    DISPUTED: 'Результат оспаривается',
+  })[state]
+
+  return <section className="detail-section outcome-verification-panel" aria-label="Проверка результата обращения">
+    <div className="section-inline-heading">
+      <div className="field-label">Проверка результата обращения</div>
+      <span className="routing-simulation-badge">DEMO SIMULATION</span>
+    </div>
+    <p className="panel-note">Реальный канал обратной связи граждан не подключён. Эта запись — симуляция оператора; даже состояние VERIFIED не подтверждает результат гражданином и не меняет CRM.</p>
+    {loading && <p className="panel-note" role="status">Загружаю состояние результата…</p>}
+    {error && <p className="routing-feedback-error" role="alert">Не удалось загрузить или сохранить проверку результата: {error}</p>}
+    {snapshot && <>
+      <dl className="routing-feedback-routes outcome-verification-status">
+        <div><dt>Официальный статус CRM</dt><dd>{snapshot.officialTicketStatus}</dd></div>
+        <div><dt>Состояние результата в Pulse</dt><dd>{stateLabel(snapshot.state)}</dd></div>
+      </dl>
+      {!snapshot.latest && <p className="panel-note">Сведений о результате нет. Молчание и отсутствие обратной связи остаются UNKNOWN, даже если официальная запись закрыта.</p>}
+      {snapshot.latest && <p className="panel-note">Последняя запись: {snapshot.latest.sourceSystem} · {snapshot.latest.channel} · оператор {snapshot.latest.actorUserId} · {snapshot.latest.createdAt}</p>}
+      <form className="routing-feedback-form" onSubmit={(event) => void saveVerification(event)}>
+        <label>Симулированный результат
+          <select value={selectedState} onChange={(event) => setSelectedState(event.target.value as Exclude<OutcomeVerificationState, 'UNKNOWN'>)}>
+            <option value="" disabled>Выберите результат</option>
+            <option value="VERIFIED">Результат подтверждён</option>
+            <option value="PARTIAL">Результат частичный</option>
+            <option value="DISPUTED">Результат оспаривается</option>
+          </select>
+        </label>
+        <button className="button button-secondary" type="submit" disabled={saving || loading || !selectedState}>
+          {saving ? 'Сохраняем…' : 'Сохранить симуляцию'}
+        </button>
+      </form>
+      {notice && <p className="routing-feedback-notice" role="status">{notice}</p>}
+      {snapshot.history.length > 0 && <div className="routing-feedback-history" aria-label="История проверки результата">
+        {snapshot.history.map((item) => <article className="routing-feedback-record" key={item.id}>
+          <div><strong>{stateLabel(item.state)}</strong><span>{item.sourceSystem} · {item.channel}</span></div>
+          <small>Оператор {item.actorUserId} · {item.createdAt}</small>
+        </article>)}
+      </div>}
+    </>}
+  </section>
 }
 
 function RoutingFeedbackPanel({ ticket, taxonomy }: { ticket: Ticket; taxonomy: DashboardData['filterOptions'] }) {

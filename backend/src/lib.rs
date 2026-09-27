@@ -55,6 +55,8 @@ const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
 pub(crate) const ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM: &str = "DEMO_SIMULATION";
 pub(crate) const ROUTING_FEEDBACK_PENDING_STATUS: &str = "PENDING_OFFLINE_REVIEW";
 pub(crate) const CONTEXT_HANDOFF_PACKAGE_VERSION: &str = "context-handoff.v1";
+const OUTCOME_VERIFICATION_DEMO_SOURCE_SYSTEM: &str = "DEMO_SIMULATION";
+const OUTCOME_VERIFICATION_DEMO_CHANNEL: &str = "OPERATOR_PANEL_SIMULATION";
 const MAX_RESPONSE_TEMPLATE_BODY_CHARS: usize = 4_000;
 const MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS: usize = 200;
 const DEFAULT_LEARNING_CYCLE_DURATION_HOURS: i32 = 168;
@@ -229,6 +231,7 @@ pub struct AppState {
     store: Arc<RwLock<Store>>,
     pub config: Config,
     repository: Option<Arc<PgRepository>>,
+    outcome_verification_adapter: Arc<dyn OutcomeVerificationAdapter>,
     alert_events: broadcast::Sender<String>,
 }
 
@@ -239,6 +242,7 @@ impl AppState {
             store: Arc::new(RwLock::new(Store::demo())),
             config: Config::default(),
             repository: None,
+            outcome_verification_adapter: Arc::new(DemoOutcomeVerificationAdapter),
             alert_events,
         }
     }
@@ -284,6 +288,7 @@ impl AppState {
             store: Arc::new(RwLock::new(Store::demo())),
             config,
             repository,
+            outcome_verification_adapter: Arc::new(DemoOutcomeVerificationAdapter),
             alert_events,
         }
     }
@@ -330,6 +335,7 @@ struct Store {
     predictions: BTreeMap<String, Prediction>,
     decisions: Vec<OperatorDecision>,
     routing_feedback: Vec<RoutingFeedbackRecord>,
+    outcome_verifications: Vec<OutcomeVerificationRecord>,
     alerts: BTreeMap<String, Alert>,
     learning_cycles: BTreeMap<String, LearningCycle>,
     learning_feedback: Vec<LearningFeedback>,
@@ -339,6 +345,7 @@ struct Store {
     next_cycle_number: u64,
     next_feedback_number: u64,
     next_routing_feedback_number: u64,
+    next_outcome_verification_number: u64,
     next_response_template_number: u64,
 }
 
@@ -505,6 +512,117 @@ pub struct RoutingFeedbackRecord {
     pub source_system: String,
     pub evaluation_status: String,
     pub created_at: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum OutcomeVerificationState {
+    Unknown,
+    Verified,
+    Partial,
+    Disputed,
+}
+
+impl OutcomeVerificationState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Verified => "VERIFIED",
+            Self::Partial => "PARTIAL",
+            Self::Disputed => "DISPUTED",
+        }
+    }
+
+    fn from_record(value: &str) -> Result<Self, String> {
+        match value {
+            "VERIFIED" => Ok(Self::Verified),
+            "PARTIAL" => Ok(Self::Partial),
+            "DISPUTED" => Ok(Self::Disputed),
+            _ => Err("stored outcome verification has an invalid state".to_owned()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OutcomeVerificationRecord {
+    pub id: String,
+    pub ticket_id: String,
+    pub state: OutcomeVerificationState,
+    pub source_system: String,
+    pub channel: String,
+    pub actor_user_id: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OutcomeVerificationSnapshot {
+    pub ticket_id: String,
+    pub official_ticket_status: String,
+    pub state: OutcomeVerificationState,
+    pub latest: Option<OutcomeVerificationRecord>,
+    pub history: Vec<OutcomeVerificationRecord>,
+}
+
+impl OutcomeVerificationSnapshot {
+    fn new(
+        ticket_id: String,
+        official_ticket_status: String,
+        history: Vec<OutcomeVerificationRecord>,
+    ) -> Self {
+        let latest = history.first().cloned();
+        let state = latest
+            .as_ref()
+            .map(|item| item.state)
+            .unwrap_or(OutcomeVerificationState::Unknown);
+        Self {
+            ticket_id,
+            official_ticket_status,
+            state,
+            latest,
+            history,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OutcomeVerificationEvidence {
+    state: OutcomeVerificationState,
+    source_system: String,
+    channel: String,
+    actor_user_id: String,
+    created_at: DateTime<Utc>,
+}
+
+trait OutcomeVerificationAdapter: Send + Sync {
+    fn capture(
+        &self,
+        state: OutcomeVerificationState,
+        actor_user_id: &str,
+    ) -> OutcomeVerificationEvidence;
+}
+
+struct DemoOutcomeVerificationAdapter;
+
+impl OutcomeVerificationAdapter for DemoOutcomeVerificationAdapter {
+    fn capture(
+        &self,
+        state: OutcomeVerificationState,
+        actor_user_id: &str,
+    ) -> OutcomeVerificationEvidence {
+        OutcomeVerificationEvidence {
+            state,
+            source_system: OUTCOME_VERIFICATION_DEMO_SOURCE_SYSTEM.to_owned(),
+            channel: OUTCOME_VERIFICATION_DEMO_CHANNEL.to_owned(),
+            actor_user_id: actor_user_id.to_owned(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateOutcomeVerificationRequest {
+    pub state: OutcomeVerificationState,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1653,6 +1771,7 @@ impl Store {
                 created_at: "2026-09-20T08:30:00Z".to_owned(),
             }],
             routing_feedback: Vec::new(),
+            outcome_verifications: Vec::new(),
             alerts,
             learning_cycles,
             learning_feedback: Vec::new(),
@@ -1662,6 +1781,7 @@ impl Store {
             next_cycle_number: 2,
             next_feedback_number: 1,
             next_routing_feedback_number: 1,
+            next_outcome_verification_number: 1,
             next_response_template_number: 1,
         }
     }
@@ -1776,6 +1896,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/tickets/{ticket_id}/routing-feedback",
             get(list_routing_feedback).post(create_routing_feedback),
+        )
+        .route(
+            "/api/v1/tickets/{ticket_id}/outcome-verification",
+            get(get_outcome_verification).post(create_outcome_verification),
         )
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/{model_id}", get(get_model))
@@ -7373,6 +7497,146 @@ async fn create_routing_feedback(
     Ok((StatusCode::CREATED, Json(record)))
 }
 
+async fn get_outcome_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+) -> Result<Json<OutcomeVerificationSnapshot>, ApiError> {
+    let actor = require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    let snapshot = if let Some(repository) = state.repository() {
+        let snapshot = repository
+            .outcome_verification(&ticket_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "READ_OUTCOME_VERIFICATION",
+                "ticket_outcome",
+                Some(&snapshot.ticket_id),
+                Some(&log_request_id_from_headers(&headers)),
+                Some("outcome verification viewed"),
+                json!({
+                    "ticket_id": &snapshot.ticket_id,
+                    "state": snapshot.state.as_str(),
+                    "history_count": snapshot.history.len(),
+                }),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        snapshot
+    } else {
+        let store = state.read_store()?;
+        let ticket = store
+            .tickets
+            .get(&ticket_id)
+            .ok_or_else(|| ApiError::NotFound(format!("ticket {ticket_id} not found")))?;
+        let history = store
+            .outcome_verifications
+            .iter()
+            .filter(|item| item.ticket_id == ticket_id)
+            .rev()
+            .cloned()
+            .collect();
+        OutcomeVerificationSnapshot::new(ticket.id.clone(), ticket.status.clone(), history)
+    };
+    Ok(Json(snapshot))
+}
+
+async fn create_outcome_verification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+    Json(request): Json<CreateOutcomeVerificationRequest>,
+) -> Result<(StatusCode, Json<OutcomeVerificationSnapshot>), ApiError> {
+    let actor = require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if request.state == OutcomeVerificationState::Unknown {
+        return Err(ApiError::BadRequest(
+            "UNKNOWN is derived from the absence of verification evidence".to_owned(),
+        ));
+    }
+    let evidence = state
+        .outcome_verification_adapter
+        .capture(request.state, &actor.user_id);
+    let snapshot = if let Some(repository) = state.repository() {
+        let snapshot = repository
+            .create_outcome_verification(&ticket_id, &evidence)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        let record = snapshot.latest.as_ref().ok_or_else(|| {
+            ApiError::Internal("outcome verification insert was not returned".to_owned())
+        })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "OUTCOME_VERIFICATION_RECORDED",
+                "ticket_outcome",
+                Some(&snapshot.ticket_id),
+                Some(&log_request_id_from_headers(&headers)),
+                Some(record.state.as_str()),
+                json!({
+                    "ticket_id": &snapshot.ticket_id,
+                    "state": record.state.as_str(),
+                    "source_system": &record.source_system,
+                    "channel": &record.channel,
+                }),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        snapshot
+    } else {
+        let mut store = state.write_store()?;
+        let ticket = store
+            .tickets
+            .get(&ticket_id)
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound(format!("ticket {ticket_id} not found")))?;
+        let record = OutcomeVerificationRecord {
+            id: format!(
+                "outcome-verification-{:03}",
+                store.next_outcome_verification_number
+            ),
+            ticket_id: ticket.id.clone(),
+            state: evidence.state,
+            source_system: evidence.source_system,
+            channel: evidence.channel,
+            actor_user_id: evidence.actor_user_id,
+            created_at: evidence.created_at.to_rfc3339(),
+        };
+        store.next_outcome_verification_number += 1;
+        store.outcome_verifications.push(record);
+        let history = store
+            .outcome_verifications
+            .iter()
+            .filter(|item| item.ticket_id == ticket_id)
+            .rev()
+            .cloned()
+            .collect();
+        OutcomeVerificationSnapshot::new(ticket.id, ticket.status, history)
+    };
+    Ok((StatusCode::CREATED, Json(snapshot)))
+}
+
 fn validate_relation_suggestion(suggestion: &RelationSuggestionSnapshot) -> Result<(), ApiError> {
     let valid_score = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
     if !valid_score(suggestion.score) || !valid_score(suggestion.threshold) {
@@ -8072,6 +8336,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/audit": { "get": { "summary": "Privacy-safe audit log for managers and admins" } },
             "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
             "/api/v1/tickets/{ticket_id}/handoff-package": { "get": { "summary": "Prepare a deterministic context handoff package" } },
+            "/api/v1/tickets/{ticket_id}/outcome-verification": { "get": { "summary": "Read outcome verification separately from official ticket status" }, "post": { "summary": "Record a simulated outcome verification" } },
             "/api/v1/tickets/{ticket_id}/prediction": { "get": { "summary": "Get current ticket prediction" } },
             "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
             "/api/v1/tickets/{ticket_id}/pulse-state": { "put": { "summary": "Store human-confirmed Pulse state" } },
@@ -8264,6 +8529,56 @@ mod tests {
     async fn body_json(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn closed_official_ticket_stays_unknown_until_separate_outcome_evidence_exists() {
+        let state = AppState::demo();
+        {
+            let mut store = state.store.write().unwrap();
+            store.tickets.get_mut("ticket-001").unwrap().status = "closed".to_owned();
+        }
+        let application = app(state);
+        let before = application
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/tickets/ticket-001/outcome-verification")
+                    .header("x-pulse-role", "OPERATOR")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let before = body_json(before).await;
+        assert_eq!(before["official_ticket_status"], "closed");
+        assert_eq!(before["state"], "UNKNOWN");
+
+        let verified = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/tickets/ticket-001/outcome-verification")
+                    .header("x-pulse-role", "OPERATOR")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"state":"VERIFIED"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verified.status(), StatusCode::CREATED);
+        let verified = body_json(verified).await;
+        assert_eq!(verified["official_ticket_status"], "closed");
+        assert_eq!(verified["state"], "VERIFIED");
+
+        let ticket = application
+            .oneshot(
+                Request::get("/api/v1/tickets/ticket-001")
+                    .header("x-pulse-role", "OPERATOR")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(ticket).await["ticket"]["status"], "closed");
     }
 
     #[test]

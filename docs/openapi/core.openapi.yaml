@@ -340,6 +340,46 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/tickets/{ticket_id}/outcome-verification:
+    get:
+      tags: [tickets]
+      summary: Read Pulse outcome verification separately from the official ticket status
+      description: No evidence means UNKNOWN; an official CRM closed status never implies VERIFIED. The response includes demo simulation history when present.
+      security: [{ pulseRole: [] }, {}]
+      parameters:
+        - $ref: '#/components/parameters/TicketId'
+      responses:
+        '200':
+          description: Current Pulse verification state, official status and verification history
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutcomeVerificationSnapshot' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [tickets]
+      summary: Record a simulated outcome verification
+      description: Records an operator-panel simulation with source, channel, actor and time. No citizen feedback channel is connected; this does not change official CRM status or claim production citizen verification. UNKNOWN is derived from absent evidence and cannot be posted.
+      security: [{ pulseRole: [] }, {}]
+      parameters:
+        - $ref: '#/components/parameters/TicketId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateOutcomeVerificationRequest' }
+      responses:
+        '201':
+          description: Verification simulation stored; official ticket state is unchanged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OutcomeVerificationSnapshot' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
   /api/v1/analytics/overview:
     get:
       tags: [analytics]
@@ -1559,6 +1599,37 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/RoutingFeedbackRecord' }
+    CreateOutcomeVerificationRequest:
+      type: object
+      required: [state]
+      additionalProperties: false
+      properties:
+        state: { type: string, enum: [VERIFIED, PARTIAL, DISPUTED], description: UNKNOWN is derived from absent evidence and cannot be submitted. }
+    OutcomeVerificationRecord:
+      type: object
+      required: [id, ticket_id, state, source_system, channel, actor_user_id, created_at]
+      properties:
+        id: { type: string }
+        ticket_id: { type: string }
+        state: { type: string, enum: [VERIFIED, PARTIAL, DISPUTED] }
+        source_system: { type: string, description: DEMO_SIMULATION for the currently connected operator-panel adapter. }
+        channel: { type: string, description: OPERATOR_PANEL_SIMULATION for the current demo adapter. }
+        actor_user_id: { type: string }
+        created_at: { type: string, format: date-time }
+    OutcomeVerificationSnapshot:
+      type: object
+      required: [ticket_id, official_ticket_status, state, latest, history]
+      properties:
+        ticket_id: { type: string }
+        official_ticket_status: { type: string, description: Official status imported from CRM; it is not used to derive the Pulse verification state. }
+        state: { type: string, enum: [UNKNOWN, VERIFIED, PARTIAL, DISPUTED], description: UNKNOWN when no outcome evidence exists. }
+        latest:
+          allOf:
+            - $ref: '#/components/schemas/OutcomeVerificationRecord'
+          nullable: true
+        history:
+          type: array
+          items: { $ref: '#/components/schemas/OutcomeVerificationRecord' }
     StoredResponse:
       type: object
       required: [status, request_id]

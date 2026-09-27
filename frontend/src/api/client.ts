@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -193,6 +193,24 @@ interface BackendRoutingFeedbackRecord {
 
 interface BackendRoutingFeedbackListResponse {
   items: BackendRoutingFeedbackRecord[]
+}
+
+interface BackendOutcomeVerificationRecord {
+  id: string
+  ticket_id: string
+  state: Exclude<OutcomeVerificationState, 'UNKNOWN'>
+  source_system: string
+  channel: string
+  actor_user_id: string
+  created_at: string
+}
+
+interface BackendOutcomeVerificationSnapshot {
+  ticket_id: string
+  official_ticket_status: string
+  state: OutcomeVerificationState
+  latest: BackendOutcomeVerificationRecord | null
+  history: BackendOutcomeVerificationRecord[]
 }
 
 interface BackendContextHandoffEvidenceReference {
@@ -848,6 +866,28 @@ function mapRoutingFeedback(item: BackendRoutingFeedbackRecord): RoutingFeedback
   }
 }
 
+function mapOutcomeVerificationRecord(item: BackendOutcomeVerificationRecord): OutcomeVerificationRecord {
+  return {
+    id: item.id,
+    ticketId: item.ticket_id,
+    state: item.state,
+    sourceSystem: item.source_system,
+    channel: item.channel,
+    actorUserId: item.actor_user_id,
+    createdAt: item.created_at,
+  }
+}
+
+function mapOutcomeVerification(item: BackendOutcomeVerificationSnapshot): OutcomeVerificationSnapshot {
+  return {
+    ticketId: item.ticket_id,
+    officialTicketStatus: item.official_ticket_status,
+    state: item.state,
+    latest: item.latest ? mapOutcomeVerificationRecord(item.latest) : undefined,
+    history: item.history.map(mapOutcomeVerificationRecord),
+  }
+}
+
 export async function loadRoutingFeedback(ticketId: string): Promise<RoutingFeedbackRecord[]> {
   const response = await request<BackendRoutingFeedbackListResponse>(
     `/tickets/${encodeURIComponent(ticketId)}/routing-feedback`,
@@ -872,6 +912,28 @@ export async function submitRoutingFeedback(
     },
   )
   return mapRoutingFeedback(response)
+}
+
+export async function loadOutcomeVerification(ticketId: string): Promise<OutcomeVerificationSnapshot> {
+  const response = await request<BackendOutcomeVerificationSnapshot>(
+    `/tickets/${encodeURIComponent(ticketId)}/outcome-verification`,
+  )
+  return mapOutcomeVerification(response)
+}
+
+export async function submitOutcomeVerification(
+  ticketId: string,
+  state: Exclude<OutcomeVerificationState, 'UNKNOWN'>,
+): Promise<OutcomeVerificationSnapshot> {
+  const response = await request<BackendOutcomeVerificationSnapshot>(
+    `/tickets/${encodeURIComponent(ticketId)}/outcome-verification`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state }),
+    },
+  )
+  return mapOutcomeVerification(response)
 }
 
 export async function loadContextHandoffPackage(ticketId: string): Promise<ContextHandoffPackage> {

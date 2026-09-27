@@ -112,6 +112,26 @@ export interface RoutingFeedbackRecord {
   createdAt: string
 }
 
+export type OutcomeVerificationState = 'UNKNOWN' | 'VERIFIED' | 'PARTIAL' | 'DISPUTED'
+
+export interface OutcomeVerificationRecord {
+  id: string
+  ticketId: string
+  state: Exclude<OutcomeVerificationState, 'UNKNOWN'>
+  sourceSystem: string
+  channel: string
+  actorUserId: string
+  createdAt: string
+}
+
+export interface OutcomeVerificationSnapshot {
+  ticketId: string
+  officialTicketStatus: string
+  state: OutcomeVerificationState
+  latest?: OutcomeVerificationRecord
+  history: OutcomeVerificationRecord[]
+}
+
 export interface ContextHandoffEvidenceReference {
   sourceType: 'ticket' | 'operator_decision'
   recordId: string

@@ -20,8 +20,9 @@ use crate::{
     DatasetProvenance, DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse,
     ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
     LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
-    Prediction, QueryIntentRequest, RelationSuggestionSnapshot, ResponseTemplate,
-    ResponseTemplateInput, ResponseTemplateRecord, ResponseTemplatesResponse,
+    OutcomeVerificationEvidence, OutcomeVerificationRecord, OutcomeVerificationSnapshot,
+    OutcomeVerificationState, Prediction, QueryIntentRequest, RelationSuggestionSnapshot,
+    ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord, ResponseTemplatesResponse,
     RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
     TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
     ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
@@ -813,6 +814,33 @@ struct DbRoutingFeedback {
     source_system: String,
     evaluation_status: String,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DbOutcomeVerification {
+    id: i64,
+    ticket_id: i64,
+    state: String,
+    source_system: String,
+    channel: String,
+    actor_user_id: String,
+    created_at: DateTime<Utc>,
+}
+
+impl TryFrom<DbOutcomeVerification> for OutcomeVerificationRecord {
+    type Error = String;
+
+    fn try_from(row: DbOutcomeVerification) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id.to_string(),
+            ticket_id: row.ticket_id.to_string(),
+            state: OutcomeVerificationState::from_record(&row.state)?,
+            source_system: row.source_system,
+            channel: row.channel,
+            actor_user_id: row.actor_user_id,
+            created_at: row.created_at.to_rfc3339(),
+        })
+    }
 }
 
 impl From<DbRoutingFeedback> for RoutingFeedbackRecord {
@@ -6075,6 +6103,58 @@ impl PgRepository {
         .await
         .map_err(|error| format!("list routing feedback: {error}"))?;
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn outcome_verification(
+        &self,
+        ticket_id: &str,
+    ) -> Result<OutcomeVerificationSnapshot, String> {
+        let ticket = self.fetch_ticket(ticket_id).await?;
+        let numeric_ticket_id = ticket
+            .id
+            .parse::<i64>()
+            .map_err(|_| "stored ticket has invalid database id".to_owned())?;
+        let rows: Vec<DbOutcomeVerification> = sqlx::query_as(
+            "SELECT id, ticket_id, state, source_system, channel, actor_user_id, created_at FROM outcome_verifications WHERE ticket_id = $1 ORDER BY created_at DESC, id DESC",
+        )
+        .bind(numeric_ticket_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list outcome verifications: {error}"))?;
+        let history = rows
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<OutcomeVerificationRecord>, String>>()?;
+        Ok(OutcomeVerificationSnapshot::new(
+            ticket.id,
+            ticket.status,
+            history,
+        ))
+    }
+
+    pub async fn create_outcome_verification(
+        &self,
+        ticket_id: &str,
+        evidence: &OutcomeVerificationEvidence,
+    ) -> Result<OutcomeVerificationSnapshot, String> {
+        let ticket = self.fetch_ticket(ticket_id).await?;
+        let numeric_ticket_id = ticket
+            .id
+            .parse::<i64>()
+            .map_err(|_| "stored ticket has invalid database id".to_owned())?;
+        sqlx::query(
+            "INSERT INTO outcome_verifications (ticket_id, state, source_system, channel, actor_user_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(numeric_ticket_id)
+        .bind(evidence.state.as_str())
+        .bind(&evidence.source_system)
+        .bind(&evidence.channel)
+        .bind(&evidence.actor_user_id)
+        .bind(evidence.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("insert outcome verification: {error}"))?;
+        self.outcome_verification(ticket_id).await
     }
 
     pub async fn create_routing_feedback(
