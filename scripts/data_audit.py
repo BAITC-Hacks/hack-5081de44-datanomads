@@ -160,6 +160,23 @@ def build_source_report(path: Path, source_system: str, *, synthetic: bool) -> D
         field: sum(getattr(ticket, field) not in (None, "", "UNKNOWN", "unknown") for ticket in result.tickets)
         for field in fields
     }
+    label_ground_truth = {}
+    for task, field in (("routing", "service_raw"), ("priority", "priority")):
+        observed = completeness[field]
+        status = "UNSUITABLE" if synthetic or not observed else "UNVERIFIED"
+        label_ground_truth[task] = {
+            "candidate_field": field,
+            "status": status,
+            "observed_value_count": observed,
+            "field_semantics": "UNVERIFIED",
+            "approved_for_training": False,
+            "reason": "SYNTHETIC_SOURCE" if synthetic else "NO_OBSERVED_VALUES" if not observed else "SOURCE_SEMANTICS_NOT_REVIEWED",
+        }
+        if task == "routing":
+            label_ground_truth[task]["reassignment_history"] = "UNVERIFIED"
+            label_ground_truth[task]["first_pass_ground_truth"] = False
+        else:
+            label_ground_truth[task]["priority_policy_reviewed"] = False
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -197,6 +214,7 @@ def build_source_report(path: Path, source_system: str, *, synthetic: bool) -> D
         "pii_quarantine_count": reasons["PII_REVIEW"],
         "duplicate_repeat_gold_set_available": False,
         "label_semantics": "UNVERIFIED_SEMANTICS",
+        "label_ground_truth": label_ground_truth,
     }
 
 
