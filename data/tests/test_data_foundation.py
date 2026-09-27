@@ -13,6 +13,7 @@ from data.normalization.pipeline import normalize_row
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
 from data.schemas.unified_ticket import UnifiedTicket
 from scripts.data_audit import build_report
+from scripts.generate_synthetic_sources import SPECS, generate as generate_synthetic_sources
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,8 +70,61 @@ class UnifiedTicketTests(unittest.TestCase):
         self.assertNotIn("Иван Иванов", encoded)
         self.assertEqual(result.quarantine.reason, "INVALID_DATE")
 
+    def test_quarantine_does_not_serialize_unknown_sensitive_fields(self) -> None:
+        result = get_importer("AIKEY").import_rows([{
+            "appealId": "synthetic-1", "region": "Астана", "registeredAt": "bad",
+            "messageText": "Текст", "secret_contact": "Персональный тестовый секрет",
+            "private@example.invalid": "value",
+        }])
+        encoded = json.dumps(result.quarantine[0].to_dict(), ensure_ascii=False)
+        self.assertNotIn("Персональный тестовый секрет", encoded)
+        self.assertNotIn("private@example.invalid", encoded)
+        self.assertNotIn("secret_contact", encoded)
+
 
 class ImporterTests(unittest.TestCase):
+    def test_every_declared_header_alias_is_exactly_mapped(self) -> None:
+        for source_name, *_ in SPECS:
+            importer = get_importer(source_name)
+            required = {field: aliases[0] for field, aliases in importer.field_aliases.items()
+                        if field in importer.required_headers}
+            for field, aliases in importer.field_aliases.items():
+                for alias in aliases:
+                    with self.subTest(source=source_name, field=field, alias=alias):
+                        headers = {**required, field: alias}
+                        self.assertEqual(importer._header_map(list(headers.values()))[field], alias)
+
+    def test_synthetic_exports_cover_each_source_and_bad_row_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            manifest = generate_synthetic_sources(output_dir, check=True)
+            first_manifest = (output_dir / "manifest.json").read_bytes()
+            self.assertEqual(len(manifest["sources"]), 7)
+            self.assertTrue(manifest["synthetic"])
+            for source in manifest["sources"]:
+                self.assertEqual(source["profile_status"], "SYNTHETIC_TEST_ONLY")
+                for entry in source["files"].values():
+                    self.assertEqual(hashlib.sha256((output_dir / entry["path"]).read_bytes()).hexdigest(), entry["sha256"])
+            generate_synthetic_sources(output_dir, check=True)
+            self.assertEqual((output_dir / "manifest.json").read_bytes(), first_manifest)
+
+    def test_ambiguous_and_unsupported_headers_are_quarantined(self) -> None:
+        importer = get_importer("AIKEY")
+        base = {"appealId": "synthetic-1", "region": "Астана", "registeredAt": "2026-01-01", "messageText": "Текст"}
+        for extra in ({"id": "synthetic-2"}, {"message": "Текст"}, {"other": "x"}):
+            with self.subTest(extra=extra):
+                result = importer.import_rows([{**base, **extra}])
+                expected = "UNKNOWN_SCHEMA" if "id" in extra or "message" in extra else None
+                self.assertEqual(result.quarantine[0].reason if result.quarantine else None, expected)
+        self.assertEqual(importer.import_rows([{"appeal-id": "synthetic-1", "region": "Астана", "registeredAt": "2026-01-01", "messageText": "Текст"}]).quarantine[0].reason, "UNKNOWN_SCHEMA")
+
+    def test_invalid_csv_encoding_is_quarantined(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.csv"
+            path.write_bytes(b"appealId,region,registeredAt,messageText\nsynthetic-1,Astana,2026-01-01,ok\n\xff")
+            result = get_importer("AIKEY").import_file(path)
+        self.assertEqual([row.reason for row in result.quarantine], ["BAD_CSV_STRUCTURE"])
+
     def test_source_specific_aliases_and_bad_rows(self) -> None:
         importer = IKOMEK109Importer()
         result = importer.import_rows(

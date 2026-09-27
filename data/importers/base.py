@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
+import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
@@ -19,9 +21,12 @@ from data.schemas.unified_ticket import SchemaValidationError
 @dataclass
 class ImportResult:
     source_system: str
+    profile_version: str = "synthetic-aliases.v1"
+    profile_status: str = "SYNTHETIC_TEST_ONLY"
     tickets: List[Any] = field(default_factory=list)
     quarantine: List[QuarantineRecord] = field(default_factory=list)
     duplicate_external_ids: List[str] = field(default_factory=list)
+    schema_fingerprints: List[str] = field(default_factory=list)
 
     @property
     def valid_count(self) -> int:
@@ -34,6 +39,9 @@ class ImportResult:
     def to_summary(self) -> Mapping[str, Any]:
         return {
             "source_system": self.source_system,
+            "profile_version": self.profile_version,
+            "profile_status": self.profile_status,
+            "schema_fingerprints": sorted(set(self.schema_fingerprints)),
             "valid_count": self.valid_count,
             "quarantine_count": self.quarantine_count,
             "duplicate_external_ids": len(self.duplicate_external_ids),
@@ -44,8 +52,12 @@ class SourceImporter:
     """Base importer with source-specific aliases supplied by subclasses."""
 
     source_system: str = "unknown"
-    # Canonical field -> accepted source headers.  Header matching is
-    # case/spacing/punctuation insensitive.
+    profile_version: str = "synthetic-aliases.v1"
+    profile_status: str = "SYNTHETIC_TEST_ONLY"
+    csv_delimiter: str = ","
+    required_headers = frozenset({"external_ticket_id", "region_id", "created_at", "original_text"})
+    # These are test hypotheses, not verified production export schemas.
+    # Canonical field -> accepted exact source headers (ignoring case and outer whitespace).
     field_aliases: Mapping[str, Sequence[str]] = {
         "external_ticket_id": ("external_ticket_id", "ticket_id", "id", "appeal_id", "request_id"),
         "region_id": ("region_id", "region", "oblast", "область", "регион"),
@@ -77,36 +89,47 @@ class SourceImporter:
 
     @staticmethod
     def _header_key(value: object) -> str:
-        import re
-        import unicodedata
-
-        text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
-        text = text.replace("ё", "е")
-        return re.sub(r"[^\w]+", "_", text, flags=re.UNICODE).strip("_")
+        return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
 
     def _header_map(self, headers: Sequence[str]) -> Mapping[str, str]:
-        normalized = {self._header_key(header): header for header in headers}
+        normalized: Dict[str, str] = {}
+        for header in headers:
+            key = self._header_key(header)
+            if not key or key in normalized:
+                raise SchemaValidationError("UNKNOWN_SCHEMA", "empty or duplicate source header")
+            normalized[key] = header
         result: Dict[str, str] = {}
         for canonical, aliases in self.field_aliases.items():
-            for alias in aliases:
-                candidate = normalized.get(self._header_key(alias))
-                if candidate is not None:
-                    result[canonical] = candidate
-                    break
+            matches = {normalized[self._header_key(alias)] for alias in aliases if self._header_key(alias) in normalized}
+            if len(matches) > 1:
+                raise SchemaValidationError("UNKNOWN_SCHEMA", f"ambiguous source headers for {canonical}")
+            if matches:
+                result[canonical] = next(iter(matches))
+        if not self.required_headers.issubset(result):
+            raise SchemaValidationError("UNKNOWN_SCHEMA", "source headers do not identify all required fields")
+        if len(set(result.values())) != len(result):
+            raise SchemaValidationError("UNKNOWN_SCHEMA", "one source header maps to multiple fields")
         return result
 
+    def schema_fingerprint(self, headers: Sequence[str]) -> str:
+        signature = {
+            "source_system": self.source_system,
+            "profile_version": self.profile_version,
+            "headers": sorted(self._header_key(header) for header in headers),
+        }
+        return hashlib.sha256(json.dumps(signature, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
     def canonicalize_row(self, raw_row: Mapping[str, Any], header_map: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-        mapping = header_map or self._header_map(list(raw_row.keys()))
-        if not mapping:
-            raise SchemaValidationError("UNKNOWN_SCHEMA", "no known columns in source row")
+        mapping = header_map if header_map is not None else self._header_map(list(raw_row.keys()))
         return {canonical: raw_row.get(source_key) for canonical, source_key in mapping.items()}
 
     def import_rows(self, rows: Iterable[Mapping[str, Any]], *, start_row: int = 1) -> ImportResult:
-        result = ImportResult(source_system=self.source_system)
+        result = ImportResult(source_system=self.source_system, profile_version=self.profile_version, profile_status=self.profile_status)
         seen_ids = set()
         for row_number, raw_row in enumerate(rows, start=start_row):
             try:
-                canonical_row = self.canonicalize_row(raw_row)
+                header_map = self._header_map(list(raw_row.keys()))
+                canonical_row = self.canonicalize_row(raw_row, header_map)
             except SchemaValidationError as error:
                 result.quarantine.append(
                     QuarantineRecord(
@@ -118,6 +141,9 @@ class SourceImporter:
                     )
                 )
                 continue
+            fingerprint = self.schema_fingerprint(list(raw_row.keys()))
+            if fingerprint not in result.schema_fingerprints:
+                result.schema_fingerprints.append(fingerprint)
             normalized: NormalizationResult = normalize_row(
                 canonical_row,
                 source_system=self.source_system,
@@ -132,7 +158,7 @@ class SourceImporter:
                             source_system=self.source_system,
                             row_number=row_number,
                             reason="INVALID_VALUE",
-                            detail=f"duplicate external_ticket_id: {external_id}",
+                            detail="duplicate external_ticket_id",
                             field="external_ticket_id",
                             row=raw_row,
                         )
@@ -148,7 +174,7 @@ class SourceImporter:
         rows: List[Mapping[str, Any]] = []
         errors: List[QuarantineRecord] = []
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.reader(handle, delimiter="\t" if path.suffix.lower() == ".tsv" else ",")
+            reader = csv.reader(handle, delimiter="\t" if path.suffix.lower() == ".tsv" else self.csv_delimiter, strict=True)
             try:
                 headers = next(reader)
             except StopIteration:
@@ -161,6 +187,8 @@ class SourceImporter:
                         {},
                     )
                 ]
+            except (csv.Error, UnicodeError):
+                return rows, [QuarantineRecord(self.source_system, 1, "BAD_CSV_STRUCTURE", "invalid CSV header", {})]
             if not headers or any(not str(header).strip() for header in headers):
                 return rows, [
                     QuarantineRecord(
@@ -171,30 +199,32 @@ class SourceImporter:
                         {str(i): value for i, value in enumerate(headers)},
                     )
                 ]
-            header_map = self._header_map(headers)
-            if not header_map:
+            try:
+                self._header_map(headers)
+            except SchemaValidationError as error:
                 return rows, [
                     QuarantineRecord(
                         self.source_system,
                         1,
                         "UNKNOWN_SCHEMA",
-                        "no supported source columns found",
+                        str(error),
                         {str(i): value for i, value in enumerate(headers)},
                     )
                 ]
-            for row_number, values in enumerate(reader, start=2):
+            row_number = 2
+            while True:
+                try:
+                    values = next(reader)
+                except StopIteration:
+                    break
+                except (csv.Error, UnicodeError):
+                    errors.append(QuarantineRecord(self.source_system, row_number, "BAD_CSV_STRUCTURE", "invalid CSV row or encoding", {}))
+                    break
                 if len(values) != len(headers):
-                    errors.append(
-                        QuarantineRecord(
-                            self.source_system,
-                            row_number,
-                            "BAD_CSV_STRUCTURE",
-                            f"expected {len(headers)} columns, got {len(values)}",
-                            {str(i): value for i, value in enumerate(values)},
-                        )
-                    )
-                    continue
-                rows.append(dict(zip(headers, values)))
+                    errors.append(QuarantineRecord(self.source_system, row_number, "BAD_CSV_STRUCTURE", f"expected {len(headers)} columns, got {len(values)}", {str(i): value for i, value in enumerate(values)}))
+                else:
+                    rows.append(dict(zip(headers, values)))
+                row_number += 1
         return rows, errors
 
     def _read_json(self, path: Path) -> Tuple[List[Mapping[str, Any]], List[QuarantineRecord]]:
@@ -307,6 +337,8 @@ class SourceImporter:
         else:
             return ImportResult(
                 source_system=self.source_system,
+                profile_version=self.profile_version,
+                profile_status=self.profile_status,
                 quarantine=[
                     QuarantineRecord(
                         self.source_system,

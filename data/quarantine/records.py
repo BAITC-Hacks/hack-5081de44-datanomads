@@ -1,4 +1,4 @@
-"""Typed quarantine records with PII-safe row snapshots."""
+"""Typed quarantine records with value-free row summaries."""
 
 from __future__ import annotations
 
@@ -37,7 +37,9 @@ class QuarantineRecord:
             raise ValueError("row_number must be positive")
 
     def to_dict(self) -> Mapping[str, Any]:
-        safe_row, pii_report = minimize_mapping(self.row)
+        # Source headers can themselves contain identifiers.  Keep only counts
+        # so an unknown PII pattern cannot escape through a quarantine snapshot.
+        _, pii_report = minimize_mapping(self.row)
         safe_detail, _ = minimize_text(self.detail)
         return {
             "source_system": self.source_system,
@@ -45,7 +47,10 @@ class QuarantineRecord:
             "reason": self.reason,
             "detail": safe_detail,
             "field": self.field,
-            "row": safe_row,
+            "row": {
+                "column_count": len(self.row),
+                "nonempty_count": sum(value is not None and bool(str(value).strip()) for value in self.row.values()),
+            },
             "pii_categories": list(pii_report.categories),
         }
 

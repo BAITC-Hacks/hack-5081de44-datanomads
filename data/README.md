@@ -24,8 +24,24 @@ must stay outside Git and are never copied to the normalized layer.
 
 Adapters are available for the seven source systems named by the product plan:
 `iKOMEK109`, `АС Комек 109`, `AIKEY`, `Открытый город`, `E-SEP.SU`, `ЕКЦ-109`
-and `RDJardem3.0`. Each adapter only owns source-header aliases. Validation,
-normalization and privacy behavior is shared.
+and `RDJardem3.0`. Their aliases are `SYNTHETIC_TEST_ONLY` hypotheses, not
+verified production schemas. Each adapter owns exact source-header aliases and
+its CSV delimiter. Validation, normalization and privacy behavior is shared.
+An import reports the profile version, status and SHA-256 schema fingerprint.
+Missing or ambiguous required headers are quarantined as `UNKNOWN_SCHEMA`.
+
+Generate synthetic raw exports and run each one through its importer:
+
+```bash
+python3 scripts/generate_synthetic_sources.py --check
+```
+
+The seven generated source directories and checksum manifest live under ignored
+`data/synthetic_raw/v1/`. Each source has primary and alternate aliases, valid
+and invalid rows, an unclosed quoted CSV row, and an unknown schema. The
+manifest marks them `synthetic=true`; they are importer fixtures, not real
+source evidence or training data. A real export requires schema inspection and
+an explicit verified profile before its aliases can be trusted.
 
 The initial taxonomy has 20 Kazakhstan region IDs and 16 candidate topics. A
 raw direction is preserved in `topic_raw`; an unmapped direction gets
@@ -39,11 +55,11 @@ of these reasons:
 `BAD_CSV_STRUCTURE`, `INVALID_DATE`, `MISSING_REQUIRED_FIELD`, `UNKNOWN_SCHEMA`,
 `PII_REVIEW`, `INVALID_VALUE`.
 
-Quarantine snapshots are themselves masked. Known phones, IINs, e-mail
-addresses, labeled names/addresses and attachments are replaced with typed
-tokens or removed. A residual PII match is quarantined for source-specific
-review. The normalized layer does not contain name, phone, IIN, attachment
-contents or exact addresses.
+Quarantine rows keep only column/nonempty counts, reason and row number; raw
+headers and values are not copied to reports or Core. Known phones, IINs,
+e-mail addresses, labeled names/addresses and attachments are replaced with
+typed tokens or removed from normalized text. A residual PII match is
+quarantined for source-specific review.
 
 ## Deterministic demo dataset
 

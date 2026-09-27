@@ -26,6 +26,7 @@ class IKOMEK109Importer(SourceImporter):
 
 class ASKOMEK109Importer(SourceImporter):
     source_system = "as_komek109"
+    csv_delimiter = ";"
     field_aliases = {
         **SourceImporter.field_aliases,
         "external_ticket_id": ("external_ticket_id", "nomer_obrasheniya", "номер обращения", "id"),
