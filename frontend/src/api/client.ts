@@ -1,9 +1,9 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
-import { combineRelatedCandidates, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../operator'
+import { combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../operator'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -62,6 +62,7 @@ export interface BackendTicket {
   status: string
   source: string
   created_at: string
+  closed_at?: string | null
   updated_at: string
 }
 
@@ -92,6 +93,15 @@ interface BackendSimilar {
   relation: string
   topic_id?: string
   region_id?: string
+  created_at?: string
+  matched_factors?: string[]
+  suggestion?: {
+    score: number
+    threshold: number
+    rule_version: string
+    model_version: string
+    distance_metric: string
+  }
 }
 
 interface BackendAssistPreview {
@@ -178,8 +188,9 @@ function mapLearningStage(value: string): LearningCycle['stage'] {
 }
 
 function mapRelation(value: string): SimilarTicket['relation'] {
-  if (value === 'duplicate' || value === 'Дубликат') return 'Дубликат'
-  if (value === 'repeat' || value === 'Повтор') return 'Повтор'
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'duplicate' || normalized === 'дубликат') return 'Возможный дубликат'
+  if (normalized === 'repeat' || normalized === 'повтор') return 'Возможное повторное обращение'
   return 'Похожий'
 }
 
@@ -206,15 +217,27 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   const confidenceAvailable = Boolean(prediction && prediction.model_version !== 'unavailable')
   const confidenceState = normalizeConfidenceState(prediction?.confidence_state, prediction?.confidence ?? 0, confidenceAvailable)
   const text = item.text?.trim() || 'Текст обращения не предоставлен'
-  const similar = related.map((candidate) => ({
-    id: candidate.ticket_id,
-    title: knownTickets.find((ticket) => ticket.id === candidate.ticket_id)?.text ?? 'Связанное обращение',
-    similarity: candidate.score,
-    createdAt: 'Дата не загружена',
-    relation: mapRelation(candidate.relation),
-    candidateTypes: candidate.candidateTypes,
-    matchedFactors: matchingTicketFactors(item.topic_id, item.region_id, candidate.topic_id, candidate.region_id),
-  }))
+  const similar = related.map((candidate) => {
+    const matchedFactors = mapRelatedFactors(candidate.matched_factors)
+    return {
+      id: candidate.ticket_id,
+      title: knownTickets.find((ticket) => ticket.id === candidate.ticket_id)?.text ?? 'Связанное обращение',
+      similarity: candidate.score,
+      createdAt: candidate.created_at?.trim() || 'Дата не загружена',
+      relation: mapRelation(candidate.relation),
+      candidateTypes: candidate.candidateTypes,
+      matchedFactors: matchedFactors.length
+        ? matchedFactors
+        : matchingTicketFactors(item.topic_id, item.region_id, candidate.topic_id, candidate.region_id),
+      suggestion: candidate.suggestion ? {
+        score: candidate.suggestion.score,
+        threshold: candidate.suggestion.threshold,
+        ruleVersion: candidate.suggestion.rule_version,
+        modelVersion: candidate.suggestion.model_version,
+        distanceMetric: candidate.suggestion.distance_metric,
+      } : undefined,
+    }
+  })
   const status = latest?.action === 'correct' ? 'corrected' : latest?.action === 'confirm' || item.status === 'triaged' ? 'confirmed' : 'new'
   return {
     id: item.id,
@@ -269,6 +292,7 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
     topic: ticket.topic_label?.trim() || 'Тема не указана',
     region: ticket.region_name?.trim() || 'Регион не указан',
     createdAt: ticket.created_at?.trim() || 'Время не указано',
+    closedAt: ticket.closed_at?.trim() || undefined,
     status: ticket.status?.trim() || 'Статус не указан',
     channel: mapTicketChannel(ticket.source),
     latestDecision: decision ? {
@@ -434,11 +458,22 @@ export async function submitDecision(ticketId: string, decision: { status: 'conf
   }
 }
 
-export async function submitRelationFeedback(ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') {
+export async function submitRelationFeedback(ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) {
   return request(`/tickets/${encodeURIComponent(ticketId)}/relation-feedback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ related_ticket_id: relatedTicketId, relation, decision }),
+    body: JSON.stringify({
+      related_ticket_id: relatedTicketId,
+      relation,
+      decision,
+      suggestion: suggestion ? {
+        score: suggestion.score,
+        threshold: suggestion.threshold,
+        rule_version: suggestion.ruleVersion,
+        model_version: suggestion.modelVersion,
+        distance_metric: suggestion.distanceMetric,
+      } : undefined,
+    }),
   })
 }
 

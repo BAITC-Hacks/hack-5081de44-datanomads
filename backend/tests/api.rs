@@ -250,6 +250,7 @@ async fn related_ticket_detail_returns_permitted_context_and_latest_operator_act
         .as_str()
         .unwrap_or_default()
         .is_empty());
+    assert!(ticket["ticket"]["closed_at"].is_null());
 
     let corrected = application
         .clone()
@@ -296,6 +297,36 @@ async fn related_ticket_detail_returns_permitted_context_and_latest_operator_act
         .await
         .unwrap();
     assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
+async fn relation_feedback_keeps_rejected_relation_and_suggestion_snapshot() {
+    let application = app(AppState::demo());
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-001/relation-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"related_ticket_id":"ticket-002","relation":"DUPLICATE","decision":"REJECTED","suggestion":{"score":0.95,"threshold":0.9,"rule_version":"related-ticket-rules.v1","model_version":"embedder-test-v1","distance_metric":"Cosine"}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 201);
+    let feedback: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(feedback["feedback_type"], "relation:DUPLICATE:REJECTED");
+    assert_eq!(feedback["suggestion"]["score"], 0.95);
+    assert_eq!(feedback["suggestion"]["threshold"], 0.9);
+    assert_eq!(
+        feedback["suggestion"]["rule_version"],
+        "related-ticket-rules.v1"
+    );
+    assert_eq!(feedback["suggestion"]["model_version"], "embedder-test-v1");
+    assert_eq!(feedback["suggestion"]["distance_metric"], "Cosine");
 }
 
 #[tokio::test]

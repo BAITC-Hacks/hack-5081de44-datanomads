@@ -19,7 +19,7 @@ export const demoTickets: Ticket[] = [
     responseTemplate: 'Заявка передана в городской отдел хозяйства. Срок первичного осмотра — 2 рабочих дня.',
     similar: similar([
       { id: 'PT-10897', title: 'Яма у школы на Абая, 54', similarity: 0.91, createdAt: 'вчера', relation: 'Похожий' },
-      { id: 'PT-10736', title: 'Разрушенный асфальт после ливня', similarity: 0.87, createdAt: '12 сен', relation: 'Повтор' },
+      { id: 'PT-10736', title: 'Разрушенный асфальт после ливня', similarity: 0.87, createdAt: '12 сен', relation: 'Возможное повторное обращение' },
       { id: 'PT-10114', title: 'Опасный участок дороги во дворе', similarity: 0.82, createdAt: '02 сен', relation: 'Похожий' },
     ]),
   },
@@ -57,7 +57,7 @@ export const demoTickets: Ticket[] = [
     channel: 'Call-центр',
     responseTemplate: 'Мы передали информацию команде медицинского портала. О статусе исправления сообщим в уведомлении.',
     similar: similar([
-      { id: 'PT-10903', title: 'Не сохраняется запись к врачу', similarity: 0.93, createdAt: 'сегодня', relation: 'Дубликат' },
+      { id: 'PT-10903', title: 'Не сохраняется запись к врачу', similarity: 0.93, createdAt: 'сегодня', relation: 'Возможный дубликат' },
       { id: 'PT-10825', title: 'Окно исчезает при подтверждении', similarity: 0.9, createdAt: 'вчера', relation: 'Похожий' },
     ]),
   },
@@ -76,7 +76,7 @@ export const demoTickets: Ticket[] = [
     channel: 'WhatsApp',
     responseTemplate: 'Заявка передана в службу освещения. Ближайший выезд запланирован на текущие сутки.',
     similar: similar([
-      { id: 'PT-10812', title: 'Фонари не включаются у остановки', similarity: 0.9, createdAt: 'вчера', relation: 'Повтор' },
+      { id: 'PT-10812', title: 'Фонари не включаются у остановки', similarity: 0.9, createdAt: 'вчера', relation: 'Возможное повторное обращение' },
       { id: 'PT-10577', title: 'Тёмный двор возле детской площадки', similarity: 0.8, createdAt: '06 сен', relation: 'Похожий' },
     ]),
   },

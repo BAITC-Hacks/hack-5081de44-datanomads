@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
@@ -127,6 +127,12 @@ function navigate(route: Route) {
 
 function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`
+}
+
+function relationFeedbackType(relation: Ticket['similar'][number]['relation']): 'DUPLICATE' | 'REPEAT' | 'SIMILAR' {
+  if (relation === 'Возможный дубликат') return 'DUPLICATE'
+  if (relation === 'Возможное повторное обращение') return 'REPEAT'
+  return 'SIMILAR'
 }
 
 function App() {
@@ -360,10 +366,10 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
     }
   }
 
-  const updateRelation = async (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') => {
+  const updateRelation = async (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => {
     try {
-      await submitRelationFeedback(ticketId, relatedTicketId, relation, decision)
-      onToast(`Связь ${relatedTicketId} сохранена: ${relation.toLowerCase()}`)
+      await submitRelationFeedback(ticketId, relatedTicketId, relation, decision, suggestion)
+      onToast(`Обратная связь по ${relatedTicketId} сохранена: ${relation.toLowerCase()} · ${decision.toLowerCase()}`)
     } catch (error) {
       onToast(`Не удалось сохранить связь: ${error instanceof Error ? error.message : 'ошибка API'}`)
     }
@@ -409,7 +415,7 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
   </div>
 }
 
-function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[]) => void }) {
+function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[]) => void }) {
   const [correctionOpen, setCorrectionOpen] = useState(false)
   const [templateOpen, setTemplateOpen] = useState(false)
   const [topic, setTopic] = useState(ticket.topic)
@@ -553,7 +559,32 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
           <p className="panel-note">{ticket.responseTemplate}</p>
         )}
       </div>
-      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">История и связанные обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.length ? ticket.similar.map((item) => <div className="similar-item" key={item.id}><div className="similar-main-column"><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id, item.matchedFactors ?? [])}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><span className="similar-factors">{item.matchedFactors?.length ? item.matchedFactors.join(' · ') : 'Совпадающие признаки не предоставлены'}</span></div><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span>{item.candidateTypes?.includes('duplicate') && <span className="relation-badge relation-duplicate">Кандидат на дубликат</span>}{item.candidateTypes?.includes('repeat') && <span className="relation-badge relation-repeat">Кандидат на повтор</span>}<span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>) : <p className="panel-note">{emptyHistoryMessage}</p>}</div></div>
+      <div className="detail-section">
+        <div className="section-inline-heading">
+          <div className="field-label">История и связанные обращения <span className="count-pill">{ticket.similar.length}</span></div>
+          <span className="field-label">проверьте связь</span>
+        </div>
+        <div className="similar-list">
+          {ticket.similar.length ? ticket.similar.map((item) => {
+            const relation = relationFeedbackType(item.relation)
+            return <div className="similar-item" key={item.id}>
+              <div className="similar-main-column">
+                <button className="similar-main similar-open" aria-label={`Открыть оригинал ${item.id}`} onClick={() => onOpenRelated(item.id, item.matchedFactors ?? [])}>
+                  <strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} />
+                </button>
+                <span className="similar-factors">{item.matchedFactors?.length ? item.matchedFactors.join(' · ') : 'Совпадающие признаки не предоставлены'}</span>
+              </div>
+              <div className="similar-meta">
+                <span className={`relation-badge ${item.relation === 'Возможный дубликат' ? 'relation-duplicate' : item.relation === 'Возможное повторное обращение' ? 'relation-repeat' : ''}`}>{item.relation}</span>
+                <span>Создано {item.createdAt}</span>
+                <span>{formatPercent(item.similarity)}</span>
+                <button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, relation, 'CONFIRMED', item.suggestion)}>Подтвердить</button>
+                <button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, relation, 'REJECTED', item.suggestion)}>Отклонить</button>
+              </div>
+            </div>
+          }) : <p className="panel-note">{emptyHistoryMessage}</p>}
+        </div>
+      </div>
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>
@@ -581,11 +612,13 @@ function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state
         <section className="related-ticket-section">
           <div className="field-label">Оригинальный текст</div>
           <p className="related-ticket-original">«{detail.originalText}»</p>
-          <p className="source-line">{detail.channel} · {detail.createdAt} · {detail.region}{detail.externalRef && ` · № ${detail.externalRef}`}</p>
+          <p className="source-line">{detail.channel} · {detail.region}{detail.externalRef && ` · № ${detail.externalRef}`}</p>
         </section>
         <section className="related-ticket-section">
           <div className="field-label">Тема и статус в записи</div>
           <dl className="related-ticket-meta">
+            <div><dt>Создано</dt><dd>{detail.createdAt}</dd></div>
+            <div><dt>Закрыто</dt><dd>{detail.closedAt ?? 'Время закрытия не указано'}</dd></div>
             <div><dt>Тема</dt><dd>{detail.topic}</dd></div>
             <div><dt>Статус записи</dt><dd>{detail.status}</dd></div>
           </dl>
@@ -604,7 +637,7 @@ function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state
           <div className="field-label">Проверяемые признаки сходства</div>
           {state.matchedFactors.length ? <div className="related-factor-list">{state.matchedFactors.map((factor) => <span className="relation-badge" key={factor}>{factor}</span>)}</div> : <p className="panel-note">Совпадение по теме или региону не подтверждено доступными полями.</p>}
         </section>
-        <p className="related-ticket-note">Связанная карточка открыта только для сравнения. Её действие и служба не меняют маршрут текущего обращения.</p>
+        <p className="related-ticket-note">Это возможное сходство для проверки оператором. Оно не подтверждает, что объект или проблема те же, и не создаёт связь автоматически.</p>
       </div>}
     </section>
   </div>

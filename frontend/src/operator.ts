@@ -4,6 +4,15 @@ export interface RelatedCandidateInput {
   relation: string
   topic_id?: string
   region_id?: string
+  created_at?: string
+  matched_factors?: string[]
+  suggestion?: {
+    score: number
+    threshold: number
+    rule_version: string
+    model_version: string
+    distance_metric: string
+  }
 }
 
 export interface RelatedCandidate extends RelatedCandidateInput {
@@ -13,6 +22,7 @@ export interface RelatedCandidate extends RelatedCandidateInput {
 type CandidateType = RelatedCandidate['candidateTypes'][number]
 
 const DEFAULT_RELATED_TICKET_LIMIT = 3
+const RELATED_CANDIDATE_THRESHOLD = 0.78
 const RELATION_PRIORITY: Record<'similar' | 'repeat' | 'duplicate', number> = {
   similar: 0,
   repeat: 1,
@@ -21,8 +31,8 @@ const RELATION_PRIORITY: Record<'similar' | 'repeat' | 'duplicate', number> = {
 
 function relationType(value: string): 'similar' | 'repeat' | 'duplicate' {
   const normalized = value.trim().toLowerCase()
-  if (normalized === 'duplicate' || normalized === 'дубликат') return 'duplicate'
-  if (normalized === 'repeat' || normalized === 'повтор') return 'repeat'
+  if (normalized === 'duplicate' || normalized === 'дубликат' || normalized === 'возможный дубликат') return 'duplicate'
+  if (normalized === 'repeat' || normalized === 'повтор' || normalized === 'возможное повторное обращение') return 'repeat'
   return 'similar'
 }
 
@@ -72,6 +82,10 @@ export function combineRelatedCandidates(
         : candidate.relation
       const topicId = existing?.topic_id ?? candidate.topic_id
       const regionId = existing?.region_id ?? candidate.region_id
+      const createdAt = existing?.created_at ?? candidate.created_at
+      const relationIsCandidate = !existing || RELATION_PRIORITY[candidateRelation] >= RELATION_PRIORITY[relationType(existing.relation)]
+      const matchedFactors = existing?.matched_factors ?? candidate.matched_factors
+      const suggestion = relationIsCandidate ? candidate.suggestion ?? existing?.suggestion : existing?.suggestion ?? candidate.suggestion
 
       merged.set(candidate.ticket_id, {
         ticket_id: candidate.ticket_id,
@@ -79,6 +93,9 @@ export function combineRelatedCandidates(
         relation,
         ...(topicId === undefined ? {} : { topic_id: topicId }),
         ...(regionId === undefined ? {} : { region_id: regionId }),
+        ...(createdAt === undefined ? {} : { created_at: createdAt }),
+        ...(matchedFactors === undefined ? {} : { matched_factors: matchedFactors }),
+        ...(suggestion === undefined ? {} : { suggestion }),
         candidateTypes: nextTypes,
       })
     }
@@ -91,7 +108,24 @@ export function topRelatedCandidates(
   candidates: readonly RelatedCandidate[],
   limit = DEFAULT_RELATED_TICKET_LIMIT,
 ): RelatedCandidate[] {
-  return candidates.slice(0, Math.max(0, limit))
+  return candidates
+    .filter((candidate) => Number.isFinite(candidate.score)
+      && candidate.score >= (candidate.suggestion?.threshold ?? RELATED_CANDIDATE_THRESHOLD))
+    .slice(0, Math.max(0, limit))
+}
+
+const RELATED_FACTOR_LABELS: Record<string, string> = {
+  topic_match: 'Совпадает тема',
+  region_match: 'Совпадает регион',
+  within_30_days: 'В пределах 30 дней',
+}
+
+export function mapRelatedFactors(factors?: readonly string[]) {
+  if (!factors) return []
+  return [...new Set(factors.flatMap((factor) => {
+    const label = RELATED_FACTOR_LABELS[factor]
+    return label ? [label] : []
+  }))]
 }
 
 function isKnownIdentifier(value?: string) {

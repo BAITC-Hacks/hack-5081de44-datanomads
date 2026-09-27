@@ -33,14 +33,23 @@ export interface TicketAlternative {
   confidence: number
 }
 
+export interface RelationSuggestionSnapshot {
+  score: number
+  threshold: number
+  ruleVersion: string
+  modelVersion: string
+  distanceMetric: string
+}
+
 export interface SimilarTicket {
   id: string
   title: string
   similarity: number
   createdAt: string
-  relation: 'Похожий' | 'Повтор' | 'Дубликат'
+  relation: 'Похожий' | 'Возможное повторное обращение' | 'Возможный дубликат'
   candidateTypes?: Array<'similar' | 'duplicate' | 'repeat'>
   matchedFactors?: string[]
+  suggestion?: RelationSuggestionSnapshot
 }
 
 export interface RelatedTicketDetail {
@@ -50,6 +59,7 @@ export interface RelatedTicketDetail {
   topic: string
   region: string
   createdAt: string
+  closedAt?: string
   status: string
   channel: Ticket['channel']
   latestDecision?: {

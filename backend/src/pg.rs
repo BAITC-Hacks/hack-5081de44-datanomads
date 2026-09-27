@@ -6,14 +6,14 @@
 //! the vector index and the ML service owns classification/embedding.
 
 use crate::{
-    Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery,
-    AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
+    related_ticket_candidate, Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery,
+    AnalyticsQuery, AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
     CloseLearningCycleRequest, CreateLearningCycleRequest, DatasetProvenance, DecisionRequest,
     DecisionResponse, ForecastQuery, ForecastResponse, ImportRequest, ImportResponse,
     LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview,
     MetricBucket, ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
-    ResponseTemplate, RuleProvenance, RuleSource, SimilarTicket, Ticket, TicketDetailResponse,
-    TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    RelationSuggestionSnapshot, ResponseTemplate, RuleProvenance, RuleSource, Ticket,
+    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -77,6 +77,18 @@ fn qdrant_distance_name(value: &str) -> Result<String, String> {
         "dot" => Ok("Dot".to_owned()),
         "euclid" | "euclidean" => Ok("Euclid".to_owned()),
         _ => Err("embedding distance must be cosine, dot, or euclidean".to_owned()),
+    }
+}
+
+fn qdrant_score_to_similarity(score: f32, distance_metric: &str) -> Option<f32> {
+    if !score.is_finite() {
+        return None;
+    }
+    match distance_metric {
+        "Cosine" | "Dot" => Some(score.clamp(0.0, 1.0)),
+        // The embedder normalizes vectors, so Euclidean distance maps to cosine similarity.
+        "Euclid" => Some((1.0 - score.powi(2) / 2.0).clamp(0.0, 1.0)),
+        _ => None,
     }
 }
 
@@ -185,6 +197,7 @@ struct DbTicket {
     status: String,
     source_system: String,
     created_at: DateTime<Utc>,
+    closed_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
 }
 
@@ -330,6 +343,7 @@ SELECT
     t.status,
     t.source_system,
     t.created_at,
+    t.closed_at,
     t.updated_in_pulse_at AS updated_at
 FROM tickets t
 LEFT JOIN regions r ON r.id = t.region_id
@@ -3072,6 +3086,7 @@ impl PgRepository {
                 .try_get::<String, _>("accepted_or_corrected")
                 .unwrap_or_default(),
             comment: row.try_get("comment").unwrap_or(None),
+            suggestion: None,
             user_id: row
                 .try_get::<Option<String>, _>("user_id")
                 .unwrap_or(None)
@@ -3307,6 +3322,7 @@ impl PgRepository {
                     status: "preview".to_owned(),
                     source: "preview".to_owned(),
                     created_at: created_at.clone(),
+                    closed_at: None,
                     updated_at: created_at.clone(),
                 };
                 let classification_started = Instant::now();
@@ -3472,45 +3488,27 @@ impl PgRepository {
                     "retrieval",
                     "completed",
                     retrieval_latency_ms,
-                    Some(active_index.embedder_version),
+                    Some(active_index.embedder_version.clone()),
                     None,
                 ));
-                let current_topic = if ticket.topic_id.eq_ignore_ascii_case("unknown") {
-                    None
-                } else {
-                    Some(ticket.topic_id.as_str())
-                };
                 let relation_started = Instant::now();
                 similar = hits
                     .into_iter()
-                    .map(|hit| {
-                        let relation = {
-                            let same_topic =
-                                current_topic.is_some_and(|topic_id| hit.topic_id == topic_id);
-                            let same_region = hit.region_id == ticket.region_id;
-                            let within_time_window = match (current_created_at, hit.created_at) {
-                                (Some(current), Some(candidate)) => {
-                                    (current - candidate).num_days().unsigned_abs() <= 30
-                                }
-                                _ => false,
-                            };
-                            if hit.score >= 0.90 && same_topic && same_region && within_time_window
-                            {
-                                "duplicate"
-                            } else if hit.score >= 0.78 && same_topic && within_time_window {
-                                "repeat"
-                            } else {
-                                "similar"
-                            }
-                            .to_owned()
-                        };
-                        SimilarTicket {
-                            ticket_id: hit.id.to_string(),
-                            score: hit.score,
-                            relation,
-                            topic_id: hit.topic_id,
-                            region_id: hit.region_id,
-                        }
+                    .filter_map(|hit| {
+                        let similarity =
+                            qdrant_score_to_similarity(hit.score, &active_index.distance_metric)?;
+                        related_ticket_candidate(
+                            hit.id.to_string(),
+                            similarity,
+                            &ticket.topic_id,
+                            &ticket.region_id,
+                            current_created_at.as_ref(),
+                            hit.topic_id.clone(),
+                            hit.region_id.clone(),
+                            hit.created_at.as_ref(),
+                            &active_index.embedder_version,
+                            &active_index.distance_metric,
+                        )
                     })
                     .collect();
                 stages.push(assist_stage(
@@ -3866,18 +3864,24 @@ impl PgRepository {
         relation: &str,
         decision: &str,
         user_id: &str,
+        suggestion: Option<&RelationSuggestionSnapshot>,
     ) -> Result<(), String> {
         let ticket = self.fetch_ticket(ticket_id).await?;
         let related = match related_ticket_id {
             Some(value) => Some(self.fetch_ticket(value).await?),
             None => None,
         };
-        sqlx::query("INSERT INTO relation_feedback (ticket_id, related_ticket_id, relation, decision, user_id) VALUES ($1, $2, $3, $4, $5)")
+        sqlx::query("INSERT INTO relation_feedback (ticket_id, related_ticket_id, relation, decision, user_id, suggestion_score, suggestion_threshold, suggestion_rule_version, suggestion_model_version, suggestion_distance_metric) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
             .bind(ticket.id.parse::<i64>().map_err(|_| "invalid ticket id".to_owned())?)
             .bind(related.map(|item| item.id.parse::<i64>().unwrap_or_default()))
             .bind(relation.to_ascii_uppercase())
             .bind(decision.to_ascii_uppercase())
             .bind(user_id)
+            .bind(suggestion.map(|value| value.score as f64))
+            .bind(suggestion.map(|value| value.threshold as f64))
+            .bind(suggestion.map(|value| value.rule_version.as_str()))
+            .bind(suggestion.map(|value| value.model_version.as_str()))
+            .bind(suggestion.map(|value| value.distance_metric.as_str()))
             .execute(&self.pool)
             .await
             .map_err(|error| format!("insert relation feedback: {error}"))?;
@@ -3954,6 +3958,7 @@ fn ticket_from_db(row: DbTicket) -> Ticket {
         status: row.status.to_ascii_lowercase(),
         source: row.source_system,
         created_at: row.created_at.to_rfc3339(),
+        closed_at: row.closed_at.map(|value| value.to_rfc3339()),
         updated_at: row.updated_at.to_rfc3339(),
     }
 }
@@ -4628,6 +4633,48 @@ mod vector_index_tests {
         };
 
         assert!(validate_qdrant_vector_config(&info, &index).is_err());
+    }
+
+    #[test]
+    fn qdrant_scores_use_one_similarity_scale_for_supported_metrics() {
+        assert_eq!(qdrant_score_to_similarity(0.82, "Cosine"), Some(0.82));
+        assert_eq!(qdrant_score_to_similarity(0.82, "Dot"), Some(0.82));
+        assert!((qdrant_score_to_similarity(0.2, "Euclid").unwrap() - 0.98).abs() < 0.001);
+        assert_eq!(qdrant_score_to_similarity(f32::NAN, "Cosine"), None);
+        assert_eq!(qdrant_score_to_similarity(0.5, "Unknown"), None);
+    }
+
+    #[test]
+    fn ticket_mapping_preserves_the_official_closed_time() {
+        let created_at = DateTime::parse_from_rfc3339("2026-09-20T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let closed_at = DateTime::parse_from_rfc3339("2026-09-21T18:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let row = DbTicket {
+            id: 17,
+            external_ticket_id: "CRM-17".to_owned(),
+            original_text: "Synthetic road repair request".to_owned(),
+            language: "RU".to_owned(),
+            region_id: "R01".to_owned(),
+            region_name: "Region 1".to_owned(),
+            topic_id: "roads".to_owned(),
+            topic_label: "Roads".to_owned(),
+            priority: "normal".to_owned(),
+            status: "CLOSED".to_owned(),
+            source_system: "crm".to_owned(),
+            created_at,
+            closed_at: Some(closed_at.clone()),
+            updated_at: closed_at,
+        };
+
+        let ticket = ticket_from_db(row);
+        assert!(TICKET_SELECT.contains("t.closed_at"));
+        assert_eq!(
+            ticket.closed_at.as_deref(),
+            Some("2026-09-21T18:00:00+00:00")
+        );
     }
 
     #[test]

@@ -140,13 +140,14 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/RelationFeedbackRequest' }
       responses:
-        '200':
+        '201':
           description: Feedback stored
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/StoredResponse' }
+              schema: { $ref: '#/components/schemas/RelationFeedbackResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/analytics/overview:
     get:
       tags: [analytics]
@@ -1035,13 +1036,27 @@ components:
         decision: { $ref: '#/components/schemas/OperatorDecision' }
     SimilarTicket:
       type: object
-      required: [ticket_id, score]
+      required: [ticket_id, score, relation, topic_id, region_id, matched_factors, suggestion]
       properties:
         ticket_id: { type: string }
         score: { type: number }
+        relation: { type: string, enum: [duplicate, repeat, similar] }
         topic_id: { type: string }
         region_id: { type: string }
-        permitted_fields: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time, nullable: true }
+        matched_factors:
+          type: array
+          items: { type: string, enum: [topic_match, region_match, within_30_days] }
+        suggestion: { $ref: '#/components/schemas/RelationSuggestionSnapshot' }
+    RelationSuggestionSnapshot:
+      type: object
+      required: [score, threshold, rule_version, model_version, distance_metric]
+      properties:
+        score: { type: number, minimum: 0, maximum: 1 }
+        threshold: { type: number, minimum: 0, maximum: 1 }
+        rule_version: { type: string }
+        model_version: { type: string }
+        distance_metric: { type: string, enum: [Cosine, Dot, Euclid, fixture] }
     PulseStateRequest:
       type: object
       required: [operator_confirmed_decision]
@@ -1052,9 +1067,22 @@ components:
       type: object
       required: [relation, decision]
       properties:
-        relation: { type: string, enum: [duplicate, repeat, similar, unrelated] }
-        decision: { type: string, enum: [confirmed, rejected] }
+        relation: { type: string, enum: [DUPLICATE, REPEAT, SIMILAR, UNRELATED, duplicate, repeat, similar, unrelated] }
+        decision: { type: string, enum: [CONFIRMED, REJECTED, confirmed, rejected] }
         related_ticket_id: { type: string }
+        suggestion: { $ref: '#/components/schemas/RelationSuggestionSnapshot' }
+    RelationFeedbackResponse:
+      type: object
+      required: [id, ticket_id, cycle_id, feedback_type, comment, user_id, created_at]
+      properties:
+        id: { type: string }
+        ticket_id: { type: string }
+        cycle_id: { type: string, nullable: true }
+        feedback_type: { type: string }
+        comment: { type: string, nullable: true }
+        user_id: { type: string }
+        created_at: { type: string, format: date-time }
+        suggestion: { $ref: '#/components/schemas/RelationSuggestionSnapshot' }
     StoredResponse:
       type: object
       required: [status, request_id]
@@ -1088,6 +1116,7 @@ components:
         status: { type: string }
         source: { type: string }
         created_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time, nullable: true }
         updated_at: { type: string, format: date-time }
     AnalyticsOverview:
       type: object

@@ -18,7 +18,7 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -40,6 +40,9 @@ use pg::{default_qdrant_collection, PgRepository};
 const SERVICE_NAME: &str = "pulse109-core";
 const API_VERSION: &str = "0.1.0";
 const DEMO_TIMESTAMP: &str = "2026-09-21T08:00:00Z";
+pub(crate) const RELATED_CANDIDATE_THRESHOLD: f32 = 0.78;
+pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
+const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
 
 /// Runtime configuration.  `dev_auth` is enabled by default for the local
 /// deterministic demo: a request without `x-pulse-role` acts as ADMIN, while
@@ -239,6 +242,7 @@ pub struct Ticket {
     pub status: String,
     pub source: String,
     pub created_at: String,
+    pub closed_at: Option<String>,
     pub updated_at: String,
 }
 
@@ -324,6 +328,18 @@ pub struct SimilarTicket {
     pub relation: String,
     pub topic_id: String,
     pub region_id: String,
+    pub created_at: Option<String>,
+    pub matched_factors: Vec<String>,
+    pub suggestion: RelationSuggestionSnapshot,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RelationSuggestionSnapshot {
+    pub score: f32,
+    pub threshold: f32,
+    pub rule_version: String,
+    pub model_version: String,
+    pub distance_metric: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -384,6 +400,8 @@ pub struct LearningFeedback {
     pub cycle_id: Option<String>,
     pub feedback_type: String,
     pub comment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<RelationSuggestionSnapshot>,
     pub user_id: String,
     pub created_at: String,
 }
@@ -999,6 +1017,7 @@ impl Store {
                 status: if index < 3 { "open" } else { "triaged" }.to_owned(),
                 source: "demo".to_owned(),
                 created_at,
+                closed_at: None,
                 updated_at: DEMO_TIMESTAMP.to_owned(),
             };
             let prediction = prediction_for_ticket(&ticket, &topics);
@@ -1546,6 +1565,7 @@ async fn create_ticket(
         status: "open".to_owned(),
         source: request.source.unwrap_or_else(|| "operator".to_owned()),
         created_at: DEMO_TIMESTAMP.to_owned(),
+        closed_at: None,
         updated_at: DEMO_TIMESTAMP.to_owned(),
     };
     let prediction = prediction_for_ticket(&ticket, &store.topics);
@@ -1836,30 +1856,122 @@ pub struct AssistStage {
     pub error_code: Option<String>,
 }
 
+fn known_relation_identifier(value: &str) -> bool {
+    let normalized = value.trim();
+    !normalized.is_empty()
+        && !normalized.eq_ignore_ascii_case("unknown")
+        && !normalized.eq_ignore_ascii_case("unavailable")
+}
+
+pub(crate) fn related_ticket_candidate(
+    ticket_id: String,
+    score: f32,
+    current_topic_id: &str,
+    current_region_id: &str,
+    current_created_at: Option<&DateTime<Utc>>,
+    candidate_topic_id: String,
+    candidate_region_id: String,
+    candidate_created_at: Option<&DateTime<Utc>>,
+    model_version: &str,
+    distance_metric: &str,
+) -> Option<SimilarTicket> {
+    if !score.is_finite() || score < RELATED_CANDIDATE_THRESHOLD {
+        return None;
+    }
+
+    let same_topic = known_relation_identifier(current_topic_id)
+        && known_relation_identifier(&candidate_topic_id)
+        && current_topic_id
+            .trim()
+            .eq_ignore_ascii_case(candidate_topic_id.trim());
+    let same_region = known_relation_identifier(current_region_id)
+        && known_relation_identifier(&candidate_region_id)
+        && current_region_id
+            .trim()
+            .eq_ignore_ascii_case(candidate_region_id.trim());
+    let within_time_window = match (current_created_at, candidate_created_at) {
+        (Some(current), Some(candidate)) => {
+            current
+                .signed_duration_since(candidate.to_owned())
+                .num_days()
+                .unsigned_abs()
+                <= 30
+        }
+        _ => false,
+    };
+
+    let (relation, threshold) = if score >= DUPLICATE_CANDIDATE_THRESHOLD
+        && same_topic
+        && same_region
+        && within_time_window
+    {
+        ("duplicate", DUPLICATE_CANDIDATE_THRESHOLD)
+    } else if same_topic && within_time_window {
+        ("repeat", RELATED_CANDIDATE_THRESHOLD)
+    } else {
+        ("similar", RELATED_CANDIDATE_THRESHOLD)
+    };
+    let mut matched_factors = Vec::new();
+    if same_topic {
+        matched_factors.push("topic_match".to_owned());
+    }
+    if same_region {
+        matched_factors.push("region_match".to_owned());
+    }
+    if within_time_window {
+        matched_factors.push("within_30_days".to_owned());
+    }
+
+    Some(SimilarTicket {
+        ticket_id,
+        score,
+        relation: relation.to_owned(),
+        topic_id: candidate_topic_id,
+        region_id: candidate_region_id,
+        created_at: candidate_created_at.map(DateTime::to_rfc3339),
+        matched_factors,
+        suggestion: RelationSuggestionSnapshot {
+            score,
+            threshold,
+            rule_version: RELATED_CANDIDATE_RULE_VERSION.to_owned(),
+            model_version: model_version.to_owned(),
+            distance_metric: distance_metric.to_owned(),
+        },
+    })
+}
+
 // Offline fixture-only related-ticket behavior. Real mode uses Qdrant vector search.
 fn demo_related_tickets(
     store: &Store,
     ticket: &Ticket,
     prediction: &Prediction,
 ) -> Vec<SimilarTicket> {
+    let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc));
     store
         .tickets
         .values()
         .filter(|candidate| candidate.id != ticket.id)
         .filter(|candidate| candidate.topic_id == prediction.topic_id)
-        .take(3)
+        .take(5)
         .enumerate()
-        .map(|(index, candidate)| SimilarTicket {
-            ticket_id: candidate.id.clone(),
-            score: (0.91 - index as f32 * 0.11).max(0.5),
-            relation: if candidate.region_id == ticket.region_id {
-                "similar"
-            } else {
-                "repeat"
-            }
-            .to_owned(),
-            topic_id: candidate.topic_id.clone(),
-            region_id: candidate.region_id.clone(),
+        .filter_map(|(index, candidate)| {
+            let candidate_created_at = DateTime::parse_from_rfc3339(&candidate.created_at)
+                .ok()
+                .map(|value| value.with_timezone(&Utc));
+            related_ticket_candidate(
+                candidate.id.clone(),
+                (0.91 - index as f32 * 0.11).max(0.5),
+                &ticket.topic_id,
+                &ticket.region_id,
+                current_created_at.as_ref(),
+                candidate.topic_id.clone(),
+                candidate.region_id.clone(),
+                candidate_created_at.as_ref(),
+                "unavailable",
+                "fixture",
+            )
         })
         .collect()
 }
@@ -1984,6 +2096,7 @@ async fn assist_preview(
                 status: "preview".to_owned(),
                 source: "preview".to_owned(),
                 created_at: DEMO_TIMESTAMP.to_owned(),
+                closed_at: None,
                 updated_at: DEMO_TIMESTAMP.to_owned(),
             },
             "deterministic-demo".to_owned(),
@@ -2014,7 +2127,7 @@ async fn assist_preview(
     let retrieval_latency_ms = related_started.elapsed().as_secs_f64() * 1000.0;
     let duplicate_candidates = related
         .iter()
-        .filter(|item| item.score >= 0.8)
+        .filter(|item| item.relation == "duplicate")
         .cloned()
         .collect();
     let repeat_candidates = related
@@ -2428,6 +2541,7 @@ async fn apply_decision(
                 "corrected".to_owned()
             },
             comment: decision.note.clone(),
+            suggestion: None,
             user_id: decision.user_id.clone(),
             created_at: DEMO_TIMESTAMP.to_owned(),
         };
@@ -4012,6 +4126,7 @@ async fn add_learning_feedback(
         cycle_id: Some(cycle_id.clone()),
         feedback_type,
         comment: request.comment,
+        suggestion: None,
         user_id: actor.user_id,
         created_at: DEMO_TIMESTAMP.to_owned(),
     };
@@ -4030,6 +4145,28 @@ pub struct RelationFeedbackRequest {
     pub relation: String,
     pub decision: Option<String>,
     pub comment: Option<String>,
+    pub suggestion: Option<RelationSuggestionSnapshot>,
+}
+
+fn validate_relation_suggestion(suggestion: &RelationSuggestionSnapshot) -> Result<(), ApiError> {
+    let valid_score = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
+    if !valid_score(suggestion.score) || !valid_score(suggestion.threshold) {
+        return Err(ApiError::BadRequest(
+            "suggestion score and threshold must be between 0 and 1".to_owned(),
+        ));
+    }
+    if suggestion.rule_version.trim().is_empty()
+        || suggestion.rule_version.len() > 128
+        || suggestion.model_version.trim().is_empty()
+        || suggestion.model_version.len() > 128
+        || suggestion.distance_metric.trim().is_empty()
+        || suggestion.distance_metric.len() > 128
+    {
+        return Err(ApiError::BadRequest(
+            "suggestion versions must contain 1 to 128 characters".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn relation_feedback(
@@ -4063,6 +4200,9 @@ async fn relation_feedback(
             "decision must be CONFIRMED or REJECTED".to_owned(),
         ));
     }
+    if let Some(suggestion) = request.suggestion.as_ref() {
+        validate_relation_suggestion(suggestion)?;
+    }
     if let Some(repository) = state.repository() {
         repository
             .relation_feedback(
@@ -4071,6 +4211,7 @@ async fn relation_feedback(
                 &relation,
                 &decision,
                 &actor.user_id,
+                request.suggestion.as_ref(),
             )
             .await
             .map_err(|error| {
@@ -4088,7 +4229,11 @@ async fn relation_feedback(
                 Some(&ticket_id),
                 Some(&request_id_from_headers(&headers)),
                 Some(&decision),
-                json!({"relation": &relation, "related_ticket_id": &request.related_ticket_id}),
+                json!({
+                    "relation": &relation,
+                    "related_ticket_id": &request.related_ticket_id,
+                    "suggestion": &request.suggestion,
+                }),
             )
             .await
             .map_err(ApiError::Internal)?;
@@ -4100,6 +4245,7 @@ async fn relation_feedback(
                 cycle_id: None,
                 feedback_type: format!("relation:{relation}:{decision}"),
                 comment: request.comment,
+                suggestion: request.suggestion,
                 user_id: actor.user_id,
                 created_at: Utc::now().to_rfc3339(),
             }),
@@ -4126,6 +4272,7 @@ async fn relation_feedback(
                 .related_ticket_id
                 .map(|id| format!("related_ticket_id={id}"))
         }),
+        suggestion: request.suggestion,
         user_id: actor.user_id,
         created_at: DEMO_TIMESTAMP.to_owned(),
     };
@@ -4870,5 +5017,71 @@ mod tests {
             default_qdrant_collection("e5-multilingual-v2", 768),
             "pulse109_e5_multilingual_v2_d768"
         );
+    }
+
+    #[test]
+    fn related_candidates_are_thresholded_and_labeled_only_by_known_factors() {
+        let current_date = DateTime::parse_from_rfc3339("2026-09-21T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let previous_date = DateTime::parse_from_rfc3339("2026-09-10T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let weak = related_ticket_candidate(
+            "ticket-weak".to_owned(),
+            0.77,
+            "TOPIC-ROADS",
+            "R01",
+            Some(&current_date),
+            "TOPIC-ROADS".to_owned(),
+            "R01".to_owned(),
+            Some(&previous_date),
+            "embedder-test-v1",
+            "Cosine",
+        );
+        assert!(weak.is_none());
+
+        let duplicate = related_ticket_candidate(
+            "ticket-duplicate".to_owned(),
+            0.95,
+            "TOPIC-ROADS",
+            "R01",
+            Some(&current_date),
+            "TOPIC-ROADS".to_owned(),
+            "R01".to_owned(),
+            Some(&previous_date),
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(duplicate.relation, "duplicate");
+        assert_eq!(
+            duplicate.matched_factors,
+            ["topic_match", "region_match", "within_30_days"]
+        );
+        assert_eq!(
+            duplicate.suggestion.threshold,
+            DUPLICATE_CANDIDATE_THRESHOLD
+        );
+        assert_eq!(duplicate.suggestion.rule_version, "related-ticket-rules.v1");
+        assert_eq!(duplicate.suggestion.model_version, "embedder-test-v1");
+        assert_eq!(duplicate.suggestion.distance_metric, "Cosine");
+
+        let repeat = related_ticket_candidate(
+            "ticket-repeat".to_owned(),
+            0.82,
+            "TOPIC-ROADS",
+            "R01",
+            Some(&current_date),
+            "TOPIC-ROADS".to_owned(),
+            "R02".to_owned(),
+            Some(&previous_date),
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(repeat.relation, "repeat");
+        assert_eq!(repeat.matched_factors, ["topic_match", "within_30_days"]);
+        assert_eq!(repeat.suggestion.threshold, RELATED_CANDIDATE_THRESHOLD);
     }
 }
