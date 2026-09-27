@@ -83,3 +83,26 @@ and region slices with at least 30 examples. Train class counts and imbalance
 are explicit. Model settings are fixed before test evaluation; the output is
 synthetic evidence only until a real reviewed dataset is available. The output
 path must be new.
+
+## Retrieval baselines
+
+Evaluate relation groups from the same reviewed package:
+
+```bash
+.venv/bin/python scripts/evaluate_retrieval_baselines.py \
+  --dataset data/processed/reviewed-v1 \
+  --output data/processed/reports/reviewed-v1-retrieval-baselines.json \
+  --e5-model /path/to/local/multilingual-e5-base
+```
+
+The lexical baseline fits character TF-IDF on the training split. The E5
+baseline loads a local model with no Hub access, prefixes queries and passages,
+mean-pools masked tokens and normalizes embeddings as described in the
+[multilingual E5 model card](https://huggingface.co/intfloat/multilingual-e5-base).
+Without `--e5-model`, only lexical metrics are produced and `e5_model_status`
+is `NOT_RUN`; no pretrained result is implied. The report includes
+Recall@1/3/5, MRR, Precision@1/3/5 and graded nDCG@5. Relevance grades are
+`DUPLICATE=2`, `SIMILAR_BUT_NOT_DUPLICATE=1`, `REPEAT=1`, `UNRELATED=0`.
+Recall/MRR/nDCG average queries with at least one relevant candidate;
+precision includes queries without one. The report emits IDs and scores for a
+blind top-3 expert review queue, with `PENDING` status and no ticket text.

@@ -15,7 +15,7 @@ from training.contracts import DatasetManifest
 from training.dataset_builder import SPLITS, checksum, normalized_text
 
 
-def _load_package(package: Path) -> tuple[DatasetManifest, dict[str, list[dict]]]:
+def load_verified_classifier_package(package: Path) -> tuple[DatasetManifest, dict[str, list[dict]]]:
     manifest = DatasetManifest.read(package / "manifest.json")
     required_files = [f"classifier/{split}.jsonl" for split in SPLITS]
     required_files += [f"retrieval/{split}_pairs.jsonl" for split in SPLITS]
@@ -101,7 +101,7 @@ def _evaluate(rows: list[dict], predictions: list[str], labels: list[str]) -> di
 
 
 def evaluate_baselines(package: Path) -> dict:
-    manifest, splits = _load_package(package)
+    manifest, splits = load_verified_classifier_package(package)
     train = splits["train"]
     labels = sorted({row["topic_id"] for row in train})
     if len(labels) < 10 or any({row["topic_id"] for row in splits[name]} != set(labels) for name in SPLITS[1:]):
