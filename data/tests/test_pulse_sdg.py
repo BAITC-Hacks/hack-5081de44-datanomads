@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,7 +16,13 @@ from scripts.pulse_sdg import (
 class PilotSdgTests(unittest.TestCase):
     def test_scenarios_cover_all_canonical_topics(self) -> None:
         seeds = read_seeds(DEFAULT_SEEDS)
-        self.assertEqual({seed["topic_id"] for seed in seeds.values()}, TOPIC_IDS)
+        counts = Counter(seed["topic_id"] for seed in seeds.values())
+        self.assertEqual(set(counts), TOPIC_IDS)
+        self.assertGreaterEqual(min(counts.values()), 3)
+        for topic_id in TOPIC_IDS:
+            with self.subTest(topic_id=topic_id):
+                self.assertGreaterEqual(len({seed["subtopic_id"] for seed in seeds.values()
+                                             if seed["topic_id"] == topic_id}), 2)
 
     def test_export_deduplicates_canonically_equivalent_text(self) -> None:
         seeds = read_seeds(DEFAULT_SEEDS)

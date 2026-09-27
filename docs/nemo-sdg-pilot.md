@@ -2,15 +2,19 @@
 
 ## Вход и схема
 
-[`pilot_scenarios.jsonl`](../data/sdg/pilot_scenarios.jsonl) содержит 35
+[`pilot_scenarios.jsonl`](../data/sdg/pilot_scenarios.jsonl) содержит 49
 **вымышленных** ситуаций по 16 темам. Сценарии с provenance
 `SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR` связаны с однозначной парой
 `category + service` из
 [`almaty_2025_taxonomy_review.json`](../data/catalogs/almaty_2025_taxonomy_review.json).
-Три сценария с provenance `SYNTHETIC_AUTHORED_SCENARIO` созданы отдельно:
-два для `telecom`, где в каталоге нет подходящей пары, и один для школьного
-вопроса `education`. Их `source_category` и `source_service` равны
+Шесть сценариев с provenance `SYNTHETIC_AUTHORED_SCENARIO` созданы отдельно:
+три для `telecom`, где в каталоге нет подходящей пары, два для школьных
+вопросов `education` и один для загрязнения воды `environment`. Их
+`source_category` и `source_service` равны
 `SYNTHETIC_AUTHORED`, что не является категорией или источником заказчика.
+Для пилота зафиксирован минимальный порог разнообразия: не менее трёх
+разных ситуаций и двух подтипов на каждую из 16 тем. Это контроль покрытия
+seed, а не подтверждение качества синтетического текста или меток.
 Сырые обращения, комментарии и исполнители в seed не передаются.
 
 | Поле | Источник | Назначение |
@@ -51,7 +55,7 @@ source .venv-sdg/bin/activate
 python -m pip install data-designer==0.9.3
 
 python scripts/pulse_sdg.py --check-seeds
-python scripts/pulse_sdg.py --model qwen3.5:9b --num-records 35
+python scripts/pulse_sdg.py --model qwen3.5:9b --num-records 49
 ```
 
 Если Ollama доступна по другому адресу, добавьте
