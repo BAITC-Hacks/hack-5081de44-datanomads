@@ -36,6 +36,14 @@ class SpikeExplorationTests(unittest.TestCase):
         self.assertEqual(ratio["raw_alert_count"], 3)
         self.assertEqual(ratio["cooldown_alert_count"], 1)
 
+    def test_unobserved_history_day_is_excluded_instead_of_scored_as_zero(self) -> None:
+        series = [40] * 90
+        series[7] = None
+        report = evaluate_series(series, date(2025, 1, 1))
+        self.assertEqual(report["evaluated_days"], 32)
+        self.assertEqual(report["excluded_unobserved_or_incomplete_history_days"], 2)
+        self.assertTrue(all(row["daily_count"] > 0 for row in report["review_queue"]))
+
 
 if __name__ == "__main__":
     unittest.main()

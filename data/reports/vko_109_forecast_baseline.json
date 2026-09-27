@@ -1,47 +1,50 @@
 {
   "calendar_days": 1035,
-  "days_without_records": 2,
   "first_date": "2023-01-01",
   "invalid_csv_or_date_row_count": 0,
   "last_date": "2025-10-31",
+  "longest_observed_run_days": 1021,
   "method": "weekly_seasonal_naive",
   "minimum_train_days": 365,
+  "missing_day_policy": "fixed_calendar_origins_require_365_consecutive_observed_train_days_and_observed_targets",
   "origin_step_days": 30,
   "record_count": 83385,
+  "report_version": "forecast-baseline.v2",
   "results": [
     {
       "horizon_days": 30,
-      "mae": 42.9955,
-      "rmse": 87.2172,
-      "sample_count": 660,
-      "smape": 0.4307,
+      "mae": 40.9429,
+      "rmse": 85.8226,
+      "sample_count": 630,
+      "smape": 0.4181,
       "status": "EVALUATED",
-      "wape": 0.4855,
-      "window_count": 22
-    },
-    {
-      "horizon_days": 60,
-      "mae": 42.5897,
-      "rmse": 85.9415,
-      "sample_count": 1260,
-      "smape": 0.4353,
-      "status": "EVALUATED",
-      "wape": 0.486,
+      "wape": 0.4742,
       "window_count": 21
     },
     {
-      "horizon_days": 90,
-      "mae": 41.6017,
-      "rmse": 81.5964,
-      "sample_count": 1800,
-      "smape": 0.4371,
+      "horizon_days": 60,
+      "mae": 39.0342,
+      "rmse": 76.478,
+      "sample_count": 1200,
+      "smape": 0.4223,
       "status": "EVALUATED",
-      "wape": 0.4867,
+      "wape": 0.4661,
       "window_count": 20
+    },
+    {
+      "horizon_days": 90,
+      "mae": 39.055,
+      "rmse": 74.956,
+      "sample_count": 1710,
+      "smape": 0.4262,
+      "status": "EVALUATED",
+      "wape": 0.4707,
+      "window_count": 19
     }
   ],
   "scope": "total_daily_appeals_in_one_export",
   "season_length_days": 7,
   "source_sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
-  "status": "EVALUATED"
+  "status": "EVALUATED",
+  "unobserved_calendar_days": 2
 }

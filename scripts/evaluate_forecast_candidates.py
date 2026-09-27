@@ -16,7 +16,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.evaluate_forecast_csv import (
-    HORIZONS, MIN_TRAIN_DAYS, ORIGIN_STEP_DAYS, SEASON_LENGTH, daily_counts,
+    HORIZONS, MIN_TRAIN_DAYS, MISSING_DAY_POLICY, ORIGIN_STEP_DAYS, SEASON_LENGTH,
+    daily_counts, eligible_origins, observed_segments,
 )
 
 
@@ -61,14 +62,20 @@ def _metrics(actual: list[int], predicted: list[float], window_count: int) -> di
     }
 
 
-def evaluate_series(series: list[int], first_day: date) -> list[dict]:
+def evaluate_series(series: list[int | None], first_day: date) -> list[dict]:
     results = {horizon: {"actual": [], "seasonal_naive": [], "prophet": [], "window_count": 0}
                for horizon in HORIZONS}
-    for origin in range(MIN_TRAIN_DAYS, len(series) - min(HORIZONS) + 1, ORIGIN_STEP_DAYS):
-        available_horizons = [horizon for horizon in HORIZONS if origin + horizon <= len(series)]
+    segments = observed_segments(series)
+    longest_run = max((len(observed) for _, observed in segments), default=0)
+    valid_origins = {horizon: dict(eligible_origins(series, horizon)) for horizon in HORIZONS}
+    all_origins = sorted({origin for origins in valid_origins.values() for origin in origins})
+    for origin in all_origins:
+        available_horizons = [horizon for horizon in HORIZONS if origin in valid_origins[horizon]]
+        history_start = valid_origins[available_horizons[0]][origin]
         max_horizon = max(available_horizons)
-        prophet = _prophet_predict(series[:origin], first_day, max_horizon)
-        weekly_pattern = series[origin - SEASON_LENGTH:origin]
+        history = series[history_start:origin]
+        prophet = _prophet_predict(history, first_day + timedelta(days=history_start), max_horizon)
+        weekly_pattern = history[-SEASON_LENGTH:]
         for horizon in available_horizons:
             result = results[horizon]
             result["actual"].extend(series[origin:origin + horizon])
@@ -82,8 +89,10 @@ def evaluate_series(series: list[int], first_day: date) -> list[dict]:
             reports.append({
                 "horizon_days": horizon,
                 "status": "INSUFFICIENT_HISTORY",
+                "reason": "CALENDAR_TOO_SHORT" if len(series) < MIN_TRAIN_DAYS + horizon else "NO_FULLY_OBSERVED_WINDOW",
                 "required_calendar_days": MIN_TRAIN_DAYS + horizon,
                 "available_calendar_days": len(series),
+                "longest_observed_run_days": longest_run,
                 "window_count": 0,
             })
             continue
@@ -114,9 +123,9 @@ def build_report(path: Path) -> dict:
     elif evaluated_count:
         status = "PARTIAL"
     else:
-        status = "INSUFFICIENT_HISTORY"
+        status = results[0]["status"]
     return {
-        "report_version": "forecast-candidates.v1",
+        "report_version": "forecast-candidates.v2",
         "source_sha256": digest,
         "status": status,
         "scope": "total_daily_appeals_in_one_export",
@@ -125,7 +134,9 @@ def build_report(path: Path) -> dict:
         "record_count": record_count,
         "invalid_csv_or_date_row_count": invalid_rows,
         "calendar_days": len(series),
-        "days_without_records": series.count(0),
+        "unobserved_calendar_days": series.count(None),
+        "missing_day_policy": MISSING_DAY_POLICY,
+        "longest_observed_run_days": max(len(observed) for _, observed in observed_segments(series)),
         "minimum_train_days": MIN_TRAIN_DAYS,
         "origin_step_days": ORIGIN_STEP_DAYS,
         "selection_policy": "lowest_wape_on_same_windows_tie_seasonal_naive.v1",

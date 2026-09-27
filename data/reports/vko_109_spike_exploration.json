@@ -1,15 +1,16 @@
 {
   "calendar_days": 1035,
-  "days_without_records_treated_as_zero": 2,
-  "evaluated_days": 979,
+  "evaluated_days": 975,
+  "excluded_unobserved_or_incomplete_history_days": 4,
   "first_date": "2023-01-01",
   "history_weeks_same_weekday": 8,
   "invalid_csv_or_date_row_count": 0,
   "last_date": "2025-10-31",
+  "missing_day_policy": "exclude_unobserved_days_and_same_weekday_incomplete_history",
   "precision": null,
   "recall": null,
   "record_count": 83385,
-  "report_version": "spike-exploration.v1",
+  "report_version": "spike-exploration.v2",
   "review_queue": [
     {
       "daily_count": 952,
@@ -58,14 +59,6 @@
       "review_status": "PENDING",
       "robust_z": 16.0057,
       "weekday_median": 67.5
-    },
-    {
-      "daily_count": 514,
-      "date": "2023-03-03",
-      "ratio": 7.969,
-      "review_status": "PENDING",
-      "robust_z": 15.957,
-      "weekday_median": 64.5
     },
     {
       "daily_count": 351,
@@ -170,6 +163,14 @@
       "review_status": "PENDING",
       "robust_z": 9.7319,
       "weekday_median": 59.0
+    },
+    {
+      "daily_count": 350,
+      "date": "2024-02-11",
+      "ratio": 8.75,
+      "review_status": "PENDING",
+      "robust_z": 9.7252,
+      "weekday_median": 40.0
     }
   ],
   "robust_scale": "max(1,sqrt(weekday_median),1.4826*MAD)",
@@ -179,8 +180,8 @@
       "cooldown_days": 7,
       "method": "ratio",
       "minimum_count": 20,
-      "raw_alert_count": 158,
-      "raw_alerts_per_30_days": 4.8417,
+      "raw_alert_count": 155,
+      "raw_alerts_per_30_days": 4.7692,
       "threshold": 1.5
     },
     {
@@ -188,8 +189,8 @@
       "cooldown_days": 7,
       "method": "ratio",
       "minimum_count": 20,
-      "raw_alert_count": 91,
-      "raw_alerts_per_30_days": 2.7886,
+      "raw_alert_count": 89,
+      "raw_alerts_per_30_days": 2.7385,
       "threshold": 2.0
     },
     {
@@ -197,8 +198,8 @@
       "cooldown_days": 7,
       "method": "ratio",
       "minimum_count": 20,
-      "raw_alert_count": 38,
-      "raw_alerts_per_30_days": 1.1645,
+      "raw_alert_count": 36,
+      "raw_alerts_per_30_days": 1.1077,
       "threshold": 3.0
     },
     {
@@ -206,8 +207,8 @@
       "cooldown_days": 7,
       "method": "weekday_robust_z",
       "minimum_count": 20,
-      "raw_alert_count": 106,
-      "raw_alerts_per_30_days": 3.2482,
+      "raw_alert_count": 104,
+      "raw_alerts_per_30_days": 3.2,
       "threshold": 3.0
     },
     {
@@ -215,8 +216,8 @@
       "cooldown_days": 7,
       "method": "weekday_robust_z",
       "minimum_count": 20,
-      "raw_alert_count": 71,
-      "raw_alerts_per_30_days": 2.1757,
+      "raw_alert_count": 69,
+      "raw_alerts_per_30_days": 2.1231,
       "threshold": 4.0
     },
     {
@@ -224,8 +225,8 @@
       "cooldown_days": 7,
       "method": "weekday_robust_z",
       "minimum_count": 20,
-      "raw_alert_count": 60,
-      "raw_alerts_per_30_days": 1.8386,
+      "raw_alert_count": 59,
+      "raw_alerts_per_30_days": 1.8154,
       "threshold": 5.0
     }
   ],
@@ -235,5 +236,6 @@
   "source_sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
   "status": "EXPLORATORY_NO_GROUND_TRUTH",
   "time_to_detect": null,
-  "unit": "one_region_total_per_day"
+  "unit": "one_region_total_per_day",
+  "unobserved_calendar_days": 2
 }

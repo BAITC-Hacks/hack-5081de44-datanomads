@@ -25,16 +25,18 @@ ROBUST_Z_THRESHOLDS = (3.0, 4.0, 5.0)
 COOLDOWN_DAYS = 7
 
 
-def score_series(series: list[int], first_day: date) -> list[dict]:
-    if any(type(value) is not int or value < 0 for value in series):
-        raise ValueError("daily series must contain nonnegative integer counts")
+def score_series(series: list[int | None], first_day: date) -> list[dict]:
+    if any(value is not None and (type(value) is not int or value < 0) for value in series):
+        raise ValueError("daily series must contain nonnegative integer counts or unobserved days")
     scored = []
     for index in range(HISTORY_WEEKS * 7, len(series)):
+        observed = series[index]
         history = [series[index - 7 * week] for week in range(1, HISTORY_WEEKS + 1)]
+        if observed is None or any(value is None for value in history):
+            continue
         expected = statistics.median(history)
         mad = statistics.median(abs(value - expected) for value in history)
         scale = max(1.0, math.sqrt(expected), 1.4826 * mad)
-        observed = series[index]
         scored.append({
             "index": index,
             "date": (first_day + timedelta(days=index)).isoformat(),
@@ -56,7 +58,7 @@ def _cooldown_count(indices: list[int]) -> int:
     return selected
 
 
-def evaluate_series(series: list[int], first_day: date) -> dict:
+def evaluate_series(series: list[int | None], first_day: date) -> dict:
     scored = score_series(series, first_day)
     if not scored:
         return {
@@ -64,6 +66,7 @@ def evaluate_series(series: list[int], first_day: date) -> dict:
             "required_calendar_days": HISTORY_WEEKS * 7 + 1,
             "available_calendar_days": len(series),
             "evaluated_days": 0,
+            "excluded_unobserved_or_incomplete_history_days": max(0, len(series) - HISTORY_WEEKS * 7),
             "rules": [],
             "review_queue": [],
         }
@@ -95,6 +98,7 @@ def evaluate_series(series: list[int], first_day: date) -> dict:
     return {
         "status": "EXPLORATORY_NO_GROUND_TRUTH",
         "evaluated_days": len(scored),
+        "excluded_unobserved_or_incomplete_history_days": max(0, len(series) - HISTORY_WEEKS * 7 - len(scored)),
         "rules": rules,
         "review_queue": [{
             "date": row["date"],
@@ -111,7 +115,7 @@ def build_report(path: Path) -> dict:
     series, first_day, last_day, record_count, invalid_rows, digest = daily_counts(path)
     evaluation = evaluate_series(series, first_day)
     return {
-        "report_version": "spike-exploration.v1",
+        "report_version": "spike-exploration.v2",
         "source_sha256": digest,
         "scope": "total_daily_appeals_in_one_export",
         "unit": "one_region_total_per_day",
@@ -120,7 +124,8 @@ def build_report(path: Path) -> dict:
         "record_count": record_count,
         "invalid_csv_or_date_row_count": invalid_rows,
         "calendar_days": len(series),
-        "days_without_records_treated_as_zero": series.count(0),
+        "unobserved_calendar_days": series.count(None),
+        "missing_day_policy": "exclude_unobserved_days_and_same_weekday_incomplete_history",
         "history_weeks_same_weekday": HISTORY_WEEKS,
         "robust_scale": "max(1,sqrt(weekday_median),1.4826*MAD)",
         "selection_status": "NO_REVIEWED_INCIDENT_LABELS",

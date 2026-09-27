@@ -362,7 +362,9 @@ alert counts; no threshold is selected. The report contains only aggregate
 daily counts, dates and a 20-item `PENDING` review queue. It leaves precision,
 recall and detection delay unset because no incident ground truth was supplied.
 The unit is one region's total per day, not region × reviewed topic × time;
-missing days are treated as zero pending source-quality verification. This
+missing days are unobserved: forecast windows require 365 consecutive observed
+training days and an observed target horizon, while spike scoring skips a day
+if its count or one of eight same-weekday history counts is missing. This
 exploration cannot establish a runtime alert threshold.
 
 ## Feedback candidate dataset

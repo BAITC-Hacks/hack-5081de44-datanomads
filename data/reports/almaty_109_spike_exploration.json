@@ -1,15 +1,16 @@
 {
   "calendar_days": 315,
-  "days_without_records_treated_as_zero": 0,
   "evaluated_days": 259,
+  "excluded_unobserved_or_incomplete_history_days": 0,
   "first_date": "2025-01-01",
   "history_weeks_same_weekday": 8,
   "invalid_csv_or_date_row_count": 0,
   "last_date": "2025-11-11",
+  "missing_day_policy": "exclude_unobserved_days_and_same_weekday_incomplete_history",
   "precision": null,
   "recall": null,
   "record_count": 19912,
-  "report_version": "spike-exploration.v1",
+  "report_version": "spike-exploration.v2",
   "review_queue": [
     {
       "daily_count": 161,
@@ -235,5 +236,6 @@
   "source_sha256": "9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f",
   "status": "EXPLORATORY_NO_GROUND_TRUTH",
   "time_to_detect": null,
-  "unit": "one_region_total_per_day"
+  "unit": "one_region_total_per_day",
+  "unobserved_calendar_days": 0
 }

@@ -1,17 +1,21 @@
 {
   "calendar_days": 315,
-  "days_without_records": 0,
   "first_date": "2025-01-01",
   "invalid_csv_or_date_row_count": 0,
   "last_date": "2025-11-11",
+  "longest_observed_run_days": 315,
   "method": "weekly_seasonal_naive",
   "minimum_train_days": 365,
+  "missing_day_policy": "fixed_calendar_origins_require_365_consecutive_observed_train_days_and_observed_targets",
   "origin_step_days": 30,
   "record_count": 19912,
+  "report_version": "forecast-baseline.v2",
   "results": [
     {
       "available_calendar_days": 315,
       "horizon_days": 30,
+      "longest_observed_run_days": 315,
+      "reason": "CALENDAR_TOO_SHORT",
       "required_calendar_days": 395,
       "sample_count": 0,
       "status": "INSUFFICIENT_HISTORY",
@@ -20,6 +24,8 @@
     {
       "available_calendar_days": 315,
       "horizon_days": 60,
+      "longest_observed_run_days": 315,
+      "reason": "CALENDAR_TOO_SHORT",
       "required_calendar_days": 425,
       "sample_count": 0,
       "status": "INSUFFICIENT_HISTORY",
@@ -28,6 +34,8 @@
     {
       "available_calendar_days": 315,
       "horizon_days": 90,
+      "longest_observed_run_days": 315,
+      "reason": "CALENDAR_TOO_SHORT",
       "required_calendar_days": 455,
       "sample_count": 0,
       "status": "INSUFFICIENT_HISTORY",
@@ -37,5 +45,6 @@
   "scope": "total_daily_appeals_in_one_export",
   "season_length_days": 7,
   "source_sha256": "9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f",
-  "status": "INSUFFICIENT_HISTORY"
+  "status": "INSUFFICIENT_HISTORY",
+  "unobserved_calendar_days": 0
 }
