@@ -10,6 +10,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Dict, Iterable, Mapping
 
@@ -25,6 +26,17 @@ AUDIT_COLUMNS = {
     "submittal_channel", "category", "service", "contractor", "com_exp",
     "result", "status", "status_1", "operator",
 }
+CSV_DATE_PATTERN = re.compile(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}\Z")
+
+
+def _is_109_date(value: str) -> bool:
+    if not CSV_DATE_PATTERN.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value, "%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        return False
+    return True
 
 
 def _rows(path: Path) -> Iterable[Mapping[str, Any]]:
@@ -88,7 +100,7 @@ def build_109_csv_report(path: Path) -> Dict[str, Any]:
         years = Counter()
         seen_ids = set()
         row_count = invalid_date_count = duplicate_id_count = malformed_row_count = 0
-        missing_id_count = long_region_value_count = 0
+        missing_id_count = long_region_value_count = misplaced_date_count = 0
         first_date = last_date = None
         for row in reader:
             row_count += 1
@@ -118,6 +130,8 @@ def build_109_csv_report(path: Path) -> Dict[str, Any]:
             category = row["category"].strip()
             if category:
                 categories[category] += 1
+            if any(_is_109_date(row[column].strip()) for column in ("application_number", "category", "service")):
+                misplaced_date_count += 1
             if "region" in row and len(row["region"].strip()) > 120:
                 long_region_value_count += 1
 
@@ -145,6 +159,7 @@ def build_109_csv_report(path: Path) -> Dict[str, Any]:
         "category_count": len(categories),
         "largest_category_count": max(categories.values(), default=0),
         "region_values_over_120_chars": long_region_value_count,
+        "possible_shifted_column_row_count": misplaced_date_count,
         "has_original_text_column": "original_text" in headers,
     }
 

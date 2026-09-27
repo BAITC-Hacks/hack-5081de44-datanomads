@@ -31,6 +31,7 @@
     "street": 22347,
     "submittal_channel": 83385
   },
+  "possible_shifted_column_row_count": 0,
   "record_count": 83385,
   "region_values_over_120_chars": 1,
   "sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",

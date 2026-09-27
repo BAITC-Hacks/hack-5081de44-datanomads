@@ -406,6 +406,7 @@ class DataAuditTests(unittest.TestCase):
         self.assertEqual(report["nonempty_by_column"]["com_exp"], 1)
         self.assertEqual(report["by_year"], {"2025": 1})
         self.assertEqual(report["unknown_column_count"], 1)
+        self.assertEqual(report["possible_shifted_column_row_count"], 0)
         encoded = json.dumps(report, ensure_ascii=False)
         for sensitive in ("Иван Иванов", "ФИО:", "ticket-1", "private@example.com", "secret"):
             self.assertNotIn(sensitive, encoded)
@@ -422,6 +423,21 @@ class DataAuditTests(unittest.TestCase):
         self.assertEqual(report["record_count"], 1)
         self.assertNotIn("com_exp", report["nonempty_by_column"])
         self.assertFalse(report["has_original_text_column"])
+
+    def test_raw_csv_report_flags_date_in_non_date_column(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["application_number", "creation_date", "category", "service"])
+                writer.writerow(["ticket-1", "Дороги", "01.02.2025 12:30:00", "Ремонт"])
+                writer.writerow(["ticket-2", "02.02.2025 12:30:00", "Дороги", "Ремонт"])
+            report = build_report(path)
+
+        self.assertEqual(report["malformed_row_count"], 0)
+        self.assertEqual(report["invalid_date_count"], 1)
+        self.assertEqual(report["possible_shifted_column_row_count"], 1)
+        self.assertNotIn("ticket-1", json.dumps(report, ensure_ascii=False))
 
     def test_raw_csv_report_rejects_unterminated_quoted_field(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

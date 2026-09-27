@@ -39,6 +39,11 @@ regional datasets, with no asserted mapping to the seven operational
 corpus. `category`, `service` and `contractor` need separate semantic review
 before training or routing use. Neither layout has an explicit priority column.
 The CSV audit counts `com_exp` when present but does not require it.
+The audit also counts rows with an exact date-time value in `application_number`,
+`category` or `service`, where that value suggests a possible column shift. Both
+exports have zero such rows. This narrow structural signal cannot rule out
+other shifts or establish field semantics; the VKO report still records one
+`region` value longer than 120 characters for review.
 The [field availability report](customer_109_field_availability.json) and
 [interpretation](../../docs/customer-field-availability.md) list safe structural
 facts, missing fields and limits on within-file and cross-file comparisons.
