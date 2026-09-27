@@ -141,6 +141,11 @@ production artifact и заранее утверждённый critical policy. 
 получает явный код ошибки. Два региональных CSV без текста обращения не дают
 необходимых входов для реального обучения.
 
+Файловое возобновление offline job не восстанавливает состояние PostgreSQL
+после падения worker. Необходимые переходы `background_jobs` и
+`learning_cycles` перечислены в
+[`learning_worker_retry_handoff.json`](../data/contracts/learning_worker_retry_handoff.json).
+
 Парный shadow export и сохранение его итогового отчёта выполняются отдельно
 после evaluation window командами, описанными в
 [`ml-service/training/README.md`](../ml-service/training/README.md). До
