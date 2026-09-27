@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
 
 from training.dataset_builder import build_package, checksum
-from training.feedback_dataset import build_candidate
+from training.feedback_dataset import build_candidate, load_verified_candidate
 from training.tests.test_dataset_builder import fixture_inputs
 
 
@@ -165,6 +166,43 @@ class FeedbackCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum mismatch"):
             self.build(self.root / "out")
         self.assertFalse((self.root / "out/candidate_v1").exists())
+
+    def test_training_input_verifier_checks_checksum_lineage_and_frozen_text(self) -> None:
+        write_jsonl(self.input, [feedback(1), feedback(2)])
+        self.build(self.root / "out", minimum=2)
+        package = self.root / "out/candidate_v1"
+        manifest, samples = load_verified_candidate(package, self.frozen)
+        self.assertEqual(manifest.record_count, 2)
+        self.assertEqual([sample.topic_id for sample in samples], ["roads", "roads"])
+
+        train_path = package / "train.jsonl"
+        original = train_path.read_bytes()
+        train_path.write_bytes(original + b" ")
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            load_verified_candidate(package, self.frozen)
+        train_path.write_bytes(original)
+
+        rows = [json.loads(line) for line in original.decode("utf-8").splitlines()]
+        frozen_text = json.loads((self.frozen / "classifier/test.jsonl").read_text(encoding="utf-8").splitlines()[0])["text"]
+        rows[0]["text"] = frozen_text
+        write_jsonl(train_path, rows)
+        manifest_path = package / "manifest.json"
+        changed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        changed["train_sha256"] = checksum(train_path)
+        changed.pop("content_sha256")
+        canonical = json.dumps(changed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        changed["content_sha256"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        manifest_path.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "invalid or frozen"):
+            load_verified_candidate(package, self.frozen)
+
+    def test_mismatched_decision_action_is_counted(self) -> None:
+        row = feedback(1)
+        row["accepted_or_corrected"] = "ACCEPTED"
+        write_jsonl(self.input, [row])
+        report = self.build(self.root / "out")
+        self.assertEqual(report["status"], "INSUFFICIENT_FEEDBACK")
+        self.assertEqual(report["rejected_counts"], {"DECISION_ACTION_MISMATCH": 1})
 
 
 if __name__ == "__main__":

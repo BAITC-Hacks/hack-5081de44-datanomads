@@ -15,6 +15,7 @@ from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum, normalized_text
+from training.contracts import _checksum
 
 
 TOPICS = {topic["id"] for topic in TOPIC_DEFINITIONS}
@@ -69,6 +70,114 @@ class FeedbackRecord(BaseModel):
         if not ID_RE.fullmatch(value):
             raise ValueError("identifier must be stable")
         return value
+
+
+class CandidateSample(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    feedback_id: str
+    ticket_id: str
+    split_group: str
+    source_dataset_version: str
+    is_synthetic: bool
+    text: str = Field(min_length=1, max_length=10000)
+    language: Literal["RU", "KZ", "MIXED"]
+    topic_id: str
+    operator_confirmed_decision: OperatorDecision
+    production_model_version: str
+    production_prediction: PredictionEvidence
+    accepted_or_corrected: Literal["ACCEPTED", "CORRECTED"]
+    feedback_created_at: AwareDatetime
+
+    @field_validator("feedback_id", "ticket_id", "split_group", "source_dataset_version")
+    @classmethod
+    def valid_id(cls, value: str) -> str:
+        if not ID_RE.fullmatch(value):
+            raise ValueError("identifier must be stable")
+        return value
+
+
+class FeedbackCandidateManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    manifest_version: Literal["feedback-candidate.v1"]
+    source_contract_version: Literal["learning-feedback-export.v1"]
+    candidate_dataset_version: str
+    cycle_id: str
+    production_model_version: str
+    record_count: int = Field(ge=1)
+    minimum_feedback_count: int = Field(ge=1)
+    source_feedback_sha256: str
+    source_feedback_ids: list[str] = Field(min_length=1)
+    source_dataset_versions: list[str] = Field(min_length=1)
+    origin_counts: dict[str, int]
+    rejected_counts: dict[str, int]
+    frozen_package: dict[str, str]
+    split_policy: Literal["exported_split_group_frozen_id_text_exclusion.v1"]
+    train_sha256: str
+    content_sha256: str
+
+    @field_validator("source_feedback_sha256", "train_sha256", "content_sha256")
+    @classmethod
+    def valid_checksum(cls, value: str) -> str:
+        return _checksum(value)
+
+    @field_validator("candidate_dataset_version")
+    @classmethod
+    def valid_version(cls, value: str) -> str:
+        if not VERSION_RE.fullmatch(value):
+            raise ValueError("candidate dataset version is invalid")
+        return value
+
+
+def load_verified_candidate(package: Path, frozen_package: Path) -> tuple[FeedbackCandidateManifest, list[CandidateSample]]:
+    """Reject changed feedback packages and frozen-test overlap before training."""
+    manifest_path = package / "manifest.json"
+    train_path = package / "train.jsonl"
+    if (package.is_symlink() or manifest_path.is_symlink() or train_path.is_symlink() or
+            {path.name for path in package.iterdir()} != {"manifest.json", "train.jsonl"}):
+        raise ValueError("feedback candidate package layout is invalid")
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest_data = json.loads(manifest_text, object_pairs_hook=_unique_object)
+    manifest = FeedbackCandidateManifest.model_validate_json(manifest_text)
+    canonical = json.dumps({key: value for key, value in manifest_data.items() if key != "content_sha256"},
+                           ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if ("sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest() != manifest.content_sha256 or
+            checksum(train_path) != manifest.train_sha256 or
+            package.name != manifest.candidate_dataset_version or
+            manifest.record_count < manifest.minimum_feedback_count):
+        raise ValueError("feedback candidate manifest or training file checksum mismatch")
+    frozen, blocked_ids, blocked_groups, blocked_texts = _frozen_exclusions(frozen_package)
+    if manifest.frozen_package != frozen:
+        raise ValueError("feedback candidate frozen evaluation lineage mismatch")
+    samples = []
+    seen_feedback = set()
+    seen_tickets = set()
+    seen_texts = set()
+    with train_path.open(encoding="utf-8") as stream:
+        for line in stream:
+            json.loads(line, object_pairs_hook=_unique_object)
+            sample = CandidateSample.model_validate_json(line)
+            text = normalized_text(sample.text)
+            if (not text or sample.feedback_id in seen_feedback or sample.ticket_id in seen_tickets or
+                    text in seen_texts or sample.feedback_id in blocked_ids or sample.ticket_id in blocked_ids or
+                    sample.split_group in blocked_groups or text in blocked_texts or
+                    scan_pii(sample.text).detected or sample.topic_id not in TOPICS or
+                    sample.topic_id != sample.operator_confirmed_decision.topic_id or
+                    sample.production_model_version != manifest.production_model_version or
+                    sample.accepted_or_corrected != ("ACCEPTED" if sample.operator_confirmed_decision.action == "confirm" else "CORRECTED")):
+                raise ValueError("feedback candidate contains invalid or frozen training sample")
+            seen_feedback.add(sample.feedback_id)
+            seen_tickets.add(sample.ticket_id)
+            seen_texts.add(text)
+            samples.append(sample)
+    if (len(samples) != manifest.record_count or
+            sorted(seen_feedback) != manifest.source_feedback_ids or
+            sorted({sample.source_dataset_version for sample in samples}) != manifest.source_dataset_versions or
+            dict(sorted(Counter("synthetic" if sample.is_synthetic else "real" for sample in samples).items())) != manifest.origin_counts or
+            any(count < 0 for count in manifest.rejected_counts.values())):
+        raise ValueError("feedback candidate sample counts or lineage mismatch")
+    return manifest, samples
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -195,6 +304,8 @@ def build_candidate(
             rejected["UNVALIDATED_FEEDBACK"] += 1
         elif record.operator_confirmed_decision.topic_id not in TOPICS:
             rejected["UNKNOWN_CONFIRMED_TOPIC"] += 1
+        elif record.accepted_or_corrected != ("ACCEPTED" if record.operator_confirmed_decision.action == "confirm" else "CORRECTED"):
+            rejected["DECISION_ACTION_MISMATCH"] += 1
         elif scan_pii(record.original_text).detected:
             rejected["PII_DETECTED"] += 1
         elif record.ticket_id in blocked_ids or record.feedback_id in blocked_ids or record.split_group in blocked_groups:

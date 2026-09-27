@@ -50,6 +50,14 @@ feedback IDs, состав synthetic/real, причины отказа и conten
 означает только сборку candidate dataset, а не обучение или promotion.
 При `INSUFFICIENT_FEEDBACK` каталог не создаётся.
 
+Перед обучением `load_verified_candidate(package, frozen_package)` повторно
+проверяет checksum и структуру immutable пакета, соответствие сохранённому
+frozen evaluation, число и происхождение строк, подтверждённые метки, PII и
+пересечения с frozen IDs/groups/точными текстами. Подмена строк с последующим
+пересчётом checksums тоже отклоняется при семантическом нарушении. Несогласованная
+пара `accepted_or_corrected` / `operator_confirmed_decision.action` получает
+отдельную причину `DECISION_ACTION_MISMATCH` ещё при сборке.
+
 Текущий Core ставит `TRAIN_CLASSIFIER` с `samples: []`; generic feedback
 может содержать пустой `production_prediction` и решение без topic ID.
 Такие строки этот контракт отвергает. Нужен отдельный проверенный экспорт
