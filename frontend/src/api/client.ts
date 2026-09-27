@@ -471,7 +471,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     models: modelData,
     learning: learningData,
     timeSeries: analytics.time_series,
-    reportSource: 'postgres',
+    reportSource: analytics.source ?? 'postgres',
     forecastStatus: forecast.status,
     forecastModelVersion: forecast.model_version,
     datasetProvenance,

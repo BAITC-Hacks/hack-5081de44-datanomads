@@ -40,6 +40,8 @@ use pg::{default_qdrant_collection, PgRepository};
 const SERVICE_NAME: &str = "pulse109-core";
 const API_VERSION: &str = "0.1.0";
 const DEMO_TIMESTAMP: &str = "2026-09-21T08:00:00Z";
+const FORECAST_HISTORY_DAYS: i64 = 366;
+const FORECAST_SEASON_LENGTH_DAYS: usize = 7;
 pub(crate) const RELATED_CANDIDATE_THRESHOLD: f32 = 0.78;
 pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
 const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
@@ -3588,7 +3590,14 @@ async fn analytics(
             .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
-    let generated_at = demo_analytics_as_of(&store)?;
+    Ok(Json(memory_analytics_response(&store, &query)?))
+}
+
+fn memory_analytics_response(
+    store: &Store,
+    query: &AnalyticsQuery,
+) -> Result<AnalyticsResponse, ApiError> {
+    let generated_at = demo_analytics_as_of(store)?;
     let days = analytics_range_days(query.range.as_deref());
     let current_since = generated_at - Duration::days(days);
     let previous_since = current_since - Duration::days(days);
@@ -3596,7 +3605,7 @@ async fn analytics(
         .tickets
         .values()
         .filter(|ticket| {
-            ticket_matches_analytics_filters(ticket, &query)
+            ticket_matches_analytics_filters(ticket, query)
                 && ticket_created_at(ticket).is_some_and(|created_at| {
                     created_at >= current_since && created_at <= generated_at
                 })
@@ -3606,13 +3615,13 @@ async fn analytics(
         .tickets
         .values()
         .filter(|ticket| {
-            ticket_matches_analytics_filters(ticket, &query)
+            ticket_matches_analytics_filters(ticket, query)
                 && ticket_created_at(ticket).is_some_and(|created_at| {
                     created_at >= previous_since && created_at < current_since
                 })
         })
         .collect();
-    let avg_confidence = average_ticket_confidence(&filtered, &store);
+    let avg_confidence = average_ticket_confidence(&filtered, store);
     let open_tickets = filtered
         .iter()
         .filter(|ticket| is_open_ticket_status(&ticket.status))
@@ -3625,7 +3634,7 @@ async fn analytics(
         .iter()
         .filter(|ticket| is_high_priority(&ticket.priority))
         .count();
-    let runtime_metrics = demo_runtime_metrics(&store, &filtered);
+    let runtime_metrics = demo_runtime_metrics(store, &filtered);
     let total_change = filtered.len() as i64 - previous.len() as i64;
     let overview = json!({
         "total_tickets": filtered.len(),
@@ -3663,7 +3672,7 @@ async fn analytics(
                     .iter()
                     .filter(|ticket| ticket.region_id == region.id)
                     .count(),
-                &store,
+                store,
             )
         })
         .collect();
@@ -3689,12 +3698,12 @@ async fn analytics(
                     .iter()
                     .filter(|ticket| ticket.topic_id == topic.id)
                     .count(),
-                &store,
+                store,
             )
         })
         .collect();
     let time_series = demo_time_series(&filtered, current_since, generated_at);
-    Ok(Json(AnalyticsResponse {
+    Ok(AnalyticsResponse {
         generated_at: generated_at.to_rfc3339(),
         source: "deterministic-demo".to_owned(),
         range: query.range.clone().unwrap_or_else(|| format!("{days}d")),
@@ -3703,7 +3712,7 @@ async fn analytics(
         by_region,
         by_topic,
         time_series,
-    }))
+    })
 }
 
 async fn analytics_drilldown(
@@ -4146,13 +4155,7 @@ async fn build_report_slice(
     query: &AnalyticsQuery,
 ) -> Result<ReportSlice, String> {
     let analytics = repository.analytics(query).await?;
-    let alerts = repository
-        .list_alerts(&AlertQuery {
-            status: None,
-            severity: None,
-            region_id: query.region_id.clone(),
-        })
-        .await?;
+    let alerts = repository.list_alerts_for_analytics(query).await?;
     let forecast = repository
         .forecast(&ForecastQuery {
             horizon: Some(30),
@@ -4173,6 +4176,59 @@ async fn build_report_slice(
     })
 }
 
+fn memory_report_slice(store: &Store, query: &AnalyticsQuery) -> Result<ReportSlice, ApiError> {
+    let analytics = memory_analytics_response(store, query)?;
+    let generated_at = demo_analytics_as_of(store)?;
+    let period_start = generated_at - Duration::days(analytics_range_days(query.range.as_deref()));
+    let filtered_ticket_ids = store
+        .tickets
+        .values()
+        .filter(|ticket| {
+            ticket_matches_analytics_filters(ticket, query)
+                && ticket_created_at(ticket).is_some_and(|created_at| {
+                    created_at >= period_start && created_at <= generated_at
+                })
+        })
+        .map(|ticket| ticket.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let alerts = store
+        .alerts
+        .values()
+        .filter_map(|alert| {
+            let ticket_ids = alert
+                .linked_ticket_ids
+                .iter()
+                .filter(|ticket_id| filtered_ticket_ids.contains(*ticket_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if ticket_ids.is_empty() {
+                return None;
+            }
+            let mut alert = alert.clone();
+            alert.ticket_count = ticket_ids.len().min(u32::MAX as usize) as u32;
+            alert.linked_ticket_ids = ticket_ids;
+            Some(alert)
+        })
+        .collect();
+    Ok(ReportSlice {
+        filters: query.clone(),
+        analytics,
+        alerts,
+        forecast: ForecastResponse {
+            source: "deterministic-demo".to_owned(),
+            model_version: "not-run".to_owned(),
+            model: "not-available".to_owned(),
+            status: "DEMO_ONLY".to_owned(),
+            insufficient_history: true,
+            horizon_days: 30,
+            history: Vec::new(),
+            points: Vec::new(),
+            expected_peaks: Vec::new(),
+            backtest: json!({"status": "DEMO_ONLY", "reason": "memory report has no forecast history"}),
+        },
+    })
+}
+
 fn report_metric(report: Option<&ReportSlice>, key: &str) -> String {
     report
         .map(|value| &value.analytics)
@@ -4187,6 +4243,43 @@ fn report_range(report: Option<&ReportSlice>) -> String {
         .unwrap_or_else(|| "demo".to_owned())
 }
 
+fn report_filter_summary(report: &ReportSlice) -> String {
+    let filters = &report.filters;
+    let mut summary = vec![format!(
+        "period={}",
+        filters.range.as_deref().unwrap_or("30d")
+    )];
+    for (name, value) in [
+        ("region", filters.region_id.as_deref()),
+        ("topic", filters.topic_id.as_deref()),
+        ("service", filters.service_id.as_deref()),
+        ("status", filters.status.as_deref()),
+        ("district", filters.district.as_deref()),
+        ("channel", filters.channel.as_deref()),
+    ] {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            summary.push(format!("{name}={value}"));
+        }
+    }
+    summary.join("; ")
+}
+
+fn report_change_label(change_abs: Option<i64>, change_pct: Option<f64>) -> String {
+    let Some(change_abs) = change_abs else {
+        return "—".to_owned();
+    };
+    let absolute = format!("{change_abs:+}");
+    change_pct
+        .map(|change_pct| format!("{absolute} ({change_pct:+.1}%)"))
+        .unwrap_or_else(|| format!("{absolute} (previous period: 0)"))
+}
+
+fn report_previous_count(current: usize, change_abs: Option<i64>) -> usize {
+    change_abs
+        .map(|change| (current as i64 - change).max(0) as usize)
+        .unwrap_or(0)
+}
+
 /// Canonical HTML template for a report slice.
 ///
 /// The PDF renderer below is intentionally dependency-free for the Core image:
@@ -4196,8 +4289,13 @@ fn report_range(report: Option<&ReportSlice>) -> String {
 fn report_html(report: Option<&ReportSlice>) -> String {
     let range = xml_escape(&report_range(report));
     let total = xml_escape(&report_metric(report, "total_tickets"));
+    let previous_total = xml_escape(&report_metric(report, "previous_total_tickets"));
     let open = xml_escape(&report_metric(report, "open_tickets"));
     let resolved = xml_escape(&report_metric(report, "resolved_tickets"));
+    let filter_summary = report
+        .map(report_filter_summary)
+        .map(|summary| xml_escape(&summary))
+        .unwrap_or_else(|| "none".to_owned());
     let mut region_rows = String::new();
     let mut topic_rows = String::new();
     let mut series_rows = String::new();
@@ -4211,21 +4309,34 @@ fn report_html(report: Option<&ReportSlice>) -> String {
     if let Some(value) = report {
         for bucket in &value.analytics.by_region {
             region_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 xml_escape(&bucket.label),
                 bucket.tickets,
-                bucket
-                    .change_pct
-                    .map(|change| format!("{change:.1}%"))
-                    .unwrap_or_else(|| "—".to_owned()),
+                report_previous_count(bucket.tickets, bucket.change_abs),
+                report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
             ));
         }
         for bucket in &value.analytics.by_topic {
+            if bucket.tickets == 0 && bucket.change_abs.is_none_or(|change| change >= 0) {
+                continue;
+            }
+            let total_tickets = value
+                .analytics
+                .overview
+                .get("total_tickets")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let share = if total_tickets == 0 {
+                0.0
+            } else {
+                bucket.tickets as f64 / total_tickets as f64 * 100.0
+            };
             topic_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{share:.1}%</td><td>{}</td></tr>",
                 xml_escape(&bucket.label),
                 bucket.tickets,
-                bucket.high_priority,
+                report_previous_count(bucket.tickets, bucket.change_abs),
+                report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
             ));
         }
         for point in &value.analytics.time_series {
@@ -4257,13 +4368,13 @@ fn report_html(report: Option<&ReportSlice>) -> String {
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Pulse 109 report</title>
 <style>body{{font:14px sans-serif;color:#17202a}}table{{border-collapse:collapse;width:100%;margin:8px 0 18px}}th,td{{border:1px solid #ccd3da;padding:5px;text-align:left}}h1,h2{{margin:12px 0 6px}}</style>
-</head><body><h1>Pulse 109 report</h1><p>Period: {range}</p>
-<h2>Overview</h2><table><tr><th>Metric</th><th>Value</th></tr><tr><td>Total tickets</td><td>{total}</td></tr><tr><td>Open tickets</td><td>{open}</td></tr><tr><td>Resolved tickets</td><td>{resolved}</td></tr></table>
-<h2>Regions</h2><table><tr><th>Region</th><th>Tickets</th><th>Change</th></tr>{region_rows}</table>
-<h2>Topics</h2><table><tr><th>Topic</th><th>Tickets</th><th>High priority</th></tr>{topic_rows}</table>
+</head><body><h1>Pulse 109 report</h1><p>Period: {range}</p><p>Filters: {filter_summary}</p>
+<h2>Overview</h2><table><tr><th>Metric</th><th>Current period</th><th>Previous period</th></tr><tr><td>Total tickets</td><td>{total}</td><td>{previous_total}</td></tr><tr><td>Open tickets</td><td>{open}</td><td>—</td></tr><tr><td>Resolved tickets</td><td>{resolved}</td><td>—</td></tr></table>
+<h2>Regions</h2><table><tr><th>Region</th><th>Current period</th><th>Previous period</th><th>Change</th></tr>{region_rows}</table>
+<h2>Topics</h2><table><tr><th>Topic</th><th>Current period</th><th>Previous period</th><th>Share</th><th>Change vs previous</th></tr>{topic_rows}</table>
 <h2>Time series</h2><table><tr><th>Date</th><th>Tickets</th><th>Resolved</th></tr>{series_rows}</table>
 <h2>Alerts</h2><table><tr><th>ID</th><th>Status</th><th>Region</th><th>Tickets</th></tr>{alert_rows}</table>
-<h2>Forecast</h2><p>Status: {forecast_status}</p><table><tr><th>Date</th><th>Tickets</th></tr>{forecast_rows}</table>
+<h2>Forecast ({FORECAST_HISTORY_DAYS}-day history window)</h2><p>Status: {forecast_status}</p><table><tr><th>Date</th><th>Tickets</th></tr>{forecast_rows}</table>
 </body></html>"#
     )
 }
@@ -4390,7 +4501,62 @@ fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
             String::new(),
         ],
     ];
+    rows.push([
+        range.clone(),
+        "filters".to_owned(),
+        report
+            .map(report_filter_summary)
+            .unwrap_or_else(|| "none".to_owned()),
+        String::new(),
+    ]);
+    rows.push([
+        range.clone(),
+        "previous_total_tickets".to_owned(),
+        report_metric(report, "previous_total_tickets"),
+        report_metric(report, "change_abs"),
+    ]);
     if let Some(value) = report {
+        let total_tickets = value
+            .analytics
+            .overview
+            .get("total_tickets")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        for bucket in &value.analytics.by_region {
+            rows.push([
+                range.clone(),
+                "region".to_owned(),
+                bucket.tickets.to_string(),
+                format!(
+                    "{}; previous={}; change={}",
+                    bucket.label,
+                    report_previous_count(bucket.tickets, bucket.change_abs),
+                    report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
+                ),
+            ]);
+        }
+        for bucket in &value.analytics.by_topic {
+            if bucket.tickets == 0 && bucket.change_abs.is_none_or(|change| change >= 0) {
+                continue;
+            }
+            let share = if total_tickets == 0 {
+                0.0
+            } else {
+                bucket.tickets as f64 / total_tickets as f64 * 100.0
+            };
+            rows.push([
+                range.clone(),
+                "topic".to_owned(),
+                bucket.tickets.to_string(),
+                format!(
+                    "{}; previous={}; share={share:.1}%; change={}; high_priority={}",
+                    bucket.label,
+                    report_previous_count(bucket.tickets, bucket.change_abs),
+                    report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
+                    bucket.high_priority,
+                ),
+            ]);
+        }
         for point in &value.analytics.time_series {
             rows.push([
                 range.clone(),
@@ -4419,7 +4585,10 @@ fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
             range.clone(),
             "forecast_status".to_owned(),
             value.forecast.status.clone(),
-            value.forecast.model.clone(),
+            format!(
+                "{}; history={}d",
+                value.forecast.model, FORECAST_HISTORY_DAYS
+            ),
         ]);
     } else {
         rows.push([
@@ -4519,7 +4688,9 @@ async fn export_pdf(
             .map_err(ApiError::Internal)?;
         return Ok(report_response("pdf", Some(&report)));
     }
-    Ok(report_response("pdf", None))
+    let store = state.read_store()?;
+    let report = memory_report_slice(&store, &query)?;
+    Ok(report_response("pdf", Some(&report)))
 }
 
 async fn export_xlsx(
@@ -4546,7 +4717,9 @@ async fn export_xlsx(
             .map_err(ApiError::Internal)?;
         return Ok(report_response("xlsx", Some(&report)));
     }
-    Ok(report_response("xlsx", None))
+    let store = state.read_store()?;
+    let report = memory_report_slice(&store, &query)?;
+    Ok(report_response("xlsx", Some(&report)))
 }
 
 async fn reports(
@@ -4568,11 +4741,14 @@ async fn reports(
             "source": "postgres"
         })));
     }
+    let store = state.read_store()?;
+    let report = memory_report_slice(&store, &query)?;
     Ok(Json(json!({
         "items": [
-            {"id": "report-demo-7d", "format": "pdf", "status": "ready", "download": "/api/v1/analytics/export.pdf"},
-            {"id": "report-demo-7d", "format": "xlsx", "status": "ready", "download": "/api/v1/analytics/export.xlsx"}
+            {"id": "report-current-slice", "format": "pdf", "status": "ready", "download": "/api/v1/analytics/export.pdf"},
+            {"id": "report-current-slice", "format": "xlsx", "status": "ready", "download": "/api/v1/analytics/export.xlsx"}
         ],
+        "slice": report,
         "source": "deterministic-demo"
     })))
 }
@@ -4805,35 +4981,99 @@ async fn forecast(
             .map(Json)
             .map_err(ApiError::Internal);
     }
-    let _store = state.read_store()?;
-    let pattern = [11_u32, 12, 10, 13, 14, 12, 15];
-    let resolved_pattern = [7_u32, 7, 6, 8, 8, 7, 9];
-    let start = NaiveDate::from_ymd_opt(2026, 9, 22).expect("fixed demo date is valid");
-    let points = (0..horizon_days)
-        .map(|index| TimeSeriesPoint {
-            date: (start + Duration::days(i64::from(index))).to_string(),
-            tickets: pattern[index as usize % pattern.len()],
-            resolved: resolved_pattern[index as usize % resolved_pattern.len()],
+    let store = state.read_store()?;
+    Ok(Json(memory_forecast_response(
+        &store,
+        &query,
+        horizon_days,
+    )?))
+}
+
+fn memory_forecast_response(
+    store: &Store,
+    query: &ForecastQuery,
+    horizon_days: u32,
+) -> Result<ForecastResponse, ApiError> {
+    let analytics_query = AnalyticsQuery {
+        range: Some(format!("{FORECAST_HISTORY_DAYS}d")),
+        region_id: query.region_id.clone(),
+        topic_id: query.topic_id.clone(),
+        service_id: query.service_id.clone(),
+        status: query.status.clone(),
+        district: query.district.clone(),
+        channel: query.channel.clone(),
+    };
+    let generated_at = demo_analytics_as_of(store)?;
+    let current_since = generated_at - Duration::days(FORECAST_HISTORY_DAYS);
+    let filtered = store
+        .tickets
+        .values()
+        .filter(|ticket| {
+            ticket_matches_analytics_filters(ticket, &analytics_query)
+                && ticket_created_at(ticket).is_some_and(|created_at| {
+                    created_at >= current_since && created_at <= generated_at
+                })
         })
         .collect::<Vec<_>>();
-    let peak_value = pattern.iter().copied().max().unwrap_or_default();
+
+    if filtered.is_empty() {
+        return Ok(ForecastResponse {
+            source: "deterministic-demo".to_owned(),
+            model_version: "forecast-seasonal-naive-demo-v1".to_owned(),
+            model: "seasonal-naive-demo".to_owned(),
+            status: "INSUFFICIENT_HISTORY".to_owned(),
+            insufficient_history: true,
+            horizon_days,
+            history: Vec::new(),
+            points: Vec::new(),
+            expected_peaks: Vec::new(),
+            backtest: json!({"sample_count": 0}),
+        });
+    }
+
+    let history = demo_time_series(&filtered, current_since, generated_at);
+    let seasonal_pattern = history
+        .iter()
+        .rev()
+        .take(FORECAST_SEASON_LENGTH_DAYS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let start_date = generated_at.date_naive() + Duration::days(1);
+    let points = (0..horizon_days)
+        .map(|index| {
+            let history_point = seasonal_pattern[index as usize % seasonal_pattern.len()];
+            TimeSeriesPoint {
+                date: (start_date + Duration::days(i64::from(index))).to_string(),
+                tickets: history_point.tickets,
+                resolved: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+    let peak_value = points
+        .iter()
+        .map(|point| point.tickets)
+        .max()
+        .unwrap_or_default();
     let expected_peaks = points
         .iter()
         .filter(|point| point.tickets == peak_value)
         .map(|point| point.date.clone())
         .collect();
-    Ok(Json(ForecastResponse {
+
+    Ok(ForecastResponse {
         source: "deterministic-demo".to_owned(),
-        model_version: "forecast-statsforecast-seasonal-naive-2026-09-24-001".to_owned(),
+        model_version: "forecast-seasonal-naive-demo-v1".to_owned(),
         model: "seasonal-naive-demo".to_owned(),
-        status: "OK".to_owned(),
+        status: "DEMO_ONLY".to_owned(),
         insufficient_history: false,
         horizon_days,
-        history: Vec::new(),
+        history,
         points,
         expected_peaks,
-        backtest: json!({"status": "DEMO_ONLY"}),
-    }))
+        backtest: json!({"status": "DEMO_ONLY", "history_days": FORECAST_HISTORY_DAYS}),
+    })
 }
 
 #[derive(Debug, Deserialize)]

@@ -134,6 +134,61 @@ def postgres_ticket_counts(
         ) from error
 
 
+def postgres_ticket_count_lookback(
+    repo_root: Path,
+    *,
+    region_id: str,
+    lookback_days: int,
+    topic_id: str | None = None,
+    status: str | None = None,
+    channel: str | None = None,
+) -> int:
+    query = """
+        SELECT COUNT(*)
+        FROM tickets t
+        WHERE t.created_at >= now() - (:'days'::int * INTERVAL '1 day')
+          AND t.created_at <= now()
+          AND t.region_id = :'region'
+          AND (NULLIF(:'topic', '') IS NULL OR t.topic_id = NULLIF(:'topic', ''))
+          AND (NULLIF(:'status', '') IS NULL OR t.status = UPPER(NULLIF(:'status', '')))
+          AND (NULLIF(:'channel', '') IS NULL OR t.channel = NULLIF(:'channel', ''));
+    """
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "sh",
+            "-lc",
+            'exec psql -XAtq -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"',
+            "pulse109-e2e-lookback-check",
+            "-v",
+            f"days={lookback_days}",
+            "-v",
+            f"region={region_id}",
+            "-v",
+            f"topic={topic_id or ''}",
+            "-v",
+            f"status={status or ''}",
+            "-v",
+            f"channel={channel or ''}",
+        ],
+        cwd=repo_root,
+        input=query,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError as error:
+        raise AcceptanceError(
+            f"PostgreSQL returned invalid lookback ticket count: {result.stdout!r}"
+        ) from error
+
+
 def read_sse_event(response: Any) -> bytes:
     lines = []
     while line := response.readline():
@@ -350,6 +405,52 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     topic_drilldown_query = urlencode({**region_filters, "topic_id": selected_topic, "dimension": "topic", "value": selected_topic, "limit": "100"})
     status, _, topic_drilldown = json_request(base_url, "GET", f"/api/v1/analytics/drilldown?{topic_drilldown_query}", role="MANAGER", timeout=timeout)
     expect(status == 200 and topic_drilldown.get("total") == topic_total, f"region/topic drilldown differs from its aggregate slice: {topic_drilldown}")
+
+    status, _, report = json_request(base_url, "GET", f"/api/v1/reports?{topic_analytics_query}", role="MANAGER", timeout=timeout)
+    expect(status == 200 and report.get("source") == "postgres", f"filtered report slice failed: {status} {report}")
+    report_slice = report.get("slice", {})
+    report_analytics = report_slice.get("analytics", {})
+    report_overview = report_analytics.get("overview", {})
+    report_forecast = report_slice.get("forecast", {})
+    report_filters = report_slice.get("filters", {})
+    expect(
+        report_filters.get("range") == "30d"
+        and report_filters.get("region_id") == region
+        and report_filters.get("topic_id") == selected_topic
+        and report_filters.get("status") == "OPEN"
+        and report_filters.get("channel") == "e2e",
+        f"report slice lost selected filters: {report_filters}",
+    )
+    expect(
+        int(report_overview.get("total_tickets", -1)) == database_topic_total
+        and int(report_overview.get("previous_total_tickets", -1)) == database_previous_topic_total,
+        f"report analytics differs from PostgreSQL: {report_overview} vs "
+        f"{database_topic_total}/{database_previous_topic_total}",
+    )
+    report_topic = next(
+        (item for item in report_analytics.get("by_topic", []) if item.get("id") == selected_topic),
+        None,
+    )
+    expect(
+        report_topic is not None and int(report_topic.get("tickets", -1)) == topic_total,
+        f"report topic summary differs from analytics: {report_topic} vs {topic_total}",
+    )
+    forecast_lookback_total = postgres_ticket_count_lookback(
+        repo_root,
+        region_id=region,
+        topic_id=selected_topic,
+        status="OPEN",
+        channel="e2e",
+        lookback_days=366,
+    )
+    report_forecast_total = sum(
+        int(point.get("tickets", 0)) for point in report_forecast.get("history", [])
+    )
+    expect(
+        report_forecast_total == forecast_lookback_total,
+        f"report forecast history differs from PostgreSQL: API={report_forecast_total} "
+        f"DB={forecast_lookback_total}",
+    )
     for text in ("Сколько обращений за 30 дней?", "Какой тренд?", "Сравни регионы", "Топ тем", "Где всплески?", "Дай прогноз"):
         status, _, result = json_request(base_url, "POST", "/api/v1/analytics/query", body={"text": text, "filters": {"range": "30d"}}, role="MANAGER", timeout=timeout)
         expect(status == 200 and result.get("intent"), f"QueryIntent failed for {text!r}: {result}")
@@ -383,15 +484,31 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     expect(status == 200 and closed.get("status") == "CLOSED", f"alert close failed: {closed}")
 
     for report_path, magic in (("/api/v1/analytics/export.pdf", b"%PDF-1.4"), ("/api/v1/analytics/export.xlsx", b"PK\x03\x04")):
-        status, _, report = request(base_url, "GET", report_path, role="MANAGER", timeout=timeout)
-        expect(status == 200 and report.startswith(magic), f"report failed: {report_path} HTTP {status}")
+        filtered_path = f"{report_path}?{topic_analytics_query}"
+        status, _, report = request(base_url, "GET", filtered_path, role="MANAGER", timeout=timeout)
+        expect(status == 200 and report.startswith(magic), f"report failed: {filtered_path} HTTP {status}")
+        if report_path.endswith("pdf"):
+            report_text = report.decode("latin-1")
+            expect(
+                f"topic={selected_topic}" in report_text
+                and "Share" in report_text
+                and "Change vs previous" in report_text,
+                "PDF export omitted selected filters or topic comparison columns",
+            )
         if report_path.endswith("xlsx"):
             temp_path = Path(os.getenv("TMPDIR", "/tmp")) / f"pulse109-{suffix}.xlsx"
             temp_path.write_bytes(report)
             try:
                 with zipfile.ZipFile(temp_path) as archive:
                     bad = archive.testzip()
+                    sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
                 expect(bad is None, f"XLSX archive is corrupt: {bad}")
+                expect(
+                    f"topic={selected_topic}" in sheet
+                    and "share=100.0%" in sheet
+                    and "change=" in sheet,
+                    "XLSX export omitted selected filters or topic comparison values",
+                )
             finally:
                 temp_path.unlink(missing_ok=True)
 

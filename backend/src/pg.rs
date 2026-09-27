@@ -3204,6 +3204,52 @@ impl PgRepository {
         Ok(alerts)
     }
 
+    pub async fn list_alerts_for_analytics(
+        &self,
+        query: &AnalyticsQuery,
+    ) -> Result<Vec<Alert>, String> {
+        let current_since = Utc::now() - chrono::Duration::days(analytics_days(query));
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "SELECT DISTINCT a.id, a.created_at, t.id AS ticket_id FROM alerts a JOIN alert_ticket_links atl ON atl.alert_id = a.id JOIN tickets t ON t.id = atl.ticket_id WHERE t.created_at >= ",
+        );
+        builder
+            .push_bind(current_since)
+            .push(" AND t.created_at <= now()");
+        push_analytics_filters(&mut builder, query, "t");
+        builder.push(" ORDER BY a.created_at DESC, a.id DESC, t.id");
+        let rows = builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| format!("list alerts for analytics: {error}"))?;
+
+        let mut alert_ids = Vec::new();
+        let mut linked_tickets = std::collections::BTreeMap::<i64, Vec<String>>::new();
+        for row in rows {
+            let alert_id: i64 = row
+                .try_get("id")
+                .map_err(|error| format!("analytics alert id: {error}"))?;
+            let ticket_id: i64 = row
+                .try_get("ticket_id")
+                .map_err(|error| format!("analytics alert ticket id: {error}"))?;
+            let tickets = linked_tickets.entry(alert_id).or_default();
+            if tickets.is_empty() {
+                alert_ids.push(alert_id);
+            }
+            tickets.push(ticket_id.to_string());
+        }
+
+        let mut alerts = Vec::with_capacity(alert_ids.len());
+        for alert_id in alert_ids {
+            let mut alert = self.alert_from_id(alert_id).await?;
+            let ticket_ids = linked_tickets.remove(&alert_id).unwrap_or_default();
+            alert.ticket_count = ticket_ids.len().min(u32::MAX as usize) as u32;
+            alert.linked_ticket_ids = ticket_ids;
+            alerts.push(alert);
+        }
+        Ok(alerts)
+    }
+
     pub async fn get_alert(&self, alert_id: &str) -> Result<Alert, String> {
         let id = alert_id
             .parse::<i64>()

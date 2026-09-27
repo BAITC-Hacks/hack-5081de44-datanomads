@@ -161,6 +161,121 @@ async fn demo_analytics_uses_one_filtered_slice_for_comparison_and_drilldown() {
 }
 
 #[tokio::test]
+async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
+    let application = app(AppState::demo());
+    let service = "service_id=%D0%A6%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BE%D0%B9+%D0%B0%D0%BA%D0%B8%D0%BC%D0%B0%D1%82";
+    let filters = format!("range=7d&region_id=R10&topic_id=TOPIC-DIGITAL&{service}&status=TRIAGED");
+
+    let reports = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/reports?{filters}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reports.status(), 200);
+    let reports: serde_json::Value =
+        serde_json::from_slice(&to_bytes(reports.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(reports["source"], "deterministic-demo");
+    assert_eq!(reports["slice"]["filters"]["range"], "7d");
+    assert_eq!(reports["slice"]["filters"]["region_id"], "R10");
+    assert_eq!(reports["slice"]["filters"]["topic_id"], "TOPIC-DIGITAL");
+    assert_eq!(reports["slice"]["filters"]["status"], "TRIAGED");
+    assert_eq!(
+        reports["slice"]["analytics"]["overview"]["total_tickets"],
+        1
+    );
+    assert_eq!(
+        reports["slice"]["analytics"]["overview"]["previous_total_tickets"],
+        0
+    );
+    assert_eq!(reports["slice"]["analytics"]["by_topic"][0]["tickets"], 1);
+    assert_eq!(reports["slice"]["forecast"]["status"], "DEMO_ONLY");
+
+    let pdf = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/analytics/export.pdf?{filters}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pdf.status(), 200);
+    let pdf = to_bytes(pdf.into_body(), usize::MAX).await.unwrap();
+    let pdf = String::from_utf8_lossy(&pdf);
+    assert!(pdf.contains("topic=TOPIC-DIGITAL"));
+    assert!(pdf.contains("Share"));
+    assert!(pdf.contains("Change vs previous"));
+
+    let xlsx = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/analytics/export.xlsx?{filters}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(xlsx.status(), 200);
+    let xlsx = to_bytes(xlsx.into_body(), usize::MAX).await.unwrap();
+    let xlsx = String::from_utf8_lossy(&xlsx);
+    assert!(xlsx.contains("topic=TOPIC-DIGITAL"));
+    assert!(xlsx.contains("share=100.0%"));
+    assert!(xlsx.contains("change=+1 (previous period: 0)"));
+
+    let forecast_filters = format!("region_id=R10&topic_id=TOPIC-DIGITAL&{service}&status=TRIAGED");
+    let forecast = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/forecast?horizon=30&{forecast_filters}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forecast.status(), 200);
+    let forecast: serde_json::Value =
+        serde_json::from_slice(&to_bytes(forecast.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(forecast["source"], "deterministic-demo");
+    assert_eq!(forecast["status"], "DEMO_ONLY");
+    assert_eq!(forecast["history"].as_array().unwrap().len(), 367);
+    assert_eq!(
+        forecast["history"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["tickets"].as_u64().unwrap())
+            .sum::<u64>(),
+        1
+    );
+    assert_eq!(forecast["points"].as_array().unwrap().len(), 30);
+
+    let no_forecast_filters = format!("region_id=R10&topic_id=TOPIC-DIGITAL&{service}&status=OPEN");
+    let no_forecast = application
+        .oneshot(
+            Request::get(format!("/api/v1/forecast?horizon=30&{no_forecast_filters}"))
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_forecast.status(), 200);
+    let no_forecast: serde_json::Value =
+        serde_json::from_slice(&to_bytes(no_forecast.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(no_forecast["status"], "INSUFFICIENT_HISTORY");
+    assert!(no_forecast["points"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn learning_feedback_rejects_a_cycle_outside_collect() {
     let application = app(AppState::demo());
     let response = application
