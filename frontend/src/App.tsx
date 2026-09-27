@@ -247,7 +247,7 @@ function App() {
         {source === 'api' && apiError && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
         <div className="page-wrap">
           <PageHeader {...title} route={route} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />
-          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onRefresh={refreshDashboard} onToast={showToast} filters={filters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
+          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onRefresh={refreshDashboard} onToast={showToast} filters={filters} onFiltersChange={setFilters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
         </div>
       </main>
       {toast && <div role="status" aria-live="polite" className="toast"><span className="toast-check"><Icon name="check" size={15} /></span>{toast}<button aria-label="Закрыть уведомление" className="icon-button toast-close" onClick={() => setToast(null)}><Icon name="close" size={15} /></button></div>}
@@ -306,7 +306,7 @@ function PageHeader({ eyebrow, title, description, route, filters, onFiltersChan
   </div>
 }
 
-function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onRefresh: () => Promise<void>; onToast: (message: string) => void; filters: DashboardFilters; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
+function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, onFiltersChange, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onRefresh: () => Promise<void>; onToast: (message: string) => void; filters: DashboardFilters; onFiltersChange: (filters: DashboardFilters) => void; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
   let content: ReactElement
   switch (route) {
     case '/operator': content = <OperatorPage tickets={data.tickets} overview={data.overview} taxonomy={data.filterOptions} onDataChange={(tickets) => onDataChange({ ...data, tickets })} onToast={onToast} />; break
@@ -315,7 +315,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
     case '/situation/topics': content = <CleanTopicsPage topics={data.topics} onDrilldown={onDrilldown} />; break
     case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
     case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onToast={onToast} onDrilldown={onDrilldown} />; break
-    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} status={data.forecastStatus} modelVersion={data.forecastModelVersion} />; break
+    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
     case '/situation/reports': content = <CleanReportsPage filters={filters} />; break
     case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
     case '/situation/models': content = <CleanModelsPage models={data.models} />; break
@@ -953,13 +953,243 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
   )
 }
 
-function CleanForecastPage({ forecast, status, modelVersion }: { forecast: ForecastPoint[]; status?: string; modelVersion?: string }) {
-  if (!forecast.length) return <div className="analytics-page"><NoData message="Для прогноза пока недостаточно истории обращений." /></div>
-  const option: EChartsOption = {
-    ...chartBaseOption(forecast.map((point) => point.label)),
-    series: [{ name: 'Прогноз обращений', type: 'line' as const, data: forecast.map((point) => point.forecast ?? null), showSymbol: false, lineStyle: { width: 2 }, areaStyle: { color: 'rgba(167, 217, 255, .12)' }, itemStyle: { color: '#a7d9ff' } }],
+function formatForecastNumber(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value)
+    ? '—'
+    : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 }).format(value)
+}
+
+function formatForecastDate(value: string): string {
+  const date = new Date(`${value}T12:00:00`)
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }).format(date)
+}
+
+function formatForecastRate(value: number | null | undefined): string {
+  return typeof value !== 'number' || !Number.isFinite(value)
+    ? '—'
+    : new Intl.NumberFormat('ru-RU', { style: 'percent', maximumFractionDigits: 1 }).format(value)
+}
+
+function forecastChartOption(history: ForecastPoint[], forecast: ForecastPoint[], forecastStart?: string): EChartsOption | undefined {
+  const hasHistory = history.length > 0
+  const hasForecast = forecast.length > 0
+  if (!hasHistory && !hasForecast) return undefined
+
+  const labels = [...history, ...forecast].map((point) => point.label)
+  const historicalValues = [
+    ...history.map((point) => point.actual ?? null),
+    ...forecast.map(() => null),
+  ]
+  const futureValues = [
+    ...history.map(() => null),
+    ...forecast.map((point) => point.forecast ?? null),
+  ]
+  const series: NonNullable<EChartsOption['series']> = []
+  if (hasHistory) {
+    series.push({
+      name: 'История',
+      type: 'line',
+      data: historicalValues,
+      showSymbol: false,
+      lineStyle: { width: 2 },
+      itemStyle: { color: '#8cf0c8' },
+    })
   }
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Прогноз нагрузки" /><p className="panel-note">Расчёт по истории за 366 дней; регион, тема и доступные фильтры обращения применяются к выборке прогноза · состояние {status ?? 'unknown'} · версия {modelVersion ?? 'не указана'}</p><DataChart option={option} label="Прогноз количества обращений по дням" /><details className="chart-values"><summary>Показать значения по дням</summary><table><thead><tr><th>Дата</th><th>Обращения</th></tr></thead><tbody>{forecast.map((point) => <tr key={point.label}><td>{point.label}</td><td>{point.forecast ?? '—'}</td></tr>)}</tbody></table></details></section></div>
+  if (hasForecast) {
+    series.push({
+      name: 'Прогноз',
+      type: 'line',
+      data: futureValues,
+      showSymbol: false,
+      lineStyle: { width: 2, type: 'dashed' },
+      areaStyle: { color: 'rgba(167, 217, 255, .12)' },
+      itemStyle: { color: '#a7d9ff' },
+      markLine: forecastStart ? {
+        symbol: 'none',
+        lineStyle: { color: '#f8d488', type: 'dashed', width: 1 },
+        label: { color: '#f8d488', formatter: 'Начало прогноза' },
+        data: [{ xAxis: forecastStart }],
+      } : undefined,
+    })
+  }
+
+  return {
+    ...chartBaseOption(labels),
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: series.map((item) => item.name).filter((name): name is string => Boolean(name)), top: 0, textStyle: { color: '#a9bbb2' } },
+    grid: { left: 45, right: 18, top: 43, bottom: 48 },
+    xAxis: { type: 'category', data: labels, axisLabel: { color: '#899c95', interval: 'auto', hideOverlap: true }, axisLine: { lineStyle: { color: '#40514b' } } },
+    yAxis: { type: 'value', min: 0, axisLabel: { color: '#899c95' }, splitLine: { lineStyle: { color: 'rgba(214,236,225,.1)' } } },
+    series,
+  }
+}
+
+function CleanForecastPage({ forecast, history, status, modelVersion, model, source, insufficientHistory, forecastStart, expectedPeaks, backtest, horizon, filters, filterOptions, onHorizonChange }: {
+  forecast: ForecastPoint[]
+  history: ForecastPoint[]
+  status?: string
+  modelVersion?: string
+  model?: string
+  source?: string
+  insufficientHistory: boolean
+  forecastStart?: string
+  expectedPeaks: string[]
+  backtest?: DashboardData['forecastBacktest']
+  horizon: 30 | 60 | 90
+  filters: DashboardFilters
+  filterOptions: DashboardData['filterOptions']
+  onHorizonChange: (horizon: 30 | 60 | 90) => void
+}) {
+  const forecastAvailable = !insufficientHistory && (status === 'OK' || status === 'DEMO_ONLY') && forecast.length > 0
+  const chart = forecastChartOption(history, forecastAvailable ? forecast : [], forecastStart ?? forecast[0]?.label)
+  const values = forecastAvailable
+    ? forecast.map((point) => point.forecast).filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    : []
+  const expectedVolume = values.reduce((total, value) => total + value, 0)
+  const averageDailyLoad = values.length ? expectedVolume / values.length : 0
+  const peakLoad = values.length ? Math.max(...values) : 0
+  const relativePeakLoad = averageDailyLoad > 0 ? peakLoad / averageDailyLoad : undefined
+  const peakDetails = forecastAvailable
+    ? expectedPeaks
+      .map((date) => ({ date, point: forecast.find((point) => point.label === date) }))
+      .filter((peak): peak is { date: string; point: ForecastPoint } => peak.point !== undefined && typeof peak.point.forecast === 'number')
+    : []
+  const backtestHasMetrics = [backtest?.mae, backtest?.rmse, backtest?.wape, backtest?.smape]
+    .some((value) => typeof value === 'number' && Number.isFinite(value))
+  const isDemoBacktest = status === 'DEMO_ONLY' || backtest?.status === 'DEMO_ONLY'
+  const forecastBoundary = forecastStart ?? forecast[0]?.label
+  const optionLabel = (options: Array<{ id: string; label: string }>, id: string | undefined) =>
+    id ? options.find((option) => option.id === id)?.label ?? id : 'Все'
+  const activeFilters = [
+    `Регион: ${optionLabel(filterOptions.regions, filters.regionId)}`,
+    `Тема: ${optionLabel(filterOptions.topics, filters.topicId)}`,
+    `Служба: ${optionLabel(filterOptions.services, filters.serviceId)}`,
+    `Статус: ${optionLabel(filterOptions.statuses, filters.status)}`,
+    `Район: ${optionLabel(filterOptions.districts, filters.district)}`,
+    `Канал: ${optionLabel(filterOptions.channels, filters.channel)}`,
+  ]
+  const modelName = model === 'seasonal_naive' || model === 'seasonal-naive-demo'
+    ? 'Seasonal Naive · сезонная базовая линия'
+    : model ?? 'не указана'
+  const sourceLabel = source === 'postgres+ml' || source === 'postgres'
+    ? 'Операционные данные'
+    : source === 'deterministic-demo'
+      ? 'Демо-данные'
+      : source ?? 'не указан'
+  const statusLabel = status === 'OK'
+    ? 'Прогноз рассчитан'
+    : status === 'INSUFFICIENT_HISTORY'
+      ? 'Недостаточно истории'
+      : status === 'DEMO_ONLY'
+        ? 'Демо-базовая линия'
+        : 'Прогноз не предоставлен'
+
+  return (
+    <div className="analytics-page forecast-page">
+      <section className="panel forecast-panel-main">
+        <div className="forecast-toolbar">
+          <PanelHeading title="Прогноз нагрузки" />
+          <div className="forecast-horizon-control" role="group" aria-label="Горизонт прогноза">
+            {([30, 60, 90] as const).map((days) => (
+              <button key={days} className={`forecast-horizon-button ${horizon === days ? 'active' : ''}`} aria-pressed={horizon === days} onClick={() => onHorizonChange(days)}>
+                {days} дней
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="forecast-provenance">
+          <span><small>Модель</small><strong>{modelName}</strong></span>
+          <span><small>Версия</small><strong>{modelVersion ?? 'не указана'}</strong></span>
+          <span><small>Состояние</small><strong>{statusLabel}</strong></span>
+          <span><small>Источник</small><strong>{sourceLabel}</strong></span>
+        </div>
+        <p className="forecast-filter-summary">Применённый срез: {activeFilters.join(' · ')}</p>
+        <p className="panel-note">Используется дневной ряд за доступную часть окна до 366 дней. Почасовая детализация для текущего ряда недоступна.</p>
+
+        {insufficientHistory && (
+          <div className="forecast-insufficient" role="status">
+            <strong>Недостаточно истории для сезонного прогноза.</strong>
+            <span>Показана наблюдаемая история; будущие значения и ожидаемые пики не подставляются.</span>
+            {backtest?.observed_days != null && backtest.required_days != null && <small>Активных дневных наблюдений: {backtest.observed_days} из {backtest.required_days} требуемых.</small>}
+          </div>
+        )}
+
+        {!insufficientHistory && !forecastAvailable && <NoData message="Прогноз для выбранного среза не предоставлен." />}
+
+        {forecastAvailable && (
+          <div className="forecast-volume-grid">
+            <div><span>Ожидаемый объём за {horizon} дней</span><strong>{formatForecastNumber(expectedVolume)}</strong><small>обращений по Seasonal Naive</small></div>
+            <div><span>Средняя дневная нагрузка</span><strong>{formatForecastNumber(averageDailyLoad)}</strong><small>обращений в день</small></div>
+            <div><span>Пиковый дневной объём</span><strong>{formatForecastNumber(peakLoad)}</strong><small>{relativePeakLoad == null ? 'относительный пик не выделен' : `${formatForecastNumber(relativePeakLoad)}× от среднего`}</small></div>
+          </div>
+        )}
+
+        {forecastAvailable && forecastBoundary && <p className="forecast-boundary-note">Граница прогноза: {formatForecastDate(forecastBoundary)}</p>}
+        {chart && <DataChart option={chart} label="Дневная история обращений и прогноз Seasonal Naive с границей будущего" />}
+        {!chart && !insufficientHistory && <p className="forecast-empty-history">История и точки прогноза для диаграммы отсутствуют.</p>}
+        {forecastAvailable && (
+          <details className="chart-values">
+            <summary>Показать дневную историю и прогноз</summary>
+            <table>
+              <thead><tr><th>Дата</th><th>Тип ряда</th><th>Обращения</th></tr></thead>
+              <tbody>
+                {history.map((point) => <tr key={`history-${point.label}`}><td>{point.label}</td><td>История</td><td>{point.actual ?? '—'}</td></tr>)}
+                {forecast.map((point) => <tr key={`forecast-${point.label}`}><td>{point.label}</td><td>Прогноз</td><td>{point.forecast ?? '—'}</td></tr>)}
+              </tbody>
+            </table>
+          </details>
+        )}
+      </section>
+
+      <div className="forecast-support-grid">
+        <section className="panel forecast-peaks-panel">
+          <PanelHeading title="Ожидаемые пиковые дни" />
+          <p className="panel-note">Пиковый объём сравнивается со средним дневным прогнозом для этого же среза.</p>
+          {forecastAvailable && peakDetails.length ? (
+            <div className="forecast-peak-list">
+              {peakDetails.slice(0, 5).map(({ date, point }) => (
+                <div className="forecast-peak-row" key={date}>
+                  <span><strong>{formatForecastDate(date)}</strong><small>дневной интервал</small></span>
+                  <span><strong>{formatForecastNumber(point.forecast)}</strong><small>обращений</small></span>
+                  <span><strong>{averageDailyLoad > 0 ? `${formatForecastNumber((point.forecast ?? 0) / averageDailyLoad)}×` : '—'}</strong><small>от среднего</small></span>
+                </div>
+              ))}
+              {peakDetails.length > 5 && <p className="forecast-peak-more">Показаны 5 из {peakDetails.length} пиковых дней.</p>}
+            </div>
+          ) : (
+            <p className="forecast-empty-history">{forecastAvailable ? 'Положительные ожидаемые пики не выделены.' : 'Пики доступны только при достаточной истории.'}</p>
+          )}
+        </section>
+
+        <section className="panel forecast-backtest-panel">
+          <PanelHeading title="Качество baseline на backtest" />
+          <p className="panel-note">Метрики оценивают Seasonal Naive на исторических дневных точках; это не гарантия будущей точности.</p>
+          {forecastAvailable && backtestHasMetrics ? (
+            <>
+              <div className="forecast-backtest-grid">
+                <div><span>MAE</span><strong>{formatForecastNumber(backtest?.mae)}</strong><small>обращений в день</small></div>
+                <div><span>RMSE</span><strong>{formatForecastNumber(backtest?.rmse)}</strong><small>обращений в день</small></div>
+                <div><span>WAPE</span><strong>{formatForecastRate(backtest?.wape)}</strong></div>
+                <div><span>SMAPE</span><strong>{formatForecastRate(backtest?.smape)}</strong></div>
+              </div>
+              <p className="forecast-backtest-samples">Проверено точек: {backtest?.sample_count ?? '—'} · окон: {backtest?.window_count ?? '—'}</p>
+            </>
+          ) : (
+            <p className="forecast-empty-history">
+              {isDemoBacktest
+                ? 'Оценочные метрики для демо-базовой линии не предоставлены.'
+                : insufficientHistory
+                  ? 'Backtest не рассчитан из-за недостаточной истории.'
+                  : 'Для выбранного среза нет backtest метрик.'}
+            </p>
+          )}
+        </section>
+      </div>
+    </div>
+  )
 }
 
 function CleanReportsPage({ filters }: { filters: DashboardFilters }) {
