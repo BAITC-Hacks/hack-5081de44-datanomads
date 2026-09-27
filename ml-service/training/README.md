@@ -18,9 +18,10 @@ but does not pin wheel hashes or other operating systems.
 `contracts.py` validates dataset, classifier, embedder and evaluation manifests.
 All require explicit synthetic origin and SHA-256 evidence. Dataset versions
 also require a saved seed, source checksums, a group split policy and a frozen
-evaluation version. The model schemas are for future real training outputs;
-the existing deterministic baseline and synthetic classifier demo are not
-retroactively promoted to these contracts.
+evaluation version. The classifier handoff schema applies to reviewed-package
+candidate artifacts; the existing deterministic baseline and synthetic
+classifier demo are not retroactively promoted to it. The embedder schema is
+for a future artifact.
 
 ## Reviewed dataset package
 
@@ -172,6 +173,31 @@ gets `NO_GO_BASELINE_OUTPERFORMS`; any other result remains
 policy or authorize promotion. Latency is evidence only for the machine named
 in that report, and synthetic holdout results cannot establish quality on
 customer appeals.
+
+## Classifier handoff bundle
+
+Build a self-contained candidate handoff from the verified reviewed package,
+local model artifact and fixed baseline report:
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/package_classifier_candidate.py build \
+  --dataset data/processed/reviewed-v1 \
+  --model ml-service/artifacts/classifier-reviewed-v1 \
+  --baseline-report data/processed/reports/reviewed-v1-classifier-baselines.json \
+  --output ml-service/artifacts/classifier-bundle-reviewed-v1
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/package_classifier_candidate.py verify \
+  --bundle ml-service/artifacts/classifier-bundle-reviewed-v1
+```
+
+The builder reruns the frozen-test comparison, records aggregate metrics and
+copies the model weights, tokenizer and config into `model/`. The root manifest
+pins the dataset checksum, evaluation version, report checksum, model checksum
+and every bundle file. `verify` rejects missing, changed, extra or linked files
+and inconsistent lineage. The output path must be new; keep it under the ignored
+artifact directory because it contains model weights. Status remains
+`CANDIDATE`; this handoff does not promote the model. Its model card states that
+the reviewed synthetic package contains no real citizen appeal texts and cannot
+establish quality on the customer CSV exports.
 
 ## Retrieval baselines
 

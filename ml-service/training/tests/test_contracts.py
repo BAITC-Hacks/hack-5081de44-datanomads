@@ -62,6 +62,10 @@ class ManifestTests(unittest.TestCase):
             **common, labels=["roads", "water_supply"], languages=["RU", "KZ"],
             input_length_strategy="truncate-96", calibration={"method": "temperature"},
             confidence_thresholds={"review": 0.7}, held_out_metrics={"macro_f1": 0.8},
+            dataset_content_sha256=CHECKSUM, evaluation_version="eval-v1",
+            evaluation_report_sha256=CHECKSUM, artifact_uri="model",
+            created_at=datetime(2026, 9, 27, tzinfo=timezone.utc), artifact_files={"model.safetensors": CHECKSUM},
+            bundle_files={"metrics.json": CHECKSUM},
         )
         self.assertEqual(classifier.model_type, "classifier")
         with self.assertRaises(ValidationError):

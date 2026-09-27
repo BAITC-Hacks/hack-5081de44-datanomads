@@ -82,6 +82,12 @@ class ClassifierManifest(StrictManifest):
     model_family: str = Field(min_length=1)
     base_model: str = Field(min_length=1)
     dataset_version: str = Field(min_length=1)
+    dataset_content_sha256: Sha256
+    evaluation_version: str = Field(min_length=1)
+    evaluation_report_sha256: Sha256
+    artifact_uri: str = Field(min_length=1)
+    created_at: AwareDatetime
+    status: Literal["CANDIDATE"] = "CANDIDATE"
     synthetic: bool
     seed: int = Field(ge=0)
     labels: list[str] = Field(min_length=2)
@@ -92,12 +98,19 @@ class ClassifierManifest(StrictManifest):
     confidence_thresholds: dict[str, float] = Field(min_length=1)
     held_out_metrics: dict[str, Any] = Field(min_length=1)
     artifact_checksum: Sha256
+    artifact_files: dict[str, Sha256] = Field(min_length=1)
+    bundle_files: dict[str, Sha256] = Field(min_length=1)
     runtime_requirements: dict[str, str] = Field(min_length=1)
 
-    @field_validator("artifact_checksum")
+    @field_validator("artifact_checksum", "dataset_content_sha256", "evaluation_report_sha256")
     @classmethod
     def valid_artifact_checksum(cls, value: str) -> str:
         return _checksum(value)
+
+    @field_validator("artifact_files", "bundle_files")
+    @classmethod
+    def valid_checksums(cls, values: dict[str, str]) -> dict[str, str]:
+        return {name: _checksum(value) for name, value in values.items()}
 
     @model_validator(mode="after")
     def valid_labels_and_thresholds(self):
