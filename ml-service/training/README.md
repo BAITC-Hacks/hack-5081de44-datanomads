@@ -444,3 +444,38 @@ writes an immutable offline candidate package only after the configured
 minimum feedback count. Operator-confirmed topic is the sole training label;
 prediction is retained separately. Contract, command and current Core export
 gap are documented in [`docs/feedback-candidate-dataset.md`](../../docs/feedback-candidate-dataset.md).
+
+## Offline drift evidence
+
+`scripts/export_drift_snapshot.py` reads one closed PostgreSQL time window and
+writes only aggregate counts. It never writes ticket text, operator notes or
+ticket IDs. Run it twice for non-overlapping windows with the **same**
+classifier model version. An optional complete local tokenizer records actual
+model token-length bins; without it, only character-length drift is available.
+
+```bash
+DATABASE_URL="$DATABASE_URL" .venv/bin/python scripts/export_drift_snapshot.py \
+  --window-start 2026-08-01T00:00:00Z --window-end 2026-09-01T00:00:00Z \
+  --model-version classifier_v1 --output /tmp/drift-baseline.json
+DATABASE_URL="$DATABASE_URL" .venv/bin/python scripts/export_drift_snapshot.py \
+  --window-start 2026-09-01T00:00:00Z --window-end 2026-09-27T00:00:00Z \
+  --model-version classifier_v1 --output /tmp/drift-recent.json
+.venv/bin/python scripts/evaluate_drift.py \
+  --baseline /tmp/drift-baseline.json --recent /tmp/drift-recent.json \
+  --policy /path/to/approved-drift-policy.json --output /tmp/drift-report.json
+```
+
+The policy contract is `pulse-drift-policy.v1` with positive `min_tickets`,
+`min_predictions`, `min_decisions`, plus `max_distribution_tv` and
+`max_correction_rate_increase` in `[0,1]`. Set its limits before examining the
+recent window. Categorical and binned numeric distributions use total
+variation distance. The correction-rate comparison uses first operator
+decisions **by decision time** after the selected model's prediction. Low
+support returns `INSUFFICIENT_EVIDENCE` or `INSUFFICIENT_GROUND_TRUTH` for that
+signal. A drift signal produces `REVIEW_TRIGGER`, never automatic retraining.
+
+The current database stores relation feedback but no ranked retrieval results
+captured at feedback time. The report therefore marks retrieval quality drift
+`UNAVAILABLE_NO_RANKED_RELEVANCE`; relation counts are context, not Recall@K.
+Both CSVs supplied by the customer lack appeal text and classifier predictions,
+so they cannot supply these runtime drift snapshots.
