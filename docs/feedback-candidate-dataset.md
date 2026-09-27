@@ -58,6 +58,27 @@ frozen evaluation, число и происхождение строк, подт
 пара `accepted_or_corrected` / `operator_confirmed_decision.action` получает
 отдельную причину `DECISION_ACTION_MISMATCH` ещё при сборке.
 
+Локальный offline trainer принимает только такой проверенный пакет и ровно ту
+версию production artifact, которая записана в manifest:
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/train_feedback_candidate.py \
+  --dataset data/processed/feedback/candidate_v1 \
+  --frozen-from data/processed/reviewed-v1 \
+  --production-model /path/to/production-classifier \
+  --candidate-model-version classifier_candidate_v1 \
+  --output ml-service/artifacts/classifier-feedback-candidate-v1
+```
+
+Trainer сохраняет base version/checksum, dataset checksum, frozen evaluation
+version/checksum, seed, config и SHA-256 весов. Новый artifact проходит sanity
+inference и остаётся `CANDIDATE` с отключённым `CONFIDENT`; после fine-tuning
+калибровка исходной модели не считается доказанной. Ошибки CLI возвращаются как
+`FAILED` с кодом стадии без текста обращения. При недостаточном числе валидных
+строк builder возвращает `INSUFFICIENT_FEEDBACK` и не создаёт пакет, поэтому
+trainer не запускается. Реальное качество оценивается отдельно на frozen test
+и свежих операторских решениях.
+
 Текущий Core ставит `TRAIN_CLASSIFIER` с `samples: []`; generic feedback
 может содержать пустой `production_prediction` и решение без topic ID.
 Такие строки этот контракт отвергает. Нужен отдельный проверенный экспорт
