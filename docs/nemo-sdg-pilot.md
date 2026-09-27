@@ -2,22 +2,27 @@
 
 ## Вход и схема
 
-[`pilot_scenarios.jsonl`](../data/sdg/pilot_scenarios.jsonl) содержит 25
-**вымышленных** ситуаций по 14 темам. Каждая ситуация связана с одной
-однозначной парой `category + service` из
+[`pilot_scenarios.jsonl`](../data/sdg/pilot_scenarios.jsonl) содержит 35
+**вымышленных** ситуаций по 16 темам. Сценарии с provenance
+`SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR` связаны с однозначной парой
+`category + service` из
 [`almaty_2025_taxonomy_review.json`](../data/catalogs/almaty_2025_taxonomy_review.json).
+Три сценария с provenance `SYNTHETIC_AUTHORED_SCENARIO` созданы отдельно:
+два для `telecom`, где в каталоге нет подходящей пары, и один для школьного
+вопроса `education`. Их `source_category` и `source_service` равны
+`SYNTHETIC_AUTHORED`, что не является категорией или источником заказчика.
 Сырые обращения, комментарии и исполнители в seed не передаются.
 
 | Поле | Источник | Назначение |
 | --- | --- | --- |
 | `scenario_id`, `topic_id`, `subtopic_id` | Наш seed | Неизменяемая ожидаемая разметка и группа split. |
-| `source_category`, `source_service` | Пара каталога со статусом `CANDIDATE` | Гипотеза происхождения темы; человеческая проверка ещё нужна. В prompt не вставляется. |
+| `source_category`, `source_service` | Пара каталога `CANDIDATE` либо маркер `SYNTHETIC_AUTHORED` | Гипотеза происхождения темы для каталожных сценариев; маркер для проектных. В prompt не вставляется. |
 | `facts_ru` | Придуманная ситуация | Только разрешённые факты для текста. |
 | `critical_facts` | Подстроки `facts_ru` | Факты, которые рецензент проверяет в каждом варианте. |
 | `forbidden_invented_facts` | Правила сценария | Детали, которые нельзя додумывать. |
 | `object_type`, `time_context` | `facts_ru`, если указаны | Структурированный контекст без новых фактов. |
 | `region_constraints`, `duplicate_group`, `repeat_group` | Только при наличии подтверждённого контекста | Не заполняются догадками. |
-| `source_provenance`, `review_status` | Synthetic seed | `SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR`, `PENDING`. |
+| `source_provenance`, `review_status` | Synthetic seed | `SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR` либо `SYNTHETIC_AUTHORED_SCENARIO`; всегда `PENDING`. |
 | `language` | Sampler Data Designer | `RU` 45%, `KZ` 45%, `MIXED` 10% как целевая пропорция. |
 | `style` | Sampler Data Designer | `short`, `conversational`, `neutral`. |
 | `appeal_text` | Локальная LLM | Одно обращение без разметки и выдуманных действий службы. |
@@ -46,7 +51,7 @@ source .venv-sdg/bin/activate
 python -m pip install data-designer==0.9.3
 
 python scripts/pulse_sdg.py --check-seeds
-python scripts/pulse_sdg.py --model qwen3.5:9b --num-records 25
+python scripts/pulse_sdg.py --model qwen3.5:9b --num-records 35
 ```
 
 Если Ollama доступна по другому адресу, добавьте
@@ -114,7 +119,8 @@ provenance, но не подменяет смысловую оценку чел�
 ## Проверки
 
 [`pulse_sdg.py`](../scripts/pulse_sdg.py) до обращения к модели проверяет, что
-каждый seed соответствует паре `CANDIDATE` с явным подтипом в каталоге. После
+каждый каталожный seed соответствует паре `CANDIDATE` с явным подтипом, а
+авторский seed использует отдельный маркер и одну из 16 тем. После
 генерации он отклоняет строки со сломанной схемой, слишком коротким или длинным
 текстом, точные повторы и известные форматы PII (телефон, ИИН, e-mail,
 помеченные имя и адрес).

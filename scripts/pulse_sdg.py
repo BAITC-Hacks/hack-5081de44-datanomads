@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.normalization.pii import scan_pii
+from data.schemas.taxonomy import TOPIC_DEFINITIONS
 
 DEFAULT_SEEDS = ROOT / "data/sdg/pilot_scenarios.jsonl"
 CATALOG = ROOT / "data/catalogs/almaty_2025_taxonomy_review.json"
@@ -37,6 +38,9 @@ REQUIRED_SEED_FIELDS = {
 }
 OPTIONAL_SEED_FIELDS = {"object_type", "region_constraints", "time_context", "duplicate_group", "repeat_group"}
 SEED_SOURCE_PROVENANCE = "SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR"
+AUTHORED_SOURCE_PROVENANCE = "SYNTHETIC_AUTHORED_SCENARIO"
+AUTHORED_SOURCE_MARKER = "SYNTHETIC_AUTHORED"
+TOPIC_IDS = {topic["id"] for topic in TOPIC_DEFINITIONS}
 GENERATION_SEED_FIELDS = (
     "scenario_id", "topic_id", "subtopic_id", "source_category", "source_service", "facts_ru",
 )
@@ -81,7 +85,7 @@ def read_seeds(path: Path) -> dict[str, dict]:
                 raise ValueError(
                     f"seed line {line_number}: text fields must be nonempty"
                 )
-            if (seed["source_provenance"] != SEED_SOURCE_PROVENANCE or
+            if (seed["source_provenance"] not in {SEED_SOURCE_PROVENANCE, AUTHORED_SOURCE_PROVENANCE} or
                     seed["review_status"] != "PENDING"):
                 raise ValueError(f"seed line {line_number}: invalid provenance or review status")
             for field in ("critical_facts", "forbidden_invented_facts"):
@@ -102,14 +106,19 @@ def read_seeds(path: Path) -> dict[str, dict]:
             scenario_id = seed["scenario_id"]
             if scenario_id in seeds:
                 raise ValueError(f"seed line {line_number}: duplicate scenario_id")
-            pair = allowed.get((seed["source_category"], seed["source_service"]))
-            if pair is None or (
-                pair["suggested_topic_id"],
-                pair["suggested_subtopic_id"],
-            ) != (seed["topic_id"], seed["subtopic_id"]):
-                raise ValueError(
-                    f"seed line {line_number}: pair is outside the clear catalog scope"
-                )
+            if seed["source_provenance"] == AUTHORED_SOURCE_PROVENANCE:
+                if (seed["topic_id"] not in TOPIC_IDS or
+                        (seed["source_category"], seed["source_service"]) !=
+                        (AUTHORED_SOURCE_MARKER, AUTHORED_SOURCE_MARKER)):
+                    raise ValueError(f"seed line {line_number}: invalid authored topic or source marker")
+            else:
+                pair = allowed.get((seed["source_category"], seed["source_service"]))
+                if pair is None or (
+                    pair["suggested_topic_id"], pair["suggested_subtopic_id"]
+                ) != (seed["topic_id"], seed["subtopic_id"]):
+                    raise ValueError(
+                        f"seed line {line_number}: pair is outside the clear catalog scope"
+                    )
             if any(scan_pii(value).detected for value in (
                     seed["facts_ru"], *seed["critical_facts"], *seed["forbidden_invented_facts"],
                     *regions, *(seed[field] for field in ("object_type", "time_context") if field in seed))):

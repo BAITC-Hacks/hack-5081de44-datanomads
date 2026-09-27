@@ -7,12 +7,16 @@ import unittest
 import unicodedata
 
 from scripts.pulse_sdg import (
-    DEFAULT_SEEDS, GENERATION_SEED_FIELDS, PROMPT_VERSION, export_candidates,
+    DEFAULT_SEEDS, GENERATION_SEED_FIELDS, PROMPT_VERSION, TOPIC_IDS, export_candidates,
     read_seeds, source_checksum, write_generation_seeds,
 )
 
 
 class PilotSdgTests(unittest.TestCase):
+    def test_scenarios_cover_all_canonical_topics(self) -> None:
+        seeds = read_seeds(DEFAULT_SEEDS)
+        self.assertEqual({seed["topic_id"] for seed in seeds.values()}, TOPIC_IDS)
+
     def test_export_deduplicates_canonically_equivalent_text(self) -> None:
         seeds = read_seeds(DEFAULT_SEEDS)
         seed = seeds["light_001"]
@@ -53,6 +57,22 @@ class PilotSdgTests(unittest.TestCase):
                 with self.subTest(change=change):
                     path.write_text(json.dumps({**seed, **change}, ensure_ascii=False) + "\n", encoding="utf-8")
                     with self.assertRaises(ValueError):
+                        read_seeds(path)
+
+    def test_authored_seed_cannot_claim_customer_catalog_origin(self) -> None:
+        seeds = read_seeds(DEFAULT_SEEDS)
+        authored = seeds["telecom_001"]
+        catalog_seed = seeds["education_001"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.jsonl"
+            for seed in (
+                {**authored, "source_category": catalog_seed["source_category"]},
+                {**authored, "topic_id": "unrecognized_topic"},
+                {**catalog_seed, "source_provenance": authored["source_provenance"]},
+            ):
+                with self.subTest(scenario=seed):
+                    path.write_text(json.dumps(seed, ensure_ascii=False) + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid authored topic or source marker"):
                         read_seeds(path)
 
     def test_export_keeps_review_pending_and_stable_provenance(self) -> None:
