@@ -380,6 +380,15 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         f"import counts: {imported}",
     )
     expect(imported.get("quarantined_rows") == 1, f"quarantine count: {imported}")
+    status, _, forbidden_import = json_request(
+        base_url,
+        "POST",
+        "/api/v1/import",
+        body=import_payload,
+        role="OPERATOR",
+        timeout=timeout,
+    )
+    expect(status == 403, f"operator import should be forbidden: {status} {forbidden_import}")
     status, _, repeated = json_request(base_url, "POST", "/api/v1/import", body=import_payload, timeout=timeout)
     expect(status == 201, f"repeat import failed: {status} {repeated}")
     expect(
@@ -413,12 +422,64 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
 
     status, _, preview = json_request(base_url, "POST", "/api/v1/assist/preview", body={"ticket_id": ticket_ids[0]}, timeout=timeout)
     expect(status == 200 and preview.get("source") == "postgres-ticket+ml+qdrant", f"preview failed: {status} {preview}")
+    prediction = preview.get("prediction", {})
+    orchestration = preview.get("orchestration", {})
+    confidence_states = {
+        "confident",
+        "uncertain",
+        "low_confidence",
+        "unavailable",
+        "high",
+        "medium",
+        "low",
+    }
+    expect(
+        prediction.get("confidence_state") in confidence_states
+        and orchestration.get("needs_review") is True,
+        f"preview must expose classification confidence and the review decision: {preview}",
+    )
+    related_ids = {
+        str(item.get("ticket_id"))
+        for item in preview.get("similar_tickets", [])
+        if item.get("ticket_id") is not None
+    }
+    expect(
+        related_ids.intersection(ticket_ids[1:]),
+        f"preview did not retrieve a related E2E ticket: {preview.get('similar_tickets')}",
+    )
+    duplicate_ids = {
+        str(item.get("ticket_id")) for item in preview.get("duplicate_candidates", [])
+    }
+    repeat_ids = {
+        str(item.get("ticket_id")) for item in preview.get("repeat_candidates", [])
+    }
+    expect(
+        bool(duplicate_ids.union(repeat_ids).intersection(related_ids))
+        and duplicate_ids.issubset(related_ids)
+        and repeat_ids.issubset(related_ids),
+        "duplicate/repeat suggestions must be subsets of retrieved similar tickets",
+    )
     response_template = preview.get("response_template", {})
     expect(
         response_template.get("approved") is False
         and response_template.get("source") == "MANUAL_REQUIRED"
         and not response_template.get("body"),
         f"unapproved copy must not be returned as a response template: {response_template}",
+    )
+    status, _, uncertain_preview = json_request(
+        base_url,
+        "POST",
+        "/api/v1/assist/preview",
+        body={"text": "ticket 123", "language": "UNKNOWN", "region_id": region},
+        role="OPERATOR",
+        timeout=timeout,
+    )
+    expect(
+        status == 200
+        and uncertain_preview.get("orchestration", {}).get("language") == "UNKNOWN"
+        and uncertain_preview.get("orchestration", {}).get("needs_review") is True
+        and uncertain_preview.get("response_template", {}).get("approved") is False,
+        f"unknown-language preview must require operator review: {uncertain_preview}",
     )
     status, _, decision = json_request(
         base_url,
@@ -562,9 +623,70 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         f"report forecast history differs from PostgreSQL: API={report_forecast_total} "
         f"DB={forecast_lookback_total}",
     )
-    for text in ("Сколько обращений за 30 дней?", "Какой тренд?", "Сравни регионы", "Топ тем", "Где всплески?", "Дай прогноз"):
-        status, _, result = json_request(base_url, "POST", "/api/v1/analytics/query", body={"text": text, "filters": {"range": "30d"}}, role="MANAGER", timeout=timeout)
-        expect(status == 200 and result.get("intent"), f"QueryIntent failed for {text!r}: {result}")
+    query_cases = (
+        ("Сколько обращений за 30 дней?", "count", "none", "bar"),
+        ("Какой тренд?", "trend", "day", "line"),
+        ("Сравни регионы", "compare_regions", "region", "bar"),
+        ("Топ тем", "top_topics", "topic", "bar"),
+        ("Где всплески?", "spikes", "day", "line"),
+        ("Дай прогноз", "forecast", "day", "line"),
+    )
+    for text, expected_intent, expected_grouping, expected_chart in query_cases:
+        query_body = {
+            "text": text,
+            "filters": {
+                "range": "30d",
+                "region_id": region,
+                "topic_id": selected_topic,
+                "status": "OPEN",
+                "channel": "e2e",
+            },
+        }
+        if expected_intent == "forecast":
+            query_body["horizon_days"] = 30
+        status, _, result = json_request(
+            base_url,
+            "POST",
+            "/api/v1/analytics/query",
+            body=query_body,
+            role="MANAGER",
+            timeout=timeout,
+        )
+        expect(
+            status == 200 and result.get("intent") == expected_intent,
+            f"QueryIntent mapping failed for {text!r}: {result}",
+        )
+        interpreted_filters = result.get("interpreted_filters", {})
+        expect(
+            interpreted_filters.get("region_id") == region
+            and interpreted_filters.get("topic_id") == selected_topic
+            and interpreted_filters.get("status") == "OPEN"
+            and interpreted_filters.get("channel") == "e2e"
+            and interpreted_filters.get("range") == "30d"
+            and interpreted_filters.get("group_by") == expected_grouping
+            and (
+                expected_intent != "forecast"
+                or interpreted_filters.get("horizon_days") == 30
+            ),
+            f"QueryIntent lost or misinterpreted filters for {text!r}: {interpreted_filters}",
+        )
+        chart = result.get("chart", {})
+        expect(
+            (isinstance(result.get("number"), (int, float)) or result.get("number") is None)
+            and "number" in result
+            and result.get("summary", {}).get("value") == result.get("number")
+            and isinstance(result.get("table"), list)
+            and result.get("table") == result.get("rows")
+            and isinstance(result.get("table_columns"), list)
+            and bool(result.get("table_columns"))
+            and isinstance(result.get("series"), list)
+            and bool(result.get("series"))
+            and chart.get("type") == expected_chart
+            and chart.get("x") in {"date", "label"}
+            and chart.get("y") == "count"
+            and bool(chart.get("title")),
+            f"QueryIntent lacks consistent number/table/chart output for {text!r}: {result}",
+        )
 
     for horizon in (30, 60, 90):
         status, _, forecast = json_request(base_url, "GET", f"/api/v1/forecast?horizon={horizon}", role="MANAGER", timeout=timeout)
@@ -574,6 +696,30 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             str(forecast.get("model_version", "")).startswith("forecast-")
             and forecast.get("model_version") != "embedder-demo-2026-09-21-001",
             f"forecast must expose its own model_version: {forecast}",
+        )
+        forecast_points = forecast.get("points", [])
+        expected_peaks = forecast.get("expected_peaks", [])
+        backtest = forecast.get("backtest", {})
+        expect(
+            forecast.get("status") == "OK"
+            and forecast.get("insufficient_history") is False
+            and len(forecast_points) == horizon
+            and isinstance(expected_peaks, list)
+            and set(expected_peaks).issubset(
+                {str(point.get("date")) for point in forecast_points}
+            ),
+            f"forecast {horizon} did not return a complete forecast and peak dates: {forecast}",
+        )
+        expect(
+            all(
+                isinstance(backtest.get(metric), (int, float))
+                and math.isfinite(float(backtest[metric]))
+                and backtest[metric] >= 0
+                for metric in ("mae", "rmse", "wape", "smape")
+            )
+            and backtest.get("sample_count", 0) > 0
+            and backtest.get("window_count", 0) > 0,
+            f"forecast {horizon} is missing rolling backtest metrics: {backtest}",
         )
 
     status, _, detected = json_request(base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout)
@@ -613,6 +759,16 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         and alert.get("incident_key"),
         f"alert copy or incident key is invalid: {alert}",
     )
+    expect(
+        alert.get("status") == "OPEN"
+        and bool(alert.get("title"))
+        and bool(alert.get("severity"))
+        and alert.get("region_id") == region
+        and alert.get("topic_id") == "water_supply"
+        and alert.get("baseline") is not None
+        and isinstance(alert.get("linked_ticket_ids"), list),
+        f"signal card is missing its safe display fields or source evidence: {alert}",
+    )
     alert_id = str(alert["id"])
     status, _, repeated_detection = json_request(
         base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout
@@ -640,6 +796,14 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         expect(event_response.status == 200 and "text/event-stream" in event_response.headers.get("Content-Type", ""), "SSE endpoint did not return an event stream")
         snapshot = read_sse_event(event_response)
         expect(b"event: alerts.snapshot" in snapshot, f"SSE snapshot missing: {snapshot[:160]!r}")
+        status, _, forbidden_ack = json_request(
+            base_url,
+            "POST",
+            f"/api/v1/alerts/{alert_id}/ack",
+            role="OPERATOR",
+            timeout=timeout,
+        )
+        expect(status == 403, f"operator alert acknowledgement should be forbidden: {forbidden_ack}")
         status, _, acknowledged = json_request(base_url, "POST", f"/api/v1/alerts/{alert_id}/ack", role="MANAGER", timeout=timeout)
         expect(status == 200 and acknowledged.get("status") == "ACKNOWLEDGED", f"alert ack failed: {acknowledged}")
         changed = read_sse_event(event_response)
@@ -653,6 +817,63 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         status == 200
         and all(str(item.get("id")) != alert_id for item in after_close_detection.get("items", [])),
         f"detector reopened a closed incident during cooldown: {after_close_detection}",
+    )
+
+    short_forecast_source = f"{source}-short-forecast"
+    short_forecast_dataset = f"{dataset}-short-forecast"
+    short_forecast_channel = f"e2e-short-forecast-{suffix}"
+    short_forecast_ticket = {
+        "external_ticket_id": f"{short_forecast_source}-0",
+        "region_id": region,
+        "created_at": created_at,
+        "original_text": f"E2E {suffix}: короткая история для прогноза",
+        "language": "ru",
+        "topic_raw": "electricity",
+        "status": "OPEN",
+        "channel": short_forecast_channel,
+    }
+    status, _, short_forecast_import = json_request(
+        base_url,
+        "POST",
+        "/api/v1/import",
+        body={
+            "source_system": short_forecast_source,
+            "source_uri": f"memory://{short_forecast_source}.json",
+            "dataset_version": short_forecast_dataset,
+            "manifest_uri": f"memory://{short_forecast_dataset}/manifest.json",
+            "manifest_sha256": "e2e-short-forecast-manifest",
+            "is_synthetic": True,
+            "tickets": [short_forecast_ticket],
+        },
+        timeout=timeout,
+    )
+    expect(
+        status == 201 and short_forecast_import.get("imported_rows") == 1,
+        f"short-history forecast fixture import failed: {short_forecast_import}",
+    )
+    short_forecast_query = urlencode(
+        {
+            "horizon": "30",
+            "region_id": region,
+            "topic_id": "electricity",
+            "channel": short_forecast_channel,
+        }
+    )
+    status, _, short_forecast = json_request(
+        base_url,
+        "GET",
+        f"/api/v1/forecast?{short_forecast_query}",
+        role="MANAGER",
+        timeout=timeout,
+    )
+    expect(
+        status == 200
+        and short_forecast.get("status") == "INSUFFICIENT_HISTORY"
+        and short_forecast.get("insufficient_history") is True
+        and short_forecast.get("points") == []
+        and short_forecast.get("expected_peaks") == []
+        and short_forecast.get("backtest", {}).get("status") == "INSUFFICIENT_HISTORY",
+        f"short forecast history did not remain explicitly insufficient: {short_forecast}",
     )
 
     for report_path, magic in (("/api/v1/analytics/export.pdf", b"%PDF-"), ("/api/v1/analytics/export.xlsx", b"PK\x03\x04")):
@@ -790,6 +1011,17 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     )
     expect(status == 201, f"learning cycle creation failed: {cycle}")
     cycle_id = str(cycle["id"])
+    status, _, forbidden_learning = json_request(
+        base_url,
+        "GET",
+        "/api/v1/learning",
+        role="OPERATOR",
+        timeout=timeout,
+    )
+    expect(
+        status == 403,
+        f"operator learning-cycle access should be forbidden: {forbidden_learning}",
+    )
     status, _, feedback = json_request(
         base_url,
         "POST",
@@ -848,6 +1080,18 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         expect(
             status == 200 and operator_decision.get("decision", {}).get("action") == "confirm",
             f"shadow ticket decision failed: HTTP {status}",
+        )
+        status, _, confirmed_ticket = json_request(
+            base_url,
+            "GET",
+            f"/api/v1/tickets/{shadow_ticket_id}",
+            role="OPERATOR",
+            timeout=timeout,
+        )
+        expect(
+            status == 200
+            and confirmed_ticket.get("latest_decision", {}).get("action") == "confirm",
+            f"confirmed operator decision was not persisted: {confirmed_ticket}",
         )
 
         status, _, learning = json_request(base_url, "GET", "/api/v1/learning", role="ML_REVIEWER", timeout=timeout)
@@ -979,7 +1223,7 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         "ticket_ids": ticket_ids,
         "alert_id": alert_id,
         "learning": learning_result,
-        "checks": "postgres+ml+qdrant+operator+analytics+alerts+forecast+reports+rbac",
+        "checks": "postgres+ml+qdrant+operator+similarity+analytics+query-intent+alerts+sse+forecast+reports+learning+rbac",
     }
 
 

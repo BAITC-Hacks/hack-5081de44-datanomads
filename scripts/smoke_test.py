@@ -12,7 +12,7 @@ Examples::
 
     # Check a running demo stack.
     PULSE_BASE_URL=http://localhost:8080 \
-      python scripts/smoke_test.py --log-file .tmp/pulse.jsonl
+      python scripts/smoke_test.py --log-file .tmp/pulse109-compose.log
 
 Optional live role checks use a JSON mapping of role to bearer token, for
 example ``PULSE_ROLE_TOKENS='{"OPERATOR":"...","MANAGER":"..."}'``.
@@ -734,6 +734,53 @@ def check_pii_probe(base_url: str, timeout: float) -> list[Check]:
     return [Check("synthetic PII probe reached assist endpoint", ok, detail)]
 
 
+def capture_compose_logs(path: Path, demo_profile: str) -> Check:
+    docker = shutil.which("docker")
+    if docker is None:
+        return Check("compose logs captured", False, "docker executable was not found")
+    command = [
+        docker,
+        "compose",
+        "--profile",
+        demo_profile,
+        "logs",
+        "--no-color",
+        "--no-log-prefix",
+        "core-api",
+        "ml-service",
+        "ml-worker",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return Check("compose logs captured", False, str(exc))
+    if result.returncode != 0:
+        return Check(
+            "compose logs captured",
+            False,
+            result.stderr.strip() or f"docker compose logs exited {result.returncode}",
+        )
+    if not result.stdout.strip():
+        return Check("compose logs captured", False, "no application logs were returned")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(result.stdout, encoding="utf-8")
+    except OSError as exc:
+        return Check("compose logs captured", False, str(exc))
+    return Check(
+        "compose logs captured",
+        True,
+        f"captured {len(result.stdout.splitlines())} application log lines",
+    )
+
+
 def check_learning_safety(
     base_url: str,
     timeout: float,
@@ -865,18 +912,31 @@ def run(args: argparse.Namespace) -> int:
         checks.extend(check_live_roles(args.base_url, manifest, args.timeout))
         checks.extend(check_learning_safety(args.base_url, args.timeout, args.learning_cycle_id))
 
+    if args.pii_probe:
+        if args.offline:
+            checks.append(Check("synthetic PII probe", False, "cannot run an HTTP probe with --offline"))
+        else:
+            checks.extend(check_pii_probe(args.base_url, args.timeout))
+
+    if args.capture_compose_logs:
+        if args.offline:
+            checks.append(Check("compose logs captured", False, "cannot capture live logs with --offline"))
+        elif not args.log_file:
+            checks.append(Check("compose logs captured", False, "pass --log-file to save captured logs"))
+        else:
+            checks.append(
+                capture_compose_logs(
+                    Path(args.log_file).resolve(),
+                    str(manifest["compose"]["demo_profile"]),
+                )
+            )
+
     if args.log_file:
         checks.extend(check_log_file(Path(args.log_file).resolve(), manifest, strict_schema=args.strict_logs))
     elif args.require_log_check:
         checks.append(Check("PII log check configured", False, "pass --log-file or disable --require-log-check"))
     else:
         checks.append(Check("PII log check", True, "skipped: pass --log-file to inspect structured logs"))
-
-    if args.pii_probe:
-        if args.offline:
-            checks.append(Check("synthetic PII probe", False, "cannot run an HTTP probe with --offline"))
-        else:
-            checks.extend(check_pii_probe(args.base_url, args.timeout))
 
     failures = [check for check in checks if not check.ok]
     for check in checks:
@@ -894,8 +954,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
     parser.add_argument("--compose-file", help="explicit compose file")
     parser.add_argument("--openapi-file", help="explicit local OpenAPI JSON")
-    parser.add_argument("--log-file", help="JSONL log file to scan for PII sentinels")
+    parser.add_argument("--log-file", help="log file to scan for PII sentinels")
     parser.add_argument("--require-log-check", action="store_true")
+    parser.add_argument(
+        "--capture-compose-logs",
+        action="store_true",
+        help="capture Core and ML container logs after live probes, before scanning",
+    )
     parser.add_argument("--strict-logs", action="store_true", help="fail on non-JSON log lines/missing fields")
     parser.add_argument(
         "--pii-probe",

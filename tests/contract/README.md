@@ -40,10 +40,13 @@ PULSE_BASE_URL=http://localhost:8080 \
   python scripts/e2e_acceptance.py --restart-core
 ```
 
-В обычном Compose worker ожидаемо возвращает `TRAINER_NOT_CONFIGURED` и
-acceptance отклоняет тестовый candidate. При явном `PULSE_TEST_FAKE_TRAINER=true`
-тот же сценарий проверяет candidate → evaluation → promotion; fake metrics не
-выдаются за реальные ML-метрики.
+В обычном Compose worker использует версионированный Multinomial Naive Bayes
+trainer для candidate artifact. Stateful acceptance строит candidate из
+synthetic feedback, проходит evaluation и отклоняет его, проверяя, что
+production pointer не изменился. При явном `PULSE_TEST_FAKE_TRAINER=true`
+сценарий проверяет, что fake candidate помечен synthetic, остаётся
+`INSUFFICIENT_EVIDENCE` и также не продвигается; его метрики не выдаются за
+реальные ML-результаты.
 
 Ролевые HTTP-пробы запускаются, если передан JSON с bearer-токенами. Значения
 токенов не печатаются:

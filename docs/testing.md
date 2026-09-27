@@ -100,6 +100,17 @@ demo ticket → preview → prediction → operator confirm/correct
 PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py
 ```
 
+Для live PII sentinel и запрета утечки в логах запускайте smoke-проверку после
+E2E. Она отправит только synthetic sentinel-строки, затем захватит логи Core и
+ML контейнеров и проверит их до завершения; файл остаётся в игнорируемом
+`.tmp/`:
+
+```bash
+PULSE_BASE_URL=http://localhost:8080 PULSE_ROLE_HEADER_PROBE=1 \
+  python scripts/smoke_test.py --pii-probe --capture-compose-logs \
+  --log-file .tmp/pulse109-compose.log --require-log-check
+```
+
 Для acceptance-gate с проверкой перезапуска Core и восстановления решения:
 
 ```bash

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -113,6 +117,84 @@ class ContractArtifactTests(unittest.TestCase):
         latency_check = next(check for check in checks if check.name == "request latency p50/p95")
         self.assertFalse(latency_check.ok)
         self.assertIn("invalid latency events=1", latency_check.detail)
+
+    def test_compose_log_capture_saves_output_for_pii_scan(self):
+        sentinel = self.smoke.PII_SENTINELS["full_ticket_text"]
+        log_output = json.dumps({"message": "request_completed", "text": sentinel}) + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "compose.log"
+            with patch.object(self.smoke.shutil, "which", return_value="/usr/bin/docker"):
+                with patch.object(
+                    self.smoke.subprocess,
+                    "run",
+                    return_value=self.smoke.subprocess.CompletedProcess(
+                        ["docker"], 0, log_output, ""
+                    ),
+                ) as run_compose:
+                    captured = self.smoke.capture_compose_logs(log_path, "demo")
+            self.assertTrue(captured.ok, captured.detail)
+            self.assertEqual(log_path.read_text(encoding="utf-8"), log_output)
+            run_compose.assert_called_once()
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=False)
+        pii_check = next(check for check in checks if check.name == "PII sentinels absent from logs")
+        self.assertFalse(pii_check.ok)
+        self.assertIn("full_ticket_text", pii_check.detail)
+
+    def test_live_pii_probe_runs_before_compose_log_scan(self):
+        args = SimpleNamespace(
+            manifest=str(MANIFEST_PATH),
+            fixture=str(FIXTURE_PATH),
+            compose_file=None,
+            strict_docker=False,
+            openapi_file=None,
+            offline=False,
+            base_url="http://127.0.0.1:8080",
+            timeout=1.0,
+            learning_cycle_id=None,
+            pii_probe=True,
+            capture_compose_logs=True,
+            log_file="/tmp/pulse109-acceptance.log",
+            strict_logs=False,
+            require_log_check=True,
+        )
+        calls = []
+        passing_check = self.smoke.Check("test", True, "ok")
+
+        def record(name, result):
+            def check(*_args, **_kwargs):
+                calls.append(name)
+                return result
+
+            return check
+
+        with patch.object(self.smoke, "check_fixture", return_value=[]):
+            with patch.object(self.smoke, "find_compose_file", return_value=None):
+                with patch.object(self.smoke, "check_compose", return_value=[]):
+                    with patch.object(self.smoke, "discover_openapi_file", return_value=None):
+                        with patch.object(self.smoke, "check_live_health", return_value=[]):
+                            with patch.object(self.smoke, "check_public_docs_denied", return_value=[]):
+                                with patch.object(self.smoke, "check_live_roles", return_value=[]):
+                                    with patch.object(self.smoke, "check_learning_safety", return_value=[]):
+                                        with patch.object(
+                                            self.smoke,
+                                            "check_pii_probe",
+                                            side_effect=record("probe", [passing_check]),
+                                        ):
+                                            with patch.object(
+                                                self.smoke,
+                                                "capture_compose_logs",
+                                                side_effect=record("capture", passing_check),
+                                            ):
+                                                with patch.object(
+                                                    self.smoke,
+                                                    "check_log_file",
+                                                    side_effect=record("scan", [passing_check]),
+                                                ):
+                                                    with redirect_stdout(io.StringIO()):
+                                                        status = self.smoke.run(args)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, ["probe", "capture", "scan"])
 
     def test_deterministic_fixture(self):
         self.assert_checks_pass(self.smoke.check_fixture(FIXTURE_PATH, self.manifest))
