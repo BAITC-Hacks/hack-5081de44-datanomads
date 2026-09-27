@@ -1485,15 +1485,32 @@ components:
         dispersion_method: { type: string, enum: [median_absolute_deviation] }
     ForecastResponse:
       type: object
-      required: [model_version]
+      required: [source, model_version, model, status, insufficient_history, horizon_days, history, forecast_start, points, expected_peaks, backtest]
       properties:
         source: { type: string }
         model_version: { type: string, description: Forecast provider version; never the embedding version. }
         model: { type: string }
+        status: { type: string, enum: [OK, INSUFFICIENT_HISTORY, DEMO_ONLY] }
+        insufficient_history: { type: boolean }
         horizon_days: { type: integer }
         history: { type: array, items: { $ref: '#/components/schemas/TimeSeriesPoint' } }
+        forecast_start: { type: string, format: date, nullable: true, description: First forecast date, or null when history is insufficient. }
         points: { type: array, items: { $ref: '#/components/schemas/TimeSeriesPoint' } }
         expected_peaks: { type: array, items: { type: string } }
+        backtest: { $ref: '#/components/schemas/ForecastBacktest' }
+    ForecastBacktest:
+      type: object
+      properties:
+        status: { type: string, enum: [OK, INSUFFICIENT_HISTORY, DEMO_ONLY] }
+        history_days: { type: integer, minimum: 0 }
+        observed_days: { type: integer, minimum: 0 }
+        required_days: { type: integer, minimum: 1 }
+        sample_count: { type: integer, minimum: 0 }
+        window_count: { type: integer, minimum: 0 }
+        mae: { type: number, nullable: true, minimum: 0 }
+        rmse: { type: number, nullable: true, minimum: 0 }
+        wape: { type: number, nullable: true, minimum: 0 }
+        smape: { type: number, nullable: true, minimum: 0 }
     TimeSeriesPoint:
       type: object
       required: [date, tickets, resolved]

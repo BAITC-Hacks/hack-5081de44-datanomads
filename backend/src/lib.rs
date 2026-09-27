@@ -4256,6 +4256,7 @@ fn memory_report_slice(store: &Store, query: &AnalyticsQuery) -> Result<ReportSl
             insufficient_history: true,
             horizon_days: 30,
             history: Vec::new(),
+            forecast_start: None,
             points: Vec::new(),
             expected_peaks: Vec::new(),
             backtest: json!({"status": "DEMO_ONLY", "reason": "memory report has no forecast history"}),
@@ -4979,6 +4980,7 @@ pub struct ForecastResponse {
     pub insufficient_history: bool,
     pub horizon_days: u32,
     pub history: Vec<TimeSeriesPoint>,
+    pub forecast_start: Option<String>,
     pub points: Vec<TimeSeriesPoint>,
     pub expected_peaks: Vec<String>,
     pub backtest: Value,
@@ -5059,6 +5061,7 @@ fn memory_forecast_response(
             insufficient_history: true,
             horizon_days,
             history: Vec::new(),
+            forecast_start: None,
             points: Vec::new(),
             expected_peaks: Vec::new(),
             backtest: json!({"sample_count": 0}),
@@ -5066,6 +5069,31 @@ fn memory_forecast_response(
     }
 
     let history = demo_time_series(&filtered, current_since, generated_at);
+    let active_days = filtered
+        .iter()
+        .filter_map(|ticket| ticket_created_at(ticket).map(|created_at| created_at.date_naive()))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if active_days < FORECAST_SEASON_LENGTH_DAYS {
+        return Ok(ForecastResponse {
+            source: "deterministic-demo".to_owned(),
+            model_version: "forecast-seasonal-naive-demo-v1".to_owned(),
+            model: "seasonal-naive-demo".to_owned(),
+            status: "INSUFFICIENT_HISTORY".to_owned(),
+            insufficient_history: true,
+            horizon_days,
+            history,
+            forecast_start: None,
+            points: Vec::new(),
+            expected_peaks: Vec::new(),
+            backtest: json!({
+                "status": "INSUFFICIENT_HISTORY",
+                "sample_count": 0,
+                "observed_days": active_days,
+                "required_days": FORECAST_SEASON_LENGTH_DAYS,
+            }),
+        });
+    }
     let seasonal_pattern = history
         .iter()
         .rev()
@@ -5092,9 +5120,10 @@ fn memory_forecast_response(
         .unwrap_or_default();
     let expected_peaks = points
         .iter()
-        .filter(|point| point.tickets == peak_value)
+        .filter(|point| peak_value > 0 && point.tickets == peak_value)
         .map(|point| point.date.clone())
         .collect();
+    let forecast_start = points.first().map(|point| point.date.clone());
 
     Ok(ForecastResponse {
         source: "deterministic-demo".to_owned(),
@@ -5104,6 +5133,7 @@ fn memory_forecast_response(
         insufficient_history: false,
         horizon_days,
         history,
+        forecast_start,
         points,
         expected_peaks,
         backtest: json!({"status": "DEMO_ONLY", "history_days": FORECAST_HISTORY_DAYS}),
@@ -6590,7 +6620,22 @@ mod tests {
 
     #[tokio::test]
     async fn forecast_supports_required_horizons() {
-        let app = app(AppState::demo());
+        let state = AppState::demo();
+        {
+            let mut store = state.store.write().unwrap();
+            let template = store.tickets.values().next().unwrap().clone();
+            store.tickets.clear();
+            let as_of = DateTime::parse_from_rfc3339(DEMO_TIMESTAMP)
+                .unwrap()
+                .with_timezone(&Utc);
+            for day in 1..=FORECAST_SEASON_LENGTH_DAYS {
+                let mut ticket = template.clone();
+                ticket.id = format!("forecast-fixture-{day}");
+                ticket.created_at = (as_of - Duration::days(day as i64)).to_rfc3339();
+                store.tickets.insert(ticket.id.clone(), ticket);
+            }
+        }
+        let app = app(state);
         for horizon in [30, 60, 90] {
             let response = app
                 .clone()
@@ -6606,6 +6651,7 @@ mod tests {
             let value = body_json(response).await;
             assert_eq!(value["horizon_days"], horizon);
             assert_eq!(value["points"].as_array().unwrap().len(), horizon as usize);
+            assert_eq!(value["forecast_start"], value["points"][0]["date"]);
         }
     }
 

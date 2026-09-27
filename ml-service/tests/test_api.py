@@ -124,6 +124,14 @@ def test_forecast_seasonal_naive_and_short_history_state() -> None:
     assert response.json()["forecast"] == [1, 2, 3, 4, 5, 6, 7, 1, 2]
     assert response.json()["status"] == "OK"
 
+    for horizon in (30, 60, 90):
+        forecast = client.post(
+            "/internal/v1/forecast",
+            json={"values": [1, 2, 3, 4, 5, 6, 7], "horizon": horizon, "season_length": 7},
+        )
+        assert forecast.status_code == 200
+        assert len(forecast.json()["forecast"]) == horizon
+
     rolling = client.post(
         "/internal/v1/forecast",
         json={"values": [1, 2, 3, 4, 5, 6, 7] * 3, "horizon": 7, "season_length": 7},
@@ -139,6 +147,9 @@ def test_forecast_seasonal_naive_and_short_history_state() -> None:
     short = client.post("/internal/v1/forecast", json={"values": [9, 10], "horizon": 2, "season_length": 7})
     assert short.status_code == 200
     assert short.json()["status"] == "INSUFFICIENT_HISTORY"
+    assert short.json()["forecast"] == []
+    assert short.json()["points"] == []
+    assert short.json()["expected_peaks"] == []
 
 
 def test_anomaly_flags_latest_spike() -> None:

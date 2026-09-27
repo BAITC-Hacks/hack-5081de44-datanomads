@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -17,6 +17,7 @@ export interface ApiResult<T> {
 
 export interface DashboardFilters {
   range: string
+  forecastHorizon?: 30 | 60 | 90
   regionId?: string
   topicId?: string
   serviceId?: string
@@ -174,7 +175,19 @@ interface BackendAnalytics {
   time_series: Array<{ date: string; tickets: number; resolved: number }>
 }
 
-interface BackendForecast { source?: string; status?: string; insufficient_history?: boolean; history?: Array<{ date: string; tickets: number; resolved: number }>; points: Array<{ date: string; tickets: number; resolved: number }>; model_version: string; model?: string; expected_peaks?: string[]; backtest?: Record<string, unknown> }
+interface BackendForecast {
+  source?: string
+  status?: string
+  insufficient_history?: boolean
+  horizon_days?: number
+  history?: Array<{ date: string; tickets: number; resolved: number }>
+  forecast_start?: string | null
+  points: Array<{ date: string; tickets: number; resolved: number }>
+  model_version: string
+  model?: string
+  expected_peaks?: string[]
+  backtest?: ForecastBacktest
+}
 interface BackendAlertDetail {
   historical_counts?: number[]
   trigger_reasons?: string[]
@@ -423,7 +436,7 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
 
 async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardData> {
   const analyticsQuery = queryString(filters)
-  const forecastQuery = new URLSearchParams({ horizon: '30', ...(filters.regionId ? { region_id: filters.regionId } : {}), ...(filters.topicId ? { topic_id: filters.topicId } : {}), ...(filters.serviceId ? { service_id: filters.serviceId } : {}), ...(filters.status ? { status: filters.status } : {}), ...(filters.district ? { district: filters.district } : {}), ...(filters.channel ? { channel: filters.channel } : {}) }).toString()
+  const forecastQuery = new URLSearchParams({ horizon: String(filters.forecastHorizon ?? 30), ...(filters.regionId ? { region_id: filters.regionId } : {}), ...(filters.topicId ? { topic_id: filters.topicId } : {}), ...(filters.serviceId ? { service_id: filters.serviceId } : {}), ...(filters.status ? { status: filters.status } : {}), ...(filters.district ? { district: filters.district } : {}), ...(filters.channel ? { channel: filters.channel } : {}) }).toString()
   const alertsQuery = filters.regionId ? `?region_id=${encodeURIComponent(filters.regionId)}` : ''
   const [ticketResponse, analytics, forecast, alertsResponse, learning, models, taxonomy, datasetProvenance] = await Promise.all([
     request<{ items: BackendTicket[] }>('/tickets?limit=50'),
@@ -475,6 +488,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     }
   })
   const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date, forecast: point.tickets }))
+  const forecastHistory: ForecastPoint[] = (forecast.history ?? []).map((point) => ({ label: point.date, actual: point.tickets }))
   const cycle = learning.active_cycle ?? learning.items?.[0]
   const learningData: LearningCycle = cycle ? { id: cycle.id, stage: mapLearningStage(cycle.state), dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, collectStartedAt: cycle.collect_started_at, collectEndsAt: cycle.collect_ends_at, evaluationStartedAt: cycle.evaluation_started_at ?? undefined, evaluationEndsAt: cycle.evaluation_ends_at ?? undefined, shadowPredictionCount: cycle.shadow_prediction_count, shadowInferenceFailures: cycle.shadow_inference_failures, shadowOperatorDecisionCount: cycle.shadow_operator_decision_count, blindAbEnabled: cycle.blind_ab_enabled, productionModelVersion: cycle.production_model_version ?? undefined, frozenEvaluationDatasetVersion: cycle.frozen_evaluation_dataset_version ?? undefined, candidateDatasetChecksum: cycle.candidate_dataset_checksum ?? undefined, minFeedbackCount: cycle.min_feedback_count, promotionPolicyVersion: cycle.promotion_policy_version, manualCloseEnabled: cycle.manual_close_enabled, updatedAt: cycle.updated_at, decisionNote: cycle.decision_note } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', collectStartedAt: '', collectEndsAt: '', shadowPredictionCount: 0, shadowInferenceFailures: 0, shadowOperatorDecisionCount: 0, blindAbEnabled: false, minFeedbackCount: 0, promotionPolicyVersion: 'policy-v1', manualCloseEnabled: false, updatedAt: 'нет данных' }
   const modelData: ModelStatus[] = models.items.map((model) => {
@@ -534,6 +548,14 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     reportSource: analytics.source ?? 'postgres',
     forecastStatus: forecast.status,
     forecastModelVersion: forecast.model_version,
+    forecastModel: forecast.model,
+    forecastSource: forecast.source,
+    forecastInsufficientHistory: forecast.insufficient_history ?? forecast.status === 'INSUFFICIENT_HISTORY',
+    forecastHorizonDays: forecast.horizon_days,
+    forecastHistory,
+    forecastStart: forecast.forecast_start ?? undefined,
+    forecastExpectedPeaks: forecast.expected_peaks ?? [],
+    forecastBacktest: forecast.backtest,
     datasetProvenance,
     filterOptions: {
       regions: taxonomy.regions ?? analytics.by_region.map((region) => ({ id: region.id, label: region.label })),

@@ -158,6 +158,19 @@ export interface ForecastPoint {
   high?: number
 }
 
+export interface ForecastBacktest {
+  status?: string
+  history_days?: number
+  observed_days?: number
+  required_days?: number
+  sample_count?: number
+  window_count?: number
+  mae?: number | null
+  rmse?: number | null
+  wape?: number | null
+  smape?: number | null
+}
+
 export interface ModelStatus {
   name: string
   version: string
@@ -243,6 +256,14 @@ export interface DashboardData {
   reportSource: string
   forecastStatus?: string
   forecastModelVersion?: string
+  forecastModel?: string
+  forecastSource?: string
+  forecastInsufficientHistory?: boolean
+  forecastHorizonDays?: number
+  forecastHistory?: ForecastPoint[]
+  forecastStart?: string
+  forecastExpectedPeaks?: string[]
+  forecastBacktest?: ForecastBacktest
   datasetProvenance?: DatasetProvenance
   filterOptions: {
     regions: Array<{ id: string; label: string }>

@@ -244,7 +244,8 @@ async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
     let forecast: serde_json::Value =
         serde_json::from_slice(&to_bytes(forecast.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(forecast["source"], "deterministic-demo");
-    assert_eq!(forecast["status"], "DEMO_ONLY");
+    assert_eq!(forecast["status"], "INSUFFICIENT_HISTORY");
+    assert_eq!(forecast["insufficient_history"], true);
     assert_eq!(forecast["history"].as_array().unwrap().len(), 367);
     assert_eq!(
         forecast["history"]
@@ -255,7 +256,9 @@ async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
             .sum::<u64>(),
         1
     );
-    assert_eq!(forecast["points"].as_array().unwrap().len(), 30);
+    assert_eq!(forecast["forecast_start"], serde_json::Value::Null);
+    assert!(forecast["points"].as_array().unwrap().is_empty());
+    assert!(forecast["expected_peaks"].as_array().unwrap().is_empty());
 
     let no_forecast_filters = format!("region_id=R10&topic_id=TOPIC-DIGITAL&{service}&status=OPEN");
     let no_forecast = application

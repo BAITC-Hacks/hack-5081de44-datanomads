@@ -2928,6 +2928,7 @@ impl PgRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(|error| format!("forecast history: {error}"))?;
+        let observed_days = rows.len();
         let mut dates = Vec::with_capacity(rows.len());
         let mut values = Vec::with_capacity(rows.len());
         let mut next_date: Option<NaiveDate> = None;
@@ -2956,7 +2957,16 @@ impl PgRepository {
             values.push(0.0);
             next_date = Some(missing + chrono::Duration::days(1));
         }
-        if values.is_empty() {
+        let history = dates
+            .iter()
+            .zip(values.iter())
+            .map(|(date, value)| TimeSeriesPoint {
+                date: date.clone(),
+                tickets: value.max(0.0).round() as u32,
+                resolved: 0,
+            })
+            .collect::<Vec<_>>();
+        if observed_days < crate::FORECAST_SEASON_LENGTH_DAYS {
             return Ok(ForecastResponse {
                 source: "postgres".to_owned(),
                 model_version: self.forecast_model_version.clone(),
@@ -2964,10 +2974,16 @@ impl PgRepository {
                 status: "INSUFFICIENT_HISTORY".to_owned(),
                 insufficient_history: true,
                 horizon_days,
-                history: Vec::new(),
+                history,
+                forecast_start: None,
                 points: Vec::new(),
                 expected_peaks: Vec::new(),
-                backtest: json!({"sample_count": 0}),
+                backtest: json!({
+                    "status": "INSUFFICIENT_HISTORY",
+                    "sample_count": 0,
+                    "observed_days": observed_days,
+                    "required_days": crate::FORECAST_SEASON_LENGTH_DAYS,
+                }),
             });
         }
         let payload = self
@@ -3005,12 +3021,24 @@ impl PgRepository {
         let insufficient_history = payload
             .get("insufficient_history")
             .and_then(Value::as_bool)
-            .unwrap_or(values.len() < 7);
-        let forecast_values = payload
-            .get("forecast")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+            .unwrap_or(values.len() < crate::FORECAST_SEASON_LENGTH_DAYS)
+            || status == "INSUFFICIENT_HISTORY";
+        let forecast_values = if insufficient_history {
+            Vec::new()
+        } else {
+            let forecast_values = payload
+                .get("forecast")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if forecast_values.len() != horizon_days as usize {
+                return Err(format!(
+                    "forecast service returned {} points for a {horizon_days}-day horizon",
+                    forecast_values.len()
+                ));
+            }
+            forecast_values
+        };
         let start_date = dates
             .last()
             .and_then(|value| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
@@ -3024,15 +3052,6 @@ impl PgRepository {
                 resolved: 0,
             })
             .collect::<Vec<_>>();
-        let history = dates
-            .iter()
-            .zip(values.iter())
-            .map(|(date, value)| TimeSeriesPoint {
-                date: date.clone(),
-                tickets: value.max(0.0).round() as u32,
-                resolved: 0,
-            })
-            .collect::<Vec<_>>();
         let expected_peaks = payload
             .get("expected_peaks")
             .and_then(Value::as_array)
@@ -3041,14 +3060,20 @@ impl PgRepository {
             .filter_map(Value::as_u64)
             .filter_map(|index| points.get(index as usize).map(|point| point.date.clone()))
             .collect::<Vec<_>>();
+        let forecast_start = points.first().map(|point| point.date.clone());
         Ok(ForecastResponse {
             source: "postgres+ml".to_owned(),
             model_version,
             model,
-            status,
+            status: if insufficient_history {
+                "INSUFFICIENT_HISTORY".to_owned()
+            } else {
+                status
+            },
             insufficient_history,
             horizon_days,
             history,
+            forecast_start,
             points,
             expected_peaks,
             backtest: payload

@@ -306,7 +306,12 @@ class ForecastService:
         season_length: int,
         timestamps: list[datetime | str | None] | None = None,
     ) -> ForecastResponse:
-        forecast_values = self._forecast_values(values, horizon, season_length)
+        insufficient = len(values) < season_length
+        forecast_values = (
+            []
+            if insufficient
+            else self._forecast_values(values, horizon, season_length)
+        )
         next_timestamps = self._next_timestamps(timestamps, horizon)
         points = [
             ForecastPoint(index=index, value=value, timestamp=next_timestamps[index])
@@ -314,7 +319,6 @@ class ForecastService:
         ]
         max_value = max(forecast_values) if forecast_values else 0.0
         expected_peaks = [index for index, value in enumerate(forecast_values) if value == max_value and value > 0]
-        insufficient = len(values) < season_length
         return ForecastResponse(
             model_version=self.model_version,
             model="seasonal_naive",

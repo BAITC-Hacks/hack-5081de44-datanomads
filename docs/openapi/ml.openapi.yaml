@@ -931,6 +931,7 @@ components:
           - OK
           - INSUFFICIENT_HISTORY
           title: Status
+          description: INSUFFICIENT_HISTORY is returned without forecast points or expected peaks.
         insufficient_history:
           type: boolean
           title: Insufficient History
@@ -945,6 +946,7 @@ components:
             type: number
           type: array
           title: Forecast
+          description: Seasonal naive values; empty when insufficient_history is true.
         points:
           items:
             $ref: '#/components/schemas/ForecastPoint'
@@ -955,6 +957,7 @@ components:
             type: integer
           type: array
           title: Expected Peaks
+          description: Peak indexes in forecast; empty when insufficient_history is true or all values are zero.
         backtest:
           additionalProperties:
             anyOf:
