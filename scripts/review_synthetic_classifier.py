@@ -166,7 +166,7 @@ def read_reviews(review_path: Path, candidate_path: Path, scenario_path: Path) -
     return reviews
 
 
-def export_approved(review_path: Path, candidate_path: Path, scenario_path: Path, output_path: Path) -> int:
+def approved_records(review_path: Path, candidate_path: Path, scenario_path: Path) -> list[dict]:
     reviews = read_reviews(review_path, candidate_path, scenario_path)
     review_sha = source_checksum(review_path)
     approved = []
@@ -183,6 +183,11 @@ def export_approved(review_path: Path, candidate_path: Path, scenario_path: Path
         })
     if not approved:
         raise ValueError("no human-approved candidates to export")
+    return approved
+
+
+def export_approved(review_path: Path, candidate_path: Path, scenario_path: Path, output_path: Path) -> int:
+    approved = approved_records(review_path, candidate_path, scenario_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8", newline="\n") as stream:
         for row in approved:

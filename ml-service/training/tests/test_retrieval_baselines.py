@@ -7,9 +7,8 @@ import sys
 import tempfile
 import unittest
 
-from training.dataset_builder import build_package
 from training.retrieval_baselines import evaluate_retrieval_baselines, rank_metrics
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class RetrievalBaselineTests(unittest.TestCase):
@@ -36,7 +35,7 @@ class RetrievalBaselineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="retrieval")
-            manifest = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            manifest = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             result = evaluate_retrieval_baselines(root / "dataset_v1")
             self.assertEqual(result["frozen_evaluation_sha256"], manifest.frozen_evaluation_sha256)
             self.assertEqual(result["e5_model_status"], "NOT_RUN")

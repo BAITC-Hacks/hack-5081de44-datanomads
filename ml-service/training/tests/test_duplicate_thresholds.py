@@ -6,9 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from training.dataset_builder import build_package
 from training.duplicate_thresholds import calibrate_duplicate_threshold, evaluate_duplicate_thresholds
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class DuplicateThresholdTests(unittest.TestCase):
@@ -36,7 +35,7 @@ class DuplicateThresholdTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="duplicate")
-            manifest = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            manifest = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             package = root / "dataset_v1"
             model = root / "local_model"
             model.mkdir()

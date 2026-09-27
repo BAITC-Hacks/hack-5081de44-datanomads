@@ -10,9 +10,9 @@ from app.confidence import POLICY_VERSION
 from train_classifier import LABELS
 from training.classifier_baselines import evaluate_baselines, load_verified_classifier_package
 from training.classifier_bundle import MODEL_FILES, build_classifier_bundle, verify_classifier_bundle
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from test_classifier_candidate_eval import StubClassifier
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class ClassifierBundleTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class ClassifierBundleTests(unittest.TestCase):
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3,
                                     prefix="bundle", topic_count=16)
-            dataset = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            dataset = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             package = root / "dataset_v1"
             baseline = root / "baseline.json"
             baseline.write_text(json.dumps(evaluate_baselines(package)), encoding="utf-8")

@@ -4,18 +4,17 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
+from scripts.pulse_sdg import CATALOG, DEFAULT_SEEDS, export_candidates, read_seeds, source_checksum
+from scripts.review_retrieval_relations import CHECKS as RELATION_CHECKS
+from scripts.review_retrieval_relations import export_approved as export_retrieval
+from scripts.review_retrieval_relations import prepare as prepare_retrieval
+from scripts.review_synthetic_classifier import CHECKS as CLASSIFIER_CHECKS
+from scripts.review_synthetic_classifier import export_approved as export_classifier
+from scripts.review_synthetic_classifier import prepare as prepare_classifier
 from training.dataset_builder import build_package, checksum
-
-
-REVIEW = {
-    "synthetic": True,
-    "review_status": "APPROVED",
-    "reviewer_id": "reviewer_test",
-    "reviewed_at": "2026-09-27T12:00:00Z",
-    "review_evidence_sha256": "sha256:" + "b" * 64,
-}
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -23,38 +22,77 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def fixture_inputs(root: Path, *, groups_per_topic: int, retrieval_groups: int, prefix: str,
-                   topic_count: int = 10) -> tuple[Path, Path, Path, Path, list[dict], list[dict]]:
+                   topic_count: int = 10, include_repeat: bool = False) -> tuple:
     scenario_source = root / f"{prefix}_scenarios.jsonl"
     relation_source = root / f"{prefix}_relations.jsonl"
-    scenario_source.write_text(f"synthetic scenario source {prefix}\n", encoding="utf-8")
-    relation_source.write_text(f"synthetic relation source {prefix}\n", encoding="utf-8")
-    classifier = []
-    for topic in sorted(topic["id"] for topic in TOPIC_DEFINITIONS)[:topic_count]:
+    catalog_path = root / f"{prefix}_test_catalog.json"
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    # The customer catalog has no telecom proposal; test it through a temporary
+    # synthetic catalog entry without changing production source evidence.
+    catalog["pairs"].append({
+        "source_category": "TEST_SYNTHETIC_TELECOM",
+        "source_service": "TEST_SYNTHETIC_TELECOM",
+        "suggested_topic_id": "telecom",
+        "suggested_subtopic_id": "test_telecom",
+        "proposal_status": "CANDIDATE",
+    })
+    catalog_path.write_text(json.dumps(catalog, ensure_ascii=False), encoding="utf-8")
+    seed_by_topic = {}
+    for seed in read_seeds(DEFAULT_SEEDS).values():
+        seed_by_topic.setdefault(seed["topic_id"], seed)
+    for pair in catalog["pairs"]:
+        topic = pair.get("suggested_topic_id")
+        if (pair.get("proposal_status") == "CANDIDATE" and pair.get("suggested_subtopic_id") and
+                topic and topic not in seed_by_topic):
+            seed_by_topic[topic] = {
+                "scenario_id": f"test_{topic}", "topic_id": topic,
+                "subtopic_id": pair["suggested_subtopic_id"],
+                "source_category": pair["source_category"],
+                "source_service": pair["source_service"],
+                "facts_ru": f"На объекте наблюдается неисправность, сценарий {topic}.",
+            }
+    if topic_count == len(TOPIC_DEFINITIONS):
+        assert set(seed_by_topic) == {topic["id"] for topic in TOPIC_DEFINITIONS}
+    scenarios = []
+    candidate_rows = []
+    for topic in sorted(seed_by_topic)[:topic_count]:
         for index in range(groups_per_topic):
             scenario_id = f"{prefix}_{topic}_{index}"
+            seed = {**seed_by_topic[topic], "scenario_id": scenario_id}
+            scenarios.append(seed)
             for language in ("RU", "KZ", "MIXED"):
-                classifier.append({
-                    **REVIEW,
-                    "variant_id": f"{scenario_id}_{language.lower()}",
-                    "scenario_id": scenario_id,
-                    "split_group": scenario_id,
+                candidate_rows.append({
+                    **seed,
                     "language": language,
                     "style": ("short", "conversational", "neutral")[index % 3],
-                    "text": f"{'Проблема' if language == 'RU' else 'Мәселе'} {prefix} {topic} {index} {language}",
-                    "topic_id": topic,
-                    "subtopic_id": None,
-                    "region_id": None,
-                    "generator_model": "local_fixture",
-                    "prompt_version": "v1",
-                    "generator_seed": 109,
-                    "source_scenario_sha256": checksum(scenario_source),
+                    "appeal_text": f"{seed['facts_ru']} {prefix} {index} {language}.",
                 })
+    write_jsonl(scenario_source, scenarios)
+    classifier_candidates = root / f"{prefix}_candidates.jsonl"
+    export_candidates(candidate_rows, {seed["scenario_id"]: seed for seed in scenarios},
+                      classifier_candidates, "local_fixture", source_checksum(scenario_source), 109)
+    classifier_review = root / f"{prefix}_classifier_review.jsonl"
+    with patch("scripts.pulse_sdg.CATALOG", catalog_path):
+        prepare_classifier(classifier_candidates, scenario_source, classifier_review)
+    reviews = [json.loads(line) for line in classifier_review.read_text(encoding="utf-8").splitlines()]
+    for row in reviews:
+        row.update({"decision": "APPROVED", "reviewer_id": "reviewer_test",
+                    "reviewed_at": "2026-09-27T12:00:00Z", "review_reason": "VERIFIED",
+                    "checks": {check: True for check in CLASSIFIER_CHECKS}})
+    write_jsonl(classifier_review, reviews)
+    classifier_path = root / f"{prefix}_classifier.jsonl"
+    with patch("scripts.pulse_sdg.CATALOG", catalog_path):
+        export_classifier(classifier_review, classifier_candidates, scenario_source, classifier_path)
+
     retrieval = []
+    relation_labels = {}
     for index in range(retrieval_groups):
         group = f"{prefix}_relation_{index}"
-        for label in ("DUPLICATE", "SIMILAR_BUT_NOT_DUPLICATE", "UNRELATED"):
-            retrieval.append({
-                **REVIEW,
+        labels = ["DUPLICATE", "SIMILAR_BUT_NOT_DUPLICATE", "UNRELATED"]
+        if include_repeat:
+            labels.append("REPEAT")
+        for label in labels:
+            source_row = {
                 "pair_id": f"{group}_{label.lower()}",
                 "relation_group": group,
                 "query_id": f"{group}_query",
@@ -63,14 +101,41 @@ def fixture_inputs(root: Path, *, groups_per_topic: int, retrieval_groups: int, 
                 "candidate_text": f"Проверка {prefix} {index} {label}",
                 "query_language": "RU",
                 "candidate_language": "RU",
-                "relation_label": label,
-                "source_relation_sha256": checksum(relation_source),
-            })
-    classifier_path = root / f"{prefix}_classifier.jsonl"
+                "query_context": f"Контекст обращения {prefix} {index}",
+                "candidate_context": f"Контекст проверки {prefix} {index} {label}",
+                "synthetic": True,
+            }
+            retrieval.append(source_row)
+            relation_labels[source_row["pair_id"]] = label
+    write_jsonl(relation_source, retrieval)
+    retrieval_review = root / f"{prefix}_retrieval_review.jsonl"
+    prepare_retrieval(relation_source, retrieval_review)
+    reviews = [json.loads(line) for line in retrieval_review.read_text(encoding="utf-8").splitlines()]
+    for row in reviews:
+        label = relation_labels[row["source"]["pair_id"]]
+        same = label == "DUPLICATE"
+        repeat = label == "REPEAT"
+        row.update({"decision": "APPROVED", "relation_label": label,
+                    "reviewer_id": "reviewer_test", "reviewed_at": "2026-09-27T12:00:00Z",
+                    "review_reason": "VERIFIED", "checks": {check: True for check in RELATION_CHECKS},
+                    "same_region": True, "same_object": same or repeat, "same_issue": same or repeat,
+                    "same_episode": same, "prior_episode_resolved": repeat})
+    write_jsonl(retrieval_review, reviews)
     retrieval_path = root / f"{prefix}_retrieval.jsonl"
-    write_jsonl(classifier_path, classifier)
-    write_jsonl(retrieval_path, retrieval)
-    return classifier_path, retrieval_path, scenario_source, relation_source, classifier, retrieval
+    export_retrieval(retrieval_review, relation_source, retrieval_path)
+    classifier = [json.loads(line) for line in classifier_path.read_text(encoding="utf-8").splitlines()]
+    approved_retrieval = [json.loads(line) for line in retrieval_path.read_text(encoding="utf-8").splitlines()]
+    return (classifier_path, retrieval_path, scenario_source, relation_source,
+            classifier, approved_retrieval, classifier_candidates, classifier_review, retrieval_review,
+            catalog_path)
+
+
+def build_fixture_package(inputs: tuple, output_root: Path, dataset_version: str,
+                          frozen_evaluation_version: str, seed: int, *, frozen_from: Path | None = None):
+    with patch("scripts.pulse_sdg.CATALOG", inputs[9]):
+        return build_package(*inputs[:4], output_root, dataset_version, frozen_evaluation_version, seed,
+                             classifier_candidates=inputs[6], classifier_review=inputs[7],
+                             retrieval_review=inputs[8], frozen_from=frozen_from)
 
 
 class DatasetBuilderTests(unittest.TestCase):
@@ -78,8 +143,8 @@ class DatasetBuilderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="initial")
-            first = build_package(*inputs[:4], root / "one", "dataset_v1", "eval_v1", 109)
-            second = build_package(*inputs[:4], root / "two", "dataset_v1", "eval_v1", 109)
+            first = build_fixture_package(inputs, root / "one", "dataset_v1", "eval_v1", 109)
+            second = build_fixture_package(inputs, root / "two", "dataset_v1", "eval_v1", 109)
             self.assertEqual(first.content_sha256, second.content_sha256)
             self.assertEqual(first.split_file_checksums, second.split_file_checksums)
             self.assertEqual(first.membership_sha256, second.membership_sha256)
@@ -92,32 +157,29 @@ class DatasetBuilderTests(unittest.TestCase):
                 groups = [set(membership[task][split]) for split in ("train", "validation", "test")]
                 self.assertFalse(groups[0] & groups[1] or groups[0] & groups[2] or groups[1] & groups[2])
             with self.assertRaises(FileExistsError):
-                build_package(*inputs[:4], root / "one", "dataset_v1", "eval_v1", 109)
+                build_fixture_package(inputs, root / "one", "dataset_v1", "eval_v1", 109)
             fresh = fixture_inputs(root / "one", groups_per_topic=3, retrieval_groups=3, prefix="fresh")
             with self.assertRaisesRegex(ValueError, "frozen evaluation version already exists"):
-                build_package(*fresh[:4], root / "one", "dataset_v2", "eval_v1", 109)
+                build_fixture_package(fresh, root / "one", "dataset_v2", "eval_v1", 109)
             self.assertFalse((root / "one/dataset_v2").exists())
 
     def test_candidate_excludes_frozen_ids_groups_and_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             initial = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="initial")
-            build_package(*initial[:4], root, "dataset_v1", "eval_v1", 109)
+            build_fixture_package(initial, root, "dataset_v1", "eval_v1", 109)
             frozen_package = root / "dataset_v1"
             candidate = fixture_inputs(root, groups_per_topic=2, retrieval_groups=2, prefix="candidate")
-            manifest = build_package(*candidate[:4], root, "dataset_v2", "eval_v1", 109, frozen_from=frozen_package)
+            manifest = build_fixture_package(candidate, root, "dataset_v2", "eval_v1", 109, frozen_from=frozen_package)
             self.assertEqual(manifest.lineage["parent_dataset_version"], "dataset_v1")
             for relative in ("classifier/test.jsonl", "retrieval/test_pairs.jsonl", "frozen_evaluation.json"):
                 self.assertEqual((frozen_package / relative).read_bytes(), (root / "dataset_v2" / relative).read_bytes())
-            candidate[4][0]["scenario_id"] = json.loads((frozen_package / "frozen_evaluation.json").read_text())["classifier_groups"][0]
-            candidate[4][0]["split_group"] = candidate[4][0]["scenario_id"]
-            write_jsonl(candidate[0], candidate[4])
             with self.assertRaisesRegex(ValueError, "overlaps frozen"):
-                build_package(*candidate[:4], root, "dataset_v3", "eval_v1", 109, frozen_from=frozen_package)
+                build_fixture_package(initial, root, "dataset_v3", "eval_v1", 109, frozen_from=frozen_package)
             self.assertFalse((root / "dataset_v3").exists())
             (frozen_package / "classifier/test.jsonl").write_text("tampered\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "test file checksum mismatch"):
-                build_package(*candidate[:4], root, "dataset_v4", "eval_v1", 109, frozen_from=frozen_package)
+                build_fixture_package(candidate, root, "dataset_v4", "eval_v1", 109, frozen_from=frozen_package)
             self.assertFalse((root / "dataset_v4").exists())
 
     def test_pending_or_wrong_provenance_cannot_build(self) -> None:
@@ -127,30 +189,49 @@ class DatasetBuilderTests(unittest.TestCase):
             inputs[4][0]["review_status"] = "PENDING"
             write_jsonl(inputs[0], inputs[4])
             with self.assertRaisesRegex(ValueError, "unapproved"):
-                build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+                build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             self.assertFalse((root / "dataset_v1").exists())
             inputs[4][0]["review_status"] = "APPROVED"
             inputs[4][0]["source_scenario_sha256"] = "sha256:" + "c" * 64
             write_jsonl(inputs[0], inputs[4])
-            with self.assertRaisesRegex(ValueError, "provenance checksum"):
-                build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            with self.assertRaisesRegex(ValueError, "approved review records"):
+                build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             self.assertFalse((root / "dataset_v1").exists())
             inputs[4][0]["source_scenario_sha256"] = checksum(inputs[2])
             inputs[4][0]["text"] = "ИИН 000000000000"
             write_jsonl(inputs[0], inputs[4])
             with self.assertRaisesRegex(ValueError, "invalid or unapproved"):
-                build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+                build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             self.assertFalse((root / "dataset_v1").exists())
 
-    def test_relation_entity_cannot_belong_to_two_groups(self) -> None:
+    def test_changed_retrieval_export_cannot_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="relation")
             inputs[5][3]["query_id"] = inputs[5][0]["query_id"]
             inputs[5][3]["query_text"] = inputs[5][0]["query_text"]
             write_jsonl(inputs[1], inputs[5])
-            with self.assertRaisesRegex(ValueError, "multiple relation groups"):
-                build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            with self.assertRaisesRegex(ValueError, "approved review records"):
+                build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
+            self.assertFalse((root / "dataset_v1").exists())
+
+    def test_changed_review_queue_or_forged_approval_cannot_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="evidence")
+            classifier = inputs[4]
+            classifier[0]["review_evidence_sha256"] = "sha256:" + "f" * 64
+            write_jsonl(inputs[0], classifier)
+            with self.assertRaisesRegex(ValueError, "approved review records"):
+                build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
+            classifier[0]["review_evidence_sha256"] = checksum(inputs[7])
+            write_jsonl(inputs[0], classifier)
+
+            review_rows = [json.loads(line) for line in inputs[7].read_text(encoding="utf-8").splitlines()]
+            review_rows[0]["checks"]["facts_preserved"] = False
+            write_jsonl(inputs[7], review_rows)
+            with self.assertRaisesRegex(ValueError, "every human check"):
+                build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             self.assertFalse((root / "dataset_v1").exists())
 
 

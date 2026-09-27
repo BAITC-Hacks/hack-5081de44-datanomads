@@ -9,10 +9,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from training.feedback_dataset import load_verified_candidate
 from training.feedback_job import FeedbackJobError, train_classifier_job
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 from test_feedback_export import feedback_row, link
 
 
@@ -49,7 +49,7 @@ class FeedbackJobTests(unittest.TestCase):
             base = Path(directory)
             inputs = fixture_inputs(base, groups_per_topic=3, retrieval_groups=3,
                                     prefix="feedbackjob", topic_count=16)
-            dataset = build_package(*inputs[:4], base / "frozen-root", "reviewed_v1", "eval_v1", 109)
+            dataset = build_fixture_package(inputs, base / "frozen-root", "reviewed_v1", "eval_v1", 109)
             frozen = base / "frozen-root/reviewed_v1"
             production = base / "production"
             production.mkdir()

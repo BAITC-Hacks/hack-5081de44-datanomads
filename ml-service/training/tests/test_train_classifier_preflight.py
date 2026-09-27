@@ -10,8 +10,7 @@ import torch
 
 from train_classifier import LABELS, calibration_report, load_reviewed_splits, score
 from training.classifier_token_audit import audit_token_lengths
-from training.dataset_builder import build_package
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class StubTokenizer:
@@ -41,7 +40,7 @@ class TrainClassifierPreflightTests(unittest.TestCase):
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3,
                                     prefix="trainer", topic_count=len(LABELS))
-            manifest = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            manifest = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             package = root / "dataset_v1"
             base_model = root / "base-model"
             base_model.mkdir()
@@ -72,7 +71,7 @@ class TrainClassifierPreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="subset")
-            build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             (root / "model.safetensors").write_bytes(b"test base weights")
             with self.assertRaisesRegex(ValueError, "all canonical runtime labels"):
                 load_reviewed_splits(root / "dataset_v1", root / "missing-audit.json", root, 384)

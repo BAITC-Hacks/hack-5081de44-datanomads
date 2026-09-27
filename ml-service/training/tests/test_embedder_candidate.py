@@ -10,10 +10,10 @@ import unittest
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, XLMRobertaConfig, XLMRobertaModel
 
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from training.embedder_candidate import train_embedder_candidate, verify_embedder_candidate
 from training.retrieval_baselines import evaluate_retrieval_baselines
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class EmbedderCandidateTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class EmbedderCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="embedder")
-            dataset = build_package(*inputs[:4], root / "packages", "dataset_v1", "eval_v1", 109)
+            dataset = build_fixture_package(inputs, root / "packages", "dataset_v1", "eval_v1", 109)
             package = root / "packages/dataset_v1"
 
             base = root / "local_base"

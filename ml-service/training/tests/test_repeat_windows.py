@@ -5,9 +5,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from training.repeat_windows import evaluate_repeat_windows
-from test_dataset_builder import fixture_inputs, write_jsonl
+from test_dataset_builder import build_fixture_package, fixture_inputs, write_jsonl
 
 
 class RepeatWindowTests(unittest.TestCase):
@@ -15,19 +15,9 @@ class RepeatWindowTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        inputs = fixture_inputs(self.root, groups_per_topic=3, retrieval_groups=3, prefix="repeat")
-        retrieval = inputs[5]
-        for index in range(3):
-            group = f"repeat_relation_{index}"
-            retrieval.append({
-                **next(row for row in retrieval if row["relation_group"] == group),
-                "pair_id": f"{group}_repeat",
-                "candidate_id": f"{group}_repeat_candidate",
-                "candidate_text": f"Повторное обращение {group}",
-                "relation_label": "REPEAT",
-            })
-        write_jsonl(inputs[1], retrieval)
-        build_package(*inputs[:4], self.root, "dataset_v1", "eval_v1", 109)
+        inputs = fixture_inputs(self.root, groups_per_topic=3, retrieval_groups=3,
+                                prefix="repeat", include_repeat=True)
+        build_fixture_package(inputs, self.root, "dataset_v1", "eval_v1", 109)
         self.package = self.root / "dataset_v1"
         self.source_path = self.root / "temporal_source.jsonl"
         self.evidence_path = self.root / "temporal.jsonl"

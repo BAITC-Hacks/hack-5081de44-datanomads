@@ -8,8 +8,7 @@ import tempfile
 import unittest
 
 from training.classifier_baselines import evaluate_baselines
-from training.dataset_builder import build_package
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class ClassifierBaselineTests(unittest.TestCase):
@@ -17,7 +16,7 @@ class ClassifierBaselineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="baseline")
-            manifest = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            manifest = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             package = root / "dataset_v1"
             first = evaluate_baselines(package)
             self.assertEqual(first, evaluate_baselines(package))

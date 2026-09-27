@@ -33,7 +33,12 @@ Retrieval rows must carry a `relation_group`, query/candidate IDs and texts,
 one of `DUPLICATE`, `SIMILAR_BUT_NOT_DUPLICATE`, `UNRELATED` or `REPEAT`, source
 checksum and the same review provenance. Both inputs require
 `review_status=APPROVED`, reviewer ID, aware timestamp and a SHA-256 evidence
-reference. `PENDING` demo candidates are rejected.
+reference. The builder also requires the original classifier candidates and
+both complete review queues. It reruns the existing review validators and
+requires each approved input row to match an approved review decision exactly.
+Their checksums are stored in the dataset manifest. This links the package to
+review evidence; reviewer identity and the fact of human review still require
+the normal organizational approval process. `PENDING` demo candidates are rejected.
 
 The synthetic retrieval pilot source and its manual review/export workflow are
 documented in [`docs/retrieval-gold-pilot.md`](../../docs/retrieval-gold-pilot.md).
@@ -44,7 +49,10 @@ labels yet and is insufficient for quality claims.
 ```bash
 .venv/bin/python scripts/build_training_dataset.py \
   --classifier /path/to/reviewed_classifier.jsonl \
+  --classifier-candidates /path/to/pending_classifier_candidates.jsonl \
+  --classifier-review /path/to/classifier_review.jsonl \
   --retrieval /path/to/reviewed_relations.jsonl \
+  --retrieval-review /path/to/retrieval_review.jsonl \
   --scenario-source /path/to/versioned_scenarios.jsonl \
   --relation-source /path/to/versioned_relation_evidence.jsonl \
   --dataset-version reviewed-v1 --frozen-evaluation-version eval-v1
@@ -63,7 +71,10 @@ or exact text:
 ```bash
 .venv/bin/python scripts/build_training_dataset.py \
   --classifier /path/to/new_reviewed_classifier.jsonl \
+  --classifier-candidates /path/to/new_pending_classifier_candidates.jsonl \
+  --classifier-review /path/to/new_classifier_review.jsonl \
   --retrieval /path/to/new_reviewed_relations.jsonl \
+  --retrieval-review /path/to/new_retrieval_review.jsonl \
   --scenario-source /path/to/new_versioned_scenarios.jsonl \
   --relation-source /path/to/new_versioned_relation_evidence.jsonl \
   --dataset-version reviewed-v2 --frozen-evaluation-version eval-v1 \

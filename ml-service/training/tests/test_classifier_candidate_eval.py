@@ -11,8 +11,7 @@ import torch
 
 from training.classifier_baselines import evaluate_baselines, load_verified_classifier_package
 from training.classifier_candidate_eval import evaluate_candidate
-from training.dataset_builder import build_package
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class StubClassifier:
@@ -31,7 +30,7 @@ class ClassifierCandidateEvaluationTests(unittest.TestCase):
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3,
                                     prefix="evaluation", topic_count=16)
-            dataset = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            dataset = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             package = root / "dataset_v1"
             baseline_path = root / "baseline.json"
             baseline_path.write_text(json.dumps(evaluate_baselines(package)), encoding="utf-8")

@@ -6,9 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from training.feedback_dataset import build_candidate, load_verified_candidate
-from training.tests.test_dataset_builder import fixture_inputs
+from training.tests.test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 BASE = {
@@ -62,7 +62,7 @@ class FeedbackCandidateTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.frozen_root = self.root / "frozen"
         inputs = fixture_inputs(self.root, groups_per_topic=3, retrieval_groups=3, prefix="initial")
-        build_package(*inputs[:4], self.frozen_root, "reviewed_v1", "eval_v1", 109)
+        build_fixture_package(inputs, self.frozen_root, "reviewed_v1", "eval_v1", 109)
         self.frozen = self.frozen_root / "reviewed_v1"
         self.input = self.root / "feedback.jsonl"
 

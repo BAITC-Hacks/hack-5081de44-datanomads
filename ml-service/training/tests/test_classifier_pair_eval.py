@@ -11,9 +11,9 @@ import torch
 
 from training.classifier_baselines import load_verified_classifier_package
 from training.classifier_pair_eval import compare_classifiers
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from test_classifier_candidate_eval import StubClassifier
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 
 
 class ClassifierPairEvaluationTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class ClassifierPairEvaluationTests(unittest.TestCase):
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3,
                                     prefix="pair", topic_count=16)
-            dataset = build_package(*inputs[:4], root, "dataset_v1", "eval_v1", 109)
+            dataset = build_fixture_package(inputs, root, "dataset_v1", "eval_v1", 109)
             package = root / "dataset_v1"
             _, splits = load_verified_classifier_package(package)
             labels = sorted(dataset.topics)

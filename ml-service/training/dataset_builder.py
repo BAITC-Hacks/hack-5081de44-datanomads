@@ -15,6 +15,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationErro
 
 from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
+from scripts.review_retrieval_relations import approved_records as approved_retrieval_records
+from scripts.review_synthetic_classifier import approved_records as approved_classifier_records
 from training.contracts import DatasetManifest
 
 
@@ -231,15 +233,34 @@ def _load_frozen(package: Path, expected_version: str) -> tuple[dict, dict[str, 
     return frozen, files, manifest
 
 
+def _verify_reviewed_records(rows: list, approved: list[dict], record_type: type, id_field: str) -> None:
+    by_id = {getattr(row, id_field): row for row in rows}
+    if len(by_id) != len(rows) or len(approved) != len(rows):
+        raise ValueError("reviewed input does not match approved review records")
+    for record in approved:
+        expected = record_type.model_validate_json(json.dumps(record, ensure_ascii=False))
+        if by_id.get(getattr(expected, id_field)) != expected:
+            raise ValueError("reviewed input does not match approved review records")
+
+
 def build_package(
     classifier_path: Path, retrieval_path: Path, scenario_source: Path, relation_source: Path,
     output_root: Path, dataset_version: str,
-    frozen_evaluation_version: str, seed: int, *, frozen_from: Path | None = None,
+    frozen_evaluation_version: str, seed: int, *, classifier_candidates: Path,
+    classifier_review: Path, retrieval_review: Path, frozen_from: Path | None = None,
 ) -> DatasetManifest:
     if not VERSION_RE.fullmatch(dataset_version) or not VERSION_RE.fullmatch(frozen_evaluation_version) or seed < 0:
         raise ValueError("invalid dataset version, frozen version or seed")
     classifier = read_jsonl(classifier_path, ClassifierRecord)
     retrieval = read_jsonl(retrieval_path, RetrievalPair)
+    _verify_reviewed_records(
+        classifier, approved_classifier_records(classifier_review, classifier_candidates, scenario_source),
+        ClassifierRecord, "variant_id",
+    )
+    _verify_reviewed_records(
+        retrieval, approved_retrieval_records(retrieval_review, relation_source),
+        RetrievalPair, "pair_id",
+    )
     scenario_checksum = checksum(scenario_source)
     relation_checksum = checksum(relation_source)
     if (any(row.source_scenario_sha256 != scenario_checksum for row in classifier) or
@@ -354,7 +375,10 @@ def build_package(
     audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     sources = {
         "classifier_reviewed": checksum(classifier_path),
+        "classifier_candidates": checksum(classifier_candidates),
+        "classifier_review": checksum(classifier_review),
         "retrieval_reviewed": checksum(retrieval_path),
+        "retrieval_review": checksum(retrieval_review),
         "scenario_source": scenario_checksum,
         "relation_source": relation_checksum,
     }

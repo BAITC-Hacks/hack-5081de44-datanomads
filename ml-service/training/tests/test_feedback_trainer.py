@@ -13,10 +13,10 @@ from transformers import AutoTokenizer, XLMRobertaConfig, XLMRobertaForSequenceC
 from app.trained_classifier import TrainedClassifierService
 from train_classifier import LABELS
 from training.classifier_pair_eval import compare_classifiers
-from training.dataset_builder import build_package, checksum
+from training.dataset_builder import checksum
 from training.feedback_dataset import build_candidate
 from training.feedback_trainer import CandidateTrainingError, train_feedback_candidate
-from test_dataset_builder import fixture_inputs
+from test_dataset_builder import build_fixture_package, fixture_inputs
 from test_feedback_dataset import feedback, write_jsonl
 
 
@@ -26,7 +26,7 @@ class FeedbackTrainerTests(unittest.TestCase):
             root = Path(directory)
             inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3,
                                     prefix="feedback-train", topic_count=16)
-            build_package(*inputs[:4], root / "frozen", "reviewed_v1", "eval_v1", 109)
+            build_fixture_package(inputs, root / "frozen", "reviewed_v1", "eval_v1", 109)
             frozen = root / "frozen/reviewed_v1"
             feedback_path = root / "feedback.jsonl"
             write_jsonl(feedback_path, [feedback(1), feedback(2)])

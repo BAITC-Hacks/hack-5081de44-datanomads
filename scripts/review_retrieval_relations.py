@@ -196,7 +196,7 @@ def read_reviews(review_path: Path, source_path: Path) -> list[dict]:
     return reviews
 
 
-def export_approved(review_path: Path, source_path: Path, output_path: Path) -> int:
+def approved_records(review_path: Path, source_path: Path) -> list[dict]:
     reviews = read_reviews(review_path, source_path)
     if not any(row["decision"] == "APPROVED" for row in reviews):
         raise ValueError("no human-approved retrieval pairs to export")
@@ -232,6 +232,11 @@ def export_approved(review_path: Path, source_path: Path, output_path: Path) -> 
         raise ValueError("approved retrieval query needs at least two reviewed candidates")
     if not REQUIRED_LABELS.issubset({row["relation_label"] for row in approved}):
         raise ValueError("approved retrieval source lacks required relation labels")
+    return approved
+
+
+def export_approved(review_path: Path, source_path: Path, output_path: Path) -> int:
+    approved = approved_records(review_path, source_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("x", encoding="utf-8", newline="\n") as stream:
         for row in approved:

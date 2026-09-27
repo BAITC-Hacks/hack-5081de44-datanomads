@@ -19,7 +19,10 @@ from training.dataset_builder import build_package
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--classifier", type=Path, required=True, help="approved classifier JSONL")
+    parser.add_argument("--classifier-candidates", type=Path, required=True, help="original pending classifier candidates JSONL")
+    parser.add_argument("--classifier-review", type=Path, required=True, help="complete classifier review queue JSONL")
     parser.add_argument("--retrieval", type=Path, required=True, help="approved relation-pair JSONL")
+    parser.add_argument("--retrieval-review", type=Path, required=True, help="complete relation review queue JSONL")
     parser.add_argument("--scenario-source", type=Path, required=True, help="versioned source scenarios")
     parser.add_argument("--relation-source", type=Path, required=True, help="versioned relation evidence")
     parser.add_argument("--dataset-version", required=True)
@@ -32,7 +35,11 @@ def main() -> int:
         manifest = build_package(
             args.classifier, args.retrieval, args.scenario_source, args.relation_source,
             args.output_root, args.dataset_version,
-            args.frozen_evaluation_version, args.seed, frozen_from=args.frozen_from,
+            args.frozen_evaluation_version, args.seed,
+            classifier_candidates=args.classifier_candidates,
+            classifier_review=args.classifier_review,
+            retrieval_review=args.retrieval_review,
+            frozen_from=args.frozen_from,
         )
     except (OSError, ValueError, KeyError, TypeError) as error:
         message = str(error) if type(error) is ValueError else "dataset build failed validation or file access"
