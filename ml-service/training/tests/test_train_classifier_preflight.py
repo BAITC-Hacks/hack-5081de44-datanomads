@@ -34,6 +34,7 @@ class TrainClassifierPreflightTests(unittest.TestCase):
         report = calibration_report(logits, labels, rows, 1.0)
         self.assertEqual(set(report["by_language"]), {"RU", "KZ", "MIXED"})
         self.assertEqual(report["accuracy"], 1.0)
+        self.assertGreaterEqual(report["ece_10_bins"], 0.0)
 
     def test_requires_matching_reviewed_package_and_token_audit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

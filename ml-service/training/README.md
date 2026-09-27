@@ -133,6 +133,22 @@ GPU memory, inference latency and the 384/512/head+tail quality comparison must
 still be measured on the reviewed corpus. A failed run leaves no final artifact
 directory, and successful artifacts are not promoted automatically.
 
+Temperature and a candidate confidence threshold are selected on validation
+before the frozen test is evaluated. Policy `classifier-uncertainty.v1` requires
+at least 90% precision among at least 30 selected examples, including at least
+10 RU and 10 KZ examples; otherwise the candidate threshold is 1.0. Scores
+below 0.55 are `LOW_CONFIDENCE`. Synthetic holdout evidence always disables
+`CONFIDENT`, and every prediction still requires operator review. Validation
+and test reports include NLL, 10-bin ECE, language slices and state coverage.
+Unknown/ambiguous challenge examples and real-citizen calibration remain
+unverified.
+
+The pinned Transformers version can emit a misleading Mistral-regex warning
+when loading a local non-Mistral XLM-R tokenizer; this is tracked in the
+[Transformers issue](https://github.com/huggingface/transformers/issues/42591).
+Do not set `fix_mistral_regex=True` for this XLM-R artifact: it changes the
+token IDs used by its existing synthetic model.
+
 ## Retrieval baselines
 
 Evaluate relation groups from the same reviewed package:

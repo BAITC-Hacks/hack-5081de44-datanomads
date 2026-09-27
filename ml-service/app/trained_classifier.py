@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from .confidence import ConfidencePolicy
 from .constants import TOPIC_BY_ID
 from .schemas import Alternative, Classification, ModelMetadata
 from .services import detect_language
@@ -31,6 +32,7 @@ class TrainedClassifierService:
         self.temperature = float(self.metadata.training_config["temperature"])
         if self.temperature < 1.0:
             raise ValueError("classifier temperature must be at least 1")
+        self.confidence_policy = ConfidencePolicy.from_metadata(self.metadata)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_dir, local_files_only=True).to(self.device).eval()
@@ -47,8 +49,9 @@ class TrainedClassifierService:
         values, indices = probabilities.topk(min(top_k, len(self.metadata.labels)))
         winner_id = self.metadata.labels[indices[0].item()]
         confidence = values[0].item()
-        # Synthetic validation cannot justify skipping operator review.
-        state = "UNCERTAIN" if confidence >= 0.55 else "LOW_CONFIDENCE"
+        state = self.confidence_policy.state(confidence)
+        if state == "UNCERTAIN":
+            values, indices = values[:2], indices[:2]
         alternatives = []
         for value, index in zip(values.tolist(), indices.tolist()):
             topic_id = self.metadata.labels[index]

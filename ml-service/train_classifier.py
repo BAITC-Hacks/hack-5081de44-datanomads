@@ -22,6 +22,7 @@ from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from app.constants import TOPICS
+from app.confidence import ConfidencePolicy, POLICY_VERSION
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum as file_checksum
 
@@ -167,10 +168,22 @@ def fit_temperature(logits: torch.Tensor, labels: torch.Tensor) -> float:
 
 def calibration_metrics(logits: torch.Tensor, labels: torch.Tensor, temperature: float) -> dict:
     probabilities = torch.softmax(logits / temperature, dim=-1)
+    confidence, predicted = probabilities.max(dim=-1)
+    correct = (predicted == labels).float()
+    bins = torch.clamp((confidence * 10).long(), max=9)
+    expected_calibration_error = 0.0
+    for index in range(10):
+        selected = bins == index
+        if selected.any():
+            expected_calibration_error += (
+                (confidence[selected].mean() - correct[selected].mean()).abs()
+                * selected.float().mean()
+            ).item()
     return {
         "nll": round(torch.nn.functional.cross_entropy(logits / temperature, labels).item(), 6),
-        "mean_confidence": round(probabilities.max(dim=-1).values.mean().item(), 6),
-        "accuracy": round((probabilities.argmax(dim=-1) == labels).float().mean().item(), 6),
+        "mean_confidence": round(confidence.mean().item(), 6),
+        "accuracy": round(correct.mean().item(), 6),
+        "ece_10_bins": round(expected_calibration_error, 6),
     }
 
 
@@ -182,6 +195,75 @@ def calibration_report(logits: torch.Tensor, labels: torch.Tensor, rows: list[di
         if indices:
             result["by_language"][language] = calibration_metrics(logits[indices], labels[indices], temperature)
     return result
+
+
+@torch.inference_mode()
+def select_confidence_policy(
+    logits: torch.Tensor, labels: torch.Tensor, rows: list[dict], temperature: float,
+) -> tuple[ConfidencePolicy, dict]:
+    probabilities = torch.softmax(logits / temperature, dim=-1)
+    confidence, predicted = probabilities.max(dim=-1)
+    correct = (predicted == labels).tolist()
+    scores = confidence.tolist()
+    selected_evidence = None
+    for percent in range(55, 101):
+        threshold = percent / 100
+        selected = [index for index, value in enumerate(scores) if value >= threshold]
+        if len(selected) < 30 or sum(correct[index] for index in selected) / len(selected) < 0.9:
+            continue
+        slices = {}
+        for language in ("RU", "KZ"):
+            indices = [index for index in selected if rows[index]["language"] == language]
+            if len(indices) < 10:
+                break
+            precision = sum(correct[index] for index in indices) / len(indices)
+            if precision < 0.9:
+                break
+            slices[language] = {"support": len(indices), "precision": round(precision, 6)}
+        if len(slices) == 2:
+            selected_evidence = {
+                "threshold": threshold,
+                "support": len(selected),
+                "precision": round(sum(correct[index] for index in selected) / len(selected), 6),
+                "by_language": slices,
+            }
+            break
+    policy = ConfidencePolicy(
+        low_confidence_below=0.55,
+        confident_at_or_above=selected_evidence["threshold"] if selected_evidence else 1.0,
+        confident_enabled=False,
+    )
+    return policy, {
+        "policy_version": POLICY_VERSION,
+        "candidate_selection": "validation precision >= 0.90 with >= 30 total and >= 10 RU/KZ each",
+        "candidate": selected_evidence,
+        "confident_disabled_reason": "SYNTHETIC_HOLDOUT_ONLY",
+    }
+
+
+@torch.inference_mode()
+def confidence_state_report(logits: torch.Tensor, rows: list[dict], temperature: float,
+                            policy: ConfidencePolicy) -> dict:
+    confidence = torch.softmax(logits / temperature, dim=-1).max(dim=-1).values.tolist()
+    states = [policy.state(value) for value in confidence]
+
+    def summarize(indices: list[int]) -> dict:
+        counts = {state: sum(states[index] == state for index in indices)
+                  for state in ("CONFIDENT", "UNCERTAIN", "LOW_CONFIDENCE")}
+        return {
+            "sample_count": len(indices),
+            "state_counts": counts,
+            "confident_coverage": round(counts["CONFIDENT"] / len(indices), 6),
+            "needs_review_share": 1.0,
+            "low_confidence_share": round(counts["LOW_CONFIDENCE"] / len(indices), 6),
+        }
+
+    report = summarize(list(range(len(rows))))
+    report["by_language"] = {
+        language: summarize([index for index, row in enumerate(rows) if row["language"] == language])
+        for language in ("RU", "KZ", "MIXED") if any(row["language"] == language for row in rows)
+    }
+    return report
 
 
 def main() -> None:
@@ -290,9 +372,18 @@ def main() -> None:
         best_validation["calibration"] = calibration_report(
             validation_logits, validation_labels, splits["validation"], temperature,
         )
+        confidence_policy, policy_evidence = select_confidence_policy(
+            validation_logits, validation_labels, splits["validation"], temperature,
+        )
+        best_validation["confidence_states"] = confidence_state_report(
+            validation_logits, splits["validation"], temperature, confidence_policy,
+        )
         test = evaluate(model, test_loader, splits["test"], device)
         test_logits, test_labels = collect_logits(model, test_loader, device)
         test["calibration"] = calibration_report(test_logits, test_labels, splits["test"], temperature)
+        test["confidence_states"] = confidence_state_report(
+            test_logits, splits["test"], temperature, confidence_policy,
+        )
         model_file = artifact_dir / "model.safetensors"
         with model_file.open("rb") as stream:
             checksum = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -308,6 +399,13 @@ def main() -> None:
             "token_audit_sha256": token_audit_checksum if args.reviewed_dataset else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "metrics": {"status": "reviewed_synthetic_holdout_only" if args.reviewed_dataset else "synthetic_holdout_only", "validation": best_validation, "test": test},
+            "confidence_policy_version": POLICY_VERSION,
+            "confidence_thresholds": {
+                "low_confidence_below": confidence_policy.low_confidence_below,
+                "confident_at_or_above": confidence_policy.confident_at_or_above,
+            },
+            "confident_enabled": confidence_policy.confident_enabled,
+            "confidence_policy_evidence": policy_evidence,
             "languages": ["RU", "KZ", "MIXED"] if args.reviewed_dataset else ["RU", "KZ"],
             "labels": list(LABELS),
             "training_config": {
