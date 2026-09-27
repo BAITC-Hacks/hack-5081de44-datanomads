@@ -424,6 +424,67 @@ Repeat relations and temporal windows need their own reviewed calibration;
 this command does not choose a repeat threshold. The current pilot is unreviewed
 and cannot produce real threshold evidence.
 
+For a separate `REPEAT` time-window audit, provide an immutable temporal source
+JSONL with `pair_id`, `query_created_at`, `candidate_created_at`, and
+`candidate_resolved_at` (nullable) for **every validation and frozen-test
+retrieval pair**. Keep the source and its approved review JSONL outside Git
+with the original relation reviews. Each review row has exactly:
+
+```json
+{
+  "evidence_version": "repeat-temporal-evidence.v1",
+  "pair_id": "reviewed_pair_id",
+  "source_relation_sha256": "sha256:...",
+  "review_evidence_sha256": "sha256:...",
+  "temporal_source_sha256": "sha256:...",
+  "review_status": "APPROVED",
+  "reviewer_id": "reviewer_id",
+  "reviewed_at": "2026-09-27T12:00:00+05:00",
+  "query_created_at": "2026-09-20T12:00:00+05:00",
+  "candidate_created_at": "2026-08-01T12:00:00+05:00",
+  "candidate_resolved_at": "2026-09-10T12:00:00+05:00",
+  "same_region": true,
+  "same_object": true,
+  "same_issue": true,
+  "same_episode": false,
+  "prior_episode_resolved": true
+}
+```
+
+Use `null` for `candidate_resolved_at` if there is no confirmed resolution.
+The reviewer must establish the relation facts and resolution event from case
+evidence; a source status or `closed_at` alone is not proof. Timestamps must
+include a timezone and the candidate must predate the query. The evaluator
+compares the review timestamps with the immutable temporal source, checks each
+pair against the approved relation label and review checksums, and rejects
+missing or changed evidence. Its
+time signal is restricted to same-region retrieved candidates with a confirmed
+resolution before the query; it counts different-object/issue false positives
+instead of assuming semantic agreement.
+
+Create a policy outside Git with `policy_version="repeat-window.v1"`, sorted
+unique positive `window_days` (for example `[7, 30, 90]`), positive
+`min_repeat_count`, `min_nonrepeat_count`, `min_predictions`, and
+`min_precision` in `(0, 1]`. Choose the policy before looking at the frozen
+test. `min_nonrepeat_count` applies to hard negatives: same-region candidates
+with a confirmed prior resolution but a non-`REPEAT` label. Then run:
+
+```bash
+PYTHONPATH=ml-service .venv/bin/python scripts/evaluate_repeat_windows.py \
+  --dataset data/processed/reviewed-v1 \
+  --temporal-source /path/to/immutable-temporal-source.jsonl \
+  --temporal-evidence /path/to/approved-temporal-evidence.jsonl \
+  --policy /path/to/precommitted-repeat-policy.json \
+  --output data/processed/reports/reviewed-v1-repeat-windows.json
+```
+
+The report chooses a window from validation only and applies it once to the
+frozen test. It contains no appeal text or raw pair IDs. Its resolution signal
+comes from human-reviewed evidence, so `runtime_window_status` remains
+`NOT_APPROVED` even when the test meets the policy. Production use requires a
+separately verified runtime resolution source and expert approval. With the
+current `PENDING` pilot, there is no empirical `REPEAT` window result.
+
 ## Forecast candidate comparison
 
 The daily count runner fits [Prophet](https://facebook.github.io/prophet/docs/quick_start.html)

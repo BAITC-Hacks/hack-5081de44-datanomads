@@ -115,6 +115,15 @@ class RetrievalRelationReviewTests(unittest.TestCase):
         self._write(rows)
         self.assertEqual(len(read_reviews(self.review, PILOT)), 15)
 
+        self._approve(rows[0], "SIMILAR_BUT_NOT_DUPLICATE")
+        rows[0]["same_object"] = True
+        rows[0]["same_issue"] = True
+        rows[0]["same_episode"] = False
+        rows[0]["prior_episode_resolved"] = True
+        self._write(rows)
+        with self.assertRaisesRegex(ValueError, "resolved recurrence"):
+            read_reviews(self.review, PILOT)
+
     def test_cannot_change_source_or_skip_review_rows(self) -> None:
         rows = self._rows()
         rows[0]["source"]["candidate_text"] = "Подменённый текст"

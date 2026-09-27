@@ -185,8 +185,10 @@ def read_reviews(review_path: Path, source_path: Path) -> list[dict]:
                 row["same_episode"] is False and row["prior_episode_resolved"] is True
             ):
                 raise ValueError(f"review line {line_number}: repeat needs a resolved prior episode")
-            if label in {"SIMILAR_BUT_NOT_DUPLICATE", "UNRELATED"} and all(row[key] is True for key in relation_fields[1:5]):
-                raise ValueError(f"review line {line_number}: same episode must be labeled duplicate")
+            if (label in {"SIMILAR_BUT_NOT_DUPLICATE", "UNRELATED"} and
+                    all(row[key] is True for key in ("same_region", "same_object", "same_issue")) and
+                    (row["same_episode"] is True or row["prior_episode_resolved"] is True)):
+                raise ValueError(f"review line {line_number}: same episode or resolved recurrence needs duplicate/repeat label")
         elif row["relation_label"] is not None or reason == "VERIFIED":
             raise ValueError(f"review line {line_number}: non-approved row has a relation label")
     if len(seen) != len(pairs):
