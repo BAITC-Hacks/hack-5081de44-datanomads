@@ -302,6 +302,32 @@ interface BackendAlertDetail {
   trigger_reasons?: string[]
   configuration?: { period_days?: number; robust_z_threshold?: number; ratio_threshold?: number }
 }
+interface BackendAlertMonitoring {
+  state: 'MONITORING' | 'STABILIZED' | 'PERSISTING' | 'WORSENING' | 'RECURRED' | 'INSUFFICIENT_HISTORY'
+  monitoring_period_days: number
+  observation_period_days: number
+  started_at: string
+  ends_at: string
+  started_by: string
+  completed_at?: string | null
+  evidence?: {
+    source?: string
+    reason?: string
+    interpretation_scope?: string
+    periods?: Array<{
+      period_start: string
+      period_end: string
+      current_count: number
+      baseline?: number
+      deviation?: number
+      robust_z?: number | null
+      ratio?: number
+      severity?: string | null
+      signal_detected?: boolean
+      source_ticket_ids: string[]
+    }>
+  } | null
+}
 interface BackendAlert {
   id: string
   incident_key: string
@@ -324,6 +350,7 @@ interface BackendAlert {
   created_at?: string
   detected_at: string
   detail?: BackendAlertDetail
+  monitoring?: BackendAlertMonitoring | null
 }
 interface BackendAlerts { source?: string; items: BackendAlert[]; total?: number }
 interface BackendLearningCycle { id: string; cycle_id: string; state: string; dataset_version: string; candidate_model_version: string; collect_started_at: string; collect_ends_at: string; evaluation_started_at: string | null; evaluation_ends_at: string | null; shadow_prediction_count: number; shadow_inference_failures: number; shadow_operator_decision_count: number; blind_ab_enabled: boolean; production_model_version: string | null; frozen_evaluation_dataset_version: string | null; candidate_dataset_checksum: string | null; min_feedback_count: number; promotion_policy_version: string; manual_close_enabled: boolean; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
@@ -653,6 +680,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
       robustZThreshold: configuration?.robust_z_threshold,
       ratioThreshold: configuration?.ratio_threshold,
       periodDays: configuration?.period_days,
+      monitoring: alert.monitoring ?? undefined,
       status: status === 'ACKNOWLEDGED' ? 'В работе' : status === 'CLOSED' ? 'Закрыт' : 'Новый',
     }
   })
@@ -999,6 +1027,14 @@ export async function acknowledgeAlert(alertId: string): Promise<Pick<BackendAle
 
 export async function closeAlert(alertId: string): Promise<Pick<BackendAlert, 'id' | 'status'>> {
   return request<Pick<BackendAlert, 'id' | 'status'>>(`/alerts/${encodeURIComponent(alertId)}/close`, { method: 'POST' })
+}
+
+export async function startAlertMonitoring(alertId: string, monitoringPeriodDays: number): Promise<void> {
+  await request<BackendAlert>(`/alerts/${encodeURIComponent(alertId)}/monitor`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ monitoring_period_days: monitoringPeriodDays }),
+  })
 }
 
 export async function closeLearningCycle(cycleId: string) {

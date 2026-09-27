@@ -806,6 +806,47 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             timeout=timeout,
         )
         expect(status == 403, f"operator alert acknowledgement should be forbidden: {forbidden_ack}")
+        monitoring_period_days = 3 * int(evidence["configuration"]["period_days"])
+        status, _, forbidden_monitoring = json_request(
+            base_url,
+            "POST",
+            f"/api/v1/alerts/{alert_id}/monitor",
+            role="OPERATOR",
+            body={"monitoring_period_days": monitoring_period_days},
+            timeout=timeout,
+        )
+        expect(status == 403, f"operator should not start alert monitoring: {forbidden_monitoring}")
+        status, _, monitoring = json_request(
+            base_url,
+            "POST",
+            f"/api/v1/alerts/{alert_id}/monitor",
+            role="MANAGER",
+            body={"monitoring_period_days": monitoring_period_days},
+            timeout=timeout,
+        )
+        expect(
+            status == 200
+            and monitoring.get("status") == "OPEN"
+            and monitoring.get("monitoring", {}).get("state") == "MONITORING"
+            and monitoring.get("monitoring", {}).get("monitoring_period_days") == monitoring_period_days
+            and monitoring.get("detail") == evidence,
+            f"manager monitoring did not preserve the alert status and evidence: {monitoring}",
+        )
+        monitoring_changed = read_sse_event(event_response)
+        expect(b"event: alerts.changed" in monitoring_changed, f"SSE monitoring update missing: {monitoring_changed[:160]!r}")
+        status, _, persisted_monitoring = json_request(
+            base_url,
+            "GET",
+            f"/api/v1/alerts/{alert_id}",
+            role="MANAGER",
+            timeout=timeout,
+        )
+        expect(
+            status == 200
+            and persisted_monitoring.get("monitoring", {}).get("started_by") == "e2e-acceptance"
+            and persisted_monitoring.get("monitoring", {}).get("state") == "MONITORING",
+            f"manager monitoring was not persisted: {persisted_monitoring}",
+        )
         status, _, acknowledged = json_request(base_url, "POST", f"/api/v1/alerts/{alert_id}/ack", role="MANAGER", timeout=timeout)
         expect(status == 200 and acknowledged.get("status") == "ACKNOWLEDGED", f"alert ack failed: {acknowledged}")
         changed = read_sse_event(event_response)

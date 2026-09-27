@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
@@ -322,7 +322,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
     case '/situation/regions': content = <CleanRegionsPage regions={data.regions} onDrilldown={onDrilldown} />; break
     case '/situation/topics': content = <CleanTopicsPage topics={data.topics} onDrilldown={onDrilldown} />; break
     case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
-    case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onToast={onToast} onDrilldown={onDrilldown} />; break
+    case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onRefresh={onRefresh} onToast={onToast} onDrilldown={onDrilldown} />; break
     case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
     case '/situation/reports': content = <CleanReportsPage filters={filters} />; break
     case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
@@ -1230,16 +1230,48 @@ function alertPeriodLabel(alert: Alert): string {
   return formatAlertTime(alert.createdAt ?? alert.detectedAt)
 }
 
+function alertMonitoringMessage(alert: Alert): string {
+  const monitoring = alert.monitoring
+  if (!monitoring) return ''
+  if (monitoring.state === 'MONITORING') {
+    return `Период наблюдения завершится ${formatAlertTime(monitoring.ends_at)}. Итог будет определён по полным интервалам после окончания срока.`
+  }
+  switch (monitoring.state) {
+    case 'STABILIZED': return 'Последний полный интервал ниже порога детектора по обращениям, доступным в Pulse.'
+    case 'PERSISTING': return 'В последнем полном интервале аномальный рост сохраняется, число обращений не выше исходного сигнала.'
+    case 'WORSENING': return 'В последнем полном интервале число обращений выше исходного сигнала, порог детектора всё ещё превышен.'
+    case 'RECURRED': return 'После полного интервала ниже порога детектора сигнал повторно превысил порог.'
+    case 'INSUFFICIENT_HISTORY': return 'Недостаточно воспроизводимых данных для оценки динамики; вывод о сигнале не сделан.'
+  }
+}
+
+function alertMonitoringStateLabel(state: NonNullable<Alert['monitoring']>['state']): string {
+  switch (state) {
+    case 'MONITORING': return 'Под наблюдением'
+    case 'STABILIZED': return 'Ниже порога'
+    case 'PERSISTING': return 'Сохраняется'
+    case 'WORSENING': return 'Рост усилился'
+    case 'RECURRED': return 'Повторный рост'
+    case 'INSUFFICIENT_HISTORY': return 'Недостаточно данных'
+  }
+}
+
 function alertChartOption(alert: Alert): EChartsOption | undefined {
   const historicalCounts = [...(alert.historyCounts ?? [])].reverse()
   if (!historicalCounts.length) return undefined
 
   const periodDays = alert.periodDays ?? 7
+  const monitoringPeriods = alert.monitoring?.evidence?.periods ?? []
   const labels = [
-    ...historicalCounts.map((_, index) => `Неделя −${historicalCounts.length - index}`),
+    ...historicalCounts.map((_, index) => `${periodDays} дн. −${(historicalCounts.length - index) * periodDays}`),
     `Последние ${periodDays} дн.`,
+    ...monitoringPeriods.map((period, index) => `Контроль ${index + 1} · ${formatAlertTime(period.period_start)}`),
   ]
-  const counts = [...historicalCounts, alert.currentCount ?? alert.affectedTickets]
+  const counts = [
+    ...historicalCounts,
+    alert.currentCount ?? alert.affectedTickets,
+    ...monitoringPeriods.map((period) => period.current_count),
+  ]
   const series: NonNullable<EChartsOption['series']> = [
     {
       name: 'Обращения',
@@ -1285,10 +1317,11 @@ function alertTriggerDescriptions(alert: Alert): string[] {
   })
 }
 
-function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; onToast: (message: string) => void; onDrilldown: DrilldownHandler }) {
+function CleanAlertsPage({ alerts, onRefresh, onToast, onDrilldown }: { alerts: Alert[]; onRefresh: () => Promise<void>; onToast: (message: string) => void; onDrilldown: DrilldownHandler }) {
   const [items, setItems] = useState(alerts)
   const [showHistory, setShowHistory] = useState(false)
   const [selectedAlertId, setSelectedAlertId] = useState(alerts[0]?.id)
+  const [monitoringPeriodDays, setMonitoringPeriodDays] = useState(21)
   useEffect(() => setItems(alerts), [alerts])
 
   const prioritized = [...items].sort((left, right) => {
@@ -1317,6 +1350,34 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
   const sourceTicketIds = selectedAlert?.linkedTicketIds ?? []
   const currentCount = selectedAlert?.currentCount ?? selectedAlert?.affectedTickets ?? 0
   const periodDays = selectedAlert?.periodDays ?? 7
+  const monitoringPeriodOptions = Array.from({ length: 12 }, (_, index) => periodDays * (index + 1))
+  const hasActiveMonitoring = selectedAlert?.monitoring?.state === 'MONITORING'
+
+  useEffect(() => {
+    if (selectedAlert) setMonitoringPeriodDays(periodDays * 3)
+  }, [selectedAlert?.id, periodDays])
+
+  useEffect(() => {
+    const endTime = items
+      .filter((alert) => alert.monitoring?.state === 'MONITORING')
+      .map((alert) => Date.parse(alert.monitoring?.ends_at ?? ''))
+      .filter(Number.isFinite)
+      .sort((left, right) => left - right)[0]
+    if (endTime == null) return
+    const refreshDelay = Math.max(50, Math.min(endTime - Date.now() + 50, 86_400_000))
+    const timer = window.setTimeout(() => { void onRefresh() }, refreshDelay)
+    return () => window.clearTimeout(timer)
+  }, [items, onRefresh])
+
+  const takeUnderMonitoring = async (alert: Alert) => {
+    try {
+      await startAlertMonitoring(alert.id, monitoringPeriodDays)
+      await onRefresh()
+      onToast(`Сигнал ${alert.id} взят под наблюдение на ${monitoringPeriodDays} дн.`)
+    } catch (error) {
+      onToast(`Не удалось начать наблюдение: ${error instanceof Error ? error.message : 'ошибка API'}`)
+    }
+  }
 
   return (
     <div className="analytics-page">
@@ -1375,6 +1436,24 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
               <div><span>Версия detector</span><strong>{selectedAlert.detectorVersion ?? 'не сохранена'}</strong></div>
             </div>
 
+            {selectedAlert.monitoring && (
+              <div className="signal-monitoring" aria-live="polite">
+                <div className="field-label">Наблюдение динамики</div>
+                <strong>{alertMonitoringStateLabel(selectedAlert.monitoring.state)}</strong>
+                <p>{alertMonitoringMessage(selectedAlert)}</p>
+                <small>{selectedAlert.monitoring.monitoring_period_days} дн. · интервал {selectedAlert.monitoring.observation_period_days} дн. · начал: {selectedAlert.monitoring.started_by}</small>
+                {selectedAlert.monitoring.evidence?.periods?.length ? (
+                  <ul>
+                    {selectedAlert.monitoring.evidence.periods.map((period) => (
+                      <li key={period.period_start}>
+                        {formatAlertTime(period.period_start)} — {formatAlertTime(period.period_end)}: {period.current_count.toLocaleString('ru-RU')} обращений · исходных ID {period.source_ticket_ids.length}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            )}
+
             {chart ? (
               <div className="alert-detail-chart">
                 <div className="field-label">Динамика обращений и обычный уровень</div>
@@ -1404,6 +1483,19 @@ function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; on
               <button className="signal-open-tickets" disabled={!sourceTicketIds.length} onClick={() => onDrilldown('alert', selectedAlert.id, `Обращения по сигналу: ${selectedAlert.title}`)}>
                 Открыть обращения
               </button>
+              {!showHistory && selectedAlert.status !== 'Закрыт' && !hasActiveMonitoring && (
+                <>
+                  <label className="signal-monitoring-period">
+                    <span>Период контроля</span>
+                    <select value={monitoringPeriodDays} onChange={(event) => setMonitoringPeriodDays(Number(event.target.value))}>
+                      {monitoringPeriodOptions.map((days) => <option value={days} key={days}>{days} дн.</option>)}
+                    </select>
+                  </label>
+                  <button className="text-button" onClick={() => takeUnderMonitoring(selectedAlert)}>
+                    {selectedAlert.monitoring ? 'Взять на контроль повторно' : 'Взять на контроль'}
+                  </button>
+                </>
+              )}
               {!showHistory && selectedAlert.status === 'Новый' && <button className="text-button" onClick={() => update(selectedAlert, 'ack')}>Принять</button>}
               {!showHistory && selectedAlert.status !== 'Закрыт' && <button className="text-button" onClick={() => update(selectedAlert, 'close')}>Закрыть</button>}
             </div>

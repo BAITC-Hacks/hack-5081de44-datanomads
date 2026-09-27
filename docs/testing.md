@@ -120,7 +120,7 @@ PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py --restart-
 Он импортирует уникальный synthetic dataset и повторяет его для проверки
 idempotency, затем проверяет PostgreSQL/Qdrant preview, refetch решения после
 перезаписи, relation feedback, analytics drill-down, QueryIntent, forecast
-30/60/90, spike detector → ACK/CLOSE → SSE, PDF/XLSX, RBAC, Qdrant reindex и
+30/60/90, spike detector → manager monitoring period → ACK/CLOSE → SSE, PDF/XLSX, RBAC, Qdrant reindex и
 learning-cycle. В normal mode ожидается реальный candidate artifact; test-only
 fake trainer включается отдельно и не считается реальной ML-метрикой. Normal
 acceptance также проверяет окно `EVALUATE`, checksum-pinned shadow prediction

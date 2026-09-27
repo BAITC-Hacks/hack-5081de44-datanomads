@@ -6,7 +6,9 @@
 //! the vector index and the ML service owns classification/embedding.
 
 use crate::anomaly::{
-    evaluate_series, AlertDetectionRun, AlertDetectorConfig, AlertEvaluation, AlertSeriesInput,
+    evaluate_monitoring, evaluate_series, valid_monitoring_period, AlertDetectionRun,
+    AlertDetectorConfig, AlertEvaluation, AlertMonitoring, AlertMonitoringState, AlertSeriesInput,
+    MonitoringObservationInput,
 };
 use crate::{
     actionable_context_for_candidates, actionable_context_manual_review,
@@ -27,7 +29,7 @@ use crate::{
     Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
     ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
 };
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -53,6 +55,28 @@ fn production_runtime_mode(runtime_mode: &str) -> bool {
         runtime_mode.trim().to_ascii_lowercase().as_str(),
         "prod" | "production"
     )
+}
+
+fn monitoring_state_name(state: &AlertMonitoringState) -> &'static str {
+    match state {
+        AlertMonitoringState::Monitoring => "MONITORING",
+        AlertMonitoringState::Stabilized => "STABILIZED",
+        AlertMonitoringState::Persisting => "PERSISTING",
+        AlertMonitoringState::Worsening => "WORSENING",
+        AlertMonitoringState::Recurred => "RECURRED",
+        AlertMonitoringState::InsufficientHistory => "INSUFFICIENT_HISTORY",
+    }
+}
+
+fn monitoring_state_from_name(state: &str) -> AlertMonitoringState {
+    match state {
+        "STABILIZED" => AlertMonitoringState::Stabilized,
+        "PERSISTING" => AlertMonitoringState::Persisting,
+        "WORSENING" => AlertMonitoringState::Worsening,
+        "RECURRED" => AlertMonitoringState::Recurred,
+        "INSUFFICIENT_HISTORY" => AlertMonitoringState::InsufficientHistory,
+        _ => AlertMonitoringState::Monitoring,
+    }
 }
 
 fn synthetic_candidate_can_be_promoted(is_synthetic: bool, runtime_mode: &str) -> bool {
@@ -3831,6 +3855,327 @@ impl PgRepository {
         self.alert_from_id(id).await
     }
 
+    pub async fn start_alert_monitoring(
+        &self,
+        alert_id: &str,
+        user_id: &str,
+        monitoring_period_days: u32,
+        fallback_config: &AlertDetectorConfig,
+    ) -> Result<Alert, String> {
+        let id = alert_id
+            .parse::<i64>()
+            .map_err(|_| format!("alert {alert_id} not found"))?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin alert monitoring: {error}"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("pulse109-alert-monitor:{id}"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("lock alert monitoring: {error}"))?;
+        let alert = sqlx::query(
+            "SELECT status, current_count, baseline::double precision AS baseline, COALESCE(detail, '{}'::jsonb) AS detail FROM alerts WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("load alert for monitoring: {error}"))?
+        .ok_or_else(|| format!("alert {alert_id} not found"))?;
+        let status: String = alert
+            .try_get("status")
+            .map_err(|error| format!("alert status for monitoring: {error}"))?;
+        if status.eq_ignore_ascii_case("closed") {
+            return Err("cannot monitor a closed alert".to_owned());
+        }
+        let active = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM alert_monitoring WHERE alert_id = $1 AND state = 'MONITORING' LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("check active alert monitoring: {error}"))?;
+        if active.is_some() {
+            return Err("alert is already being monitored".to_owned());
+        }
+
+        let detail: Value = alert
+            .try_get("detail")
+            .map_err(|error| format!("alert detector evidence: {error}"))?;
+        let detector_config_value = detail.get("configuration").cloned();
+        let detector_config = detector_config_value
+            .clone()
+            .and_then(|value| serde_json::from_value::<AlertDetectorConfig>(value).ok());
+        let observation_period_days = detector_config
+            .as_ref()
+            .map(|config| config.period_days)
+            .unwrap_or(fallback_config.period_days);
+        if !valid_monitoring_period(monitoring_period_days, observation_period_days) {
+            return Err(
+                "monitoring period must be a positive multiple of the saved detector period (up to 12 periods)"
+                    .to_owned(),
+            );
+        }
+        let current_count: i32 = alert
+            .try_get("current_count")
+            .map_err(|error| format!("alert current count for monitoring: {error}"))?;
+        let baseline: Option<f64> = alert
+            .try_get("baseline")
+            .map_err(|error| format!("alert baseline for monitoring: {error}"))?;
+        let median_absolute_deviation = detail
+            .get("median_absolute_deviation")
+            .and_then(Value::as_f64);
+        let detector_version = detector_config
+            .as_ref()
+            .map(|config| config.detector_version.as_str())
+            .or_else(|| detail.get("detector_version").and_then(Value::as_str));
+        let started_at = Utc::now();
+        let ends_at = started_at + ChronoDuration::days(i64::from(monitoring_period_days));
+        sqlx::query(
+            "INSERT INTO alert_monitoring (alert_id, monitoring_period_days, observation_period_days, started_at, ends_at, started_by, detector_version, detector_config, initial_count, baseline, median_absolute_deviation) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(id)
+        .bind(i32::try_from(monitoring_period_days).map_err(|_| "monitoring period exceeds database range".to_owned())?)
+        .bind(i32::try_from(observation_period_days).map_err(|_| "detector period exceeds database range".to_owned())?)
+        .bind(started_at)
+        .bind(ends_at)
+        .bind(user_id)
+        .bind(detector_version)
+        .bind(detector_config_value)
+        .bind(current_count)
+        .bind(baseline)
+        .bind(median_absolute_deviation)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("persist alert monitoring: {error}"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit alert monitoring: {error}"))?;
+        self.alert_from_id(id).await
+    }
+
+    pub async fn refresh_due_alert_monitoring(
+        &self,
+        alert_id: Option<&str>,
+    ) -> Result<bool, String> {
+        let numeric_id = alert_id
+            .map(|value| {
+                value
+                    .parse::<i64>()
+                    .map_err(|_| format!("alert {value} not found"))
+            })
+            .transpose()?;
+        let rows = sqlx::query(
+            "SELECT id FROM alert_monitoring WHERE state = 'MONITORING' AND ends_at <= now() AND ($1::bigint IS NULL OR alert_id = $1) ORDER BY ends_at, id",
+        )
+        .bind(numeric_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list completed alert monitoring: {error}"))?;
+        let mut changed = false;
+        for row in rows {
+            let monitoring_id: i64 = row
+                .try_get("id")
+                .map_err(|error| format!("alert monitoring id: {error}"))?;
+            changed |= self.complete_alert_monitoring(monitoring_id).await?;
+        }
+        Ok(changed)
+    }
+
+    async fn complete_alert_monitoring(&self, monitoring_id: i64) -> Result<bool, String> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin alert monitoring evaluation: {error}"))?;
+        let row = sqlx::query(
+            r#"
+            SELECT m.monitoring_period_days, m.observation_period_days,
+                m.started_at, m.ends_at, m.started_by, m.detector_version,
+                m.detector_config, m.initial_count, m.baseline::double precision AS baseline,
+                m.median_absolute_deviation::double precision AS median_absolute_deviation,
+                a.region_id, a.topic_id
+            FROM alert_monitoring m
+            JOIN alerts a ON a.id = m.alert_id
+            WHERE m.id = $1 AND m.state = 'MONITORING' AND m.ends_at <= now()
+            FOR UPDATE OF m
+            "#,
+        )
+        .bind(monitoring_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("load due alert monitoring: {error}"))?;
+        let Some(row) = row else {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| format!("finish skipped alert monitoring: {error}"))?;
+            return Ok(false);
+        };
+
+        let monitoring_period_days: i32 = row
+            .try_get("monitoring_period_days")
+            .map_err(|error| format!("monitoring period: {error}"))?;
+        let observation_period_days: i32 = row
+            .try_get("observation_period_days")
+            .map_err(|error| format!("observation period: {error}"))?;
+        let started_at: DateTime<Utc> = row
+            .try_get("started_at")
+            .map_err(|error| format!("monitoring start: {error}"))?;
+        let ends_at: DateTime<Utc> = row
+            .try_get("ends_at")
+            .map_err(|error| format!("monitoring end: {error}"))?;
+        let started_by: String = row
+            .try_get("started_by")
+            .map_err(|error| format!("monitoring actor: {error}"))?;
+        let region_id: String = row
+            .try_get("region_id")
+            .map_err(|error| format!("monitoring region: {error}"))?;
+        let topic_id: String = row
+            .try_get("topic_id")
+            .map_err(|error| format!("monitoring topic: {error}"))?;
+        let detector_version: Option<String> = row
+            .try_get("detector_version")
+            .map_err(|error| format!("monitoring detector version: {error}"))?;
+        let detector_config_value: Option<Value> = row
+            .try_get("detector_config")
+            .map_err(|error| format!("monitoring detector configuration: {error}"))?;
+        let config = detector_config_value
+            .clone()
+            .and_then(|value| serde_json::from_value::<AlertDetectorConfig>(value).ok());
+        let initial_count: Option<i32> = row
+            .try_get("initial_count")
+            .map_err(|error| format!("monitoring initial count: {error}"))?;
+        let baseline: Option<f64> = row
+            .try_get("baseline")
+            .map_err(|error| format!("monitoring baseline: {error}"))?;
+        let median_absolute_deviation: Option<f64> = row
+            .try_get("median_absolute_deviation")
+            .map_err(|error| format!("monitoring dispersion: {error}"))?;
+        let number_of_periods = monitoring_period_days / observation_period_days;
+        let sample_rows = sqlx::query(
+            r#"
+            WITH periods AS (
+                SELECT series.period_index,
+                    $1::timestamptz + series.period_index * ($2::integer * interval '1 day') AS period_start,
+                    $1::timestamptz + (series.period_index + 1) * ($2::integer * interval '1 day') AS period_end
+                FROM generate_series(0, $3::integer - 1) AS series(period_index)
+            )
+            SELECT periods.period_start, periods.period_end, count(t.id)::bigint AS current_count,
+                COALESCE(array_agg(t.id ORDER BY t.id) FILTER (WHERE t.id IS NOT NULL), ARRAY[]::bigint[]) AS source_ticket_ids
+            FROM periods
+            LEFT JOIN tickets t ON t.region_id = $5 AND t.topic_id = $6
+                AND t.created_at >= periods.period_start
+                AND t.created_at < LEAST(periods.period_end, $4::timestamptz)
+            GROUP BY periods.period_index, periods.period_start, periods.period_end
+            ORDER BY periods.period_index
+            "#,
+        )
+        .bind(started_at)
+        .bind(observation_period_days)
+        .bind(number_of_periods)
+        .bind(ends_at)
+        .bind(&region_id)
+        .bind(&topic_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| format!("read alert monitoring source series: {error}"))?;
+        let mut inputs = Vec::with_capacity(sample_rows.len());
+        for sample in sample_rows {
+            let source_ticket_ids = sample
+                .try_get::<Vec<i64>, _>("source_ticket_ids")
+                .map_err(|error| format!("monitoring source ticket ids: {error}"))?
+                .into_iter()
+                .map(|ticket_id| ticket_id.to_string())
+                .collect::<Vec<_>>();
+            inputs.push(MonitoringObservationInput {
+                period_start: sample
+                    .try_get("period_start")
+                    .map_err(|error| format!("monitoring sample start: {error}"))?,
+                period_end: sample
+                    .try_get("period_end")
+                    .map_err(|error| format!("monitoring sample end: {error}"))?,
+                current_count: sample
+                    .try_get("current_count")
+                    .map_err(|error| format!("monitoring sample count: {error}"))?,
+                source_ticket_ids,
+            });
+        }
+
+        let config_is_compatible = config.as_ref().is_some_and(|config| {
+            config.is_valid()
+                && detector_version.as_deref() == Some(config.detector_version.as_str())
+                && i32::try_from(config.period_days).ok() == Some(observation_period_days)
+                && inputs.len() == usize::try_from(number_of_periods).unwrap_or(0)
+                && initial_count.is_some()
+        });
+        let evaluation = if config_is_compatible {
+            evaluate_monitoring(
+                &inputs,
+                i64::from(initial_count.unwrap_or_default()),
+                baseline,
+                median_absolute_deviation,
+                config.as_ref(),
+            )
+        } else {
+            evaluate_monitoring(&[], 0, None, None, None)
+        };
+        let completed_at = Utc::now();
+        let state = monitoring_state_name(&evaluation.state);
+        let source_periods = inputs
+            .iter()
+            .map(|sample| {
+                json!({
+                    "period_start": sample.period_start,
+                    "period_end": sample.period_end,
+                    "current_count": sample.current_count,
+                    "source_ticket_ids": sample.source_ticket_ids,
+                })
+            })
+            .collect::<Vec<_>>();
+        let evidence_periods = if evaluation.observations.is_empty() {
+            Value::Array(source_periods)
+        } else {
+            serde_json::to_value(&evaluation.observations)
+                .map_err(|error| format!("serialize monitoring observations: {error}"))?
+        };
+        let result = json!({
+            "schema_version": "signal-monitoring.v1",
+            "source": "postgresql",
+            "state": state,
+            "started_by": started_by,
+            "started_at": started_at,
+            "ends_at": ends_at,
+            "completed_at": completed_at,
+            "monitoring_period_days": monitoring_period_days,
+            "observation_period_days": observation_period_days,
+            "detector_version": detector_version,
+            "detector_configuration": detector_config_value,
+            "initial_count": initial_count,
+            "baseline": baseline,
+            "median_absolute_deviation": median_absolute_deviation,
+            "interpretation_scope": "Observed ticket volume in PostgreSQL; no physical incident, root cause, or resolution is inferred.",
+            "periods": evidence_periods,
+        });
+        sqlx::query(
+            "UPDATE alert_monitoring SET state = $2, result = $3, completed_at = $4 WHERE id = $1 AND state = 'MONITORING'",
+        )
+        .bind(monitoring_id)
+        .bind(state)
+        .bind(result)
+        .bind(completed_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("persist alert monitoring evaluation: {error}"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit alert monitoring evaluation: {error}"))?;
+        Ok(true)
+    }
+
     pub async fn detect_alerts(
         &self,
         config: &AlertDetectorConfig,
@@ -4146,6 +4491,57 @@ impl PgRepository {
             .map_err(|error| format!("alert created_at: {error}"))?;
         let acknowledged_at: Option<DateTime<Utc>> = row.try_get("acknowledged_at").unwrap_or(None);
         let closed_at: Option<DateTime<Utc>> = row.try_get("closed_at").unwrap_or(None);
+        let monitoring_row = sqlx::query(
+            "SELECT state, monitoring_period_days, observation_period_days, started_at, ends_at, started_by, completed_at, result FROM alert_monitoring WHERE alert_id = $1 ORDER BY started_at DESC, id DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("fetch alert monitoring: {error}"))?;
+        let monitoring = if let Some(monitoring_row) = monitoring_row {
+            let state: String = monitoring_row
+                .try_get("state")
+                .map_err(|error| format!("alert monitoring state: {error}"))?;
+            let monitoring_period_days: i32 = monitoring_row
+                .try_get("monitoring_period_days")
+                .map_err(|error| format!("alert monitoring period: {error}"))?;
+            let observation_period_days: i32 = monitoring_row
+                .try_get("observation_period_days")
+                .map_err(|error| format!("alert monitoring observation period: {error}"))?;
+            let started_at: DateTime<Utc> = monitoring_row
+                .try_get("started_at")
+                .map_err(|error| format!("alert monitoring start: {error}"))?;
+            let ends_at: DateTime<Utc> = monitoring_row
+                .try_get("ends_at")
+                .map_err(|error| format!("alert monitoring end: {error}"))?;
+            let completed_at: Option<DateTime<Utc>> = monitoring_row
+                .try_get("completed_at")
+                .map_err(|error| format!("alert monitoring completion: {error}"))?;
+            Some(AlertMonitoring {
+                state: monitoring_state_from_name(&state),
+                monitoring_period_days: u32::try_from(monitoring_period_days)
+                    .map_err(|error| format!("alert monitoring period range: {error}"))?,
+                observation_period_days: u32::try_from(observation_period_days)
+                    .map_err(|error| format!("alert observation period range: {error}"))?,
+                started_at: started_at.to_rfc3339(),
+                ends_at: ends_at.to_rfc3339(),
+                started_by: monitoring_row
+                    .try_get("started_by")
+                    .map_err(|error| format!("alert monitoring actor: {error}"))?,
+                completed_at: completed_at.map(|value| value.to_rfc3339()),
+                evidence: if state == "MONITORING" {
+                    None
+                } else {
+                    Some(
+                        monitoring_row
+                            .try_get("result")
+                            .map_err(|error| format!("alert monitoring evidence: {error}"))?,
+                    )
+                },
+            })
+        } else {
+            None
+        };
         Ok(Alert {
             id: id.to_string(),
             incident_key: row.try_get("incident_key").unwrap_or_default(),
@@ -4177,6 +4573,7 @@ impl PgRepository {
             acknowledged_at: acknowledged_at.map(|value| value.to_rfc3339()),
             closed_by: row.try_get("closed_by").unwrap_or(None),
             closed_at: closed_at.map(|value| value.to_rfc3339()),
+            monitoring,
             detail,
         })
     }

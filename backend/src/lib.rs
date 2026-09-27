@@ -41,7 +41,7 @@ use tracing::info;
 
 mod anomaly;
 mod pg;
-pub use anomaly::AlertDetectorConfig;
+pub use anomaly::{AlertDetectorConfig, AlertMonitoring, AlertMonitoringState};
 use pg::{default_qdrant_collection, safe_trace_id, PgRepository};
 
 const SERVICE_NAME: &str = "pulse109-core";
@@ -751,6 +751,7 @@ pub struct Alert {
     pub acknowledged_at: Option<String>,
     pub closed_by: Option<String>,
     pub closed_at: Option<String>,
+    pub monitoring: Option<AlertMonitoring>,
     pub detail: Value,
 }
 
@@ -1642,6 +1643,7 @@ impl Store {
                 acknowledged_at: None,
                 closed_by: None,
                 closed_at: None,
+                monitoring: None,
                 detail: json!({"source": "DEMO_ONLY"}),
             },
             Alert {
@@ -1671,6 +1673,7 @@ impl Store {
                 acknowledged_at: Some("2026-09-20T12:00:00Z".to_owned()),
                 closed_by: None,
                 closed_at: None,
+                monitoring: None,
                 detail: json!({"source": "DEMO_ONLY"}),
             },
         ]
@@ -1865,6 +1868,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/alerts", get(list_alerts))
         .route("/api/v1/alerts/detect", post(detect_alerts))
         .route("/api/v1/alerts/{alert_id}", get(get_alert))
+        .route(
+            "/api/v1/alerts/{alert_id}/monitor",
+            post(start_alert_monitoring),
+        )
         .route("/api/v1/alerts/{alert_id}/ack", post(ack_alert))
         .route("/api/v1/alerts/{alert_id}/acknowledge", post(ack_alert))
         .route("/api/v1/alerts/{alert_id}/close", post(close_alert))
@@ -6887,6 +6894,13 @@ async fn list_alerts(
 ) -> Result<Json<AlertListResponse>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
     if let Some(repository) = state.repository() {
+        if repository
+            .refresh_due_alert_monitoring(None)
+            .await
+            .map_err(ApiError::Internal)?
+        {
+            state.publish_alerts_changed();
+        }
         let items = repository
             .list_alerts(&query)
             .await
@@ -6894,7 +6908,8 @@ async fn list_alerts(
         let total = items.len();
         return Ok(Json(AlertListResponse { items, total }));
     }
-    let store = state.read_store()?;
+    let mut store = state.write_store()?;
+    let monitoring_changed = refresh_demo_alert_monitoring(&mut store.alerts, Utc::now());
     let items = store
         .alerts
         .values()
@@ -6919,6 +6934,10 @@ async fn list_alerts(
         .cloned()
         .collect::<Vec<_>>();
     let total = items.len();
+    drop(store);
+    if monitoring_changed {
+        state.publish_alerts_changed();
+    }
     Ok(Json(AlertListResponse { items, total }))
 }
 
@@ -6929,6 +6948,19 @@ async fn get_alert(
 ) -> Result<Json<Alert>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
     if let Some(repository) = state.repository() {
+        if repository
+            .refresh_due_alert_monitoring(Some(&alert_id))
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?
+        {
+            state.publish_alerts_changed();
+        }
         return repository
             .get_alert(&alert_id)
             .await
@@ -6941,13 +6973,143 @@ async fn get_alert(
                 }
             });
     }
-    let store = state.read_store()?;
-    store
+    let mut store = state.write_store()?;
+    let monitoring_changed = refresh_demo_alert_monitoring(&mut store.alerts, Utc::now());
+    let alert = store
         .alerts
         .get(&alert_id)
         .cloned()
-        .ok_or_else(|| ApiError::NotFound(format!("alert {alert_id} not found")))
-        .map(Json)
+        .ok_or_else(|| ApiError::NotFound(format!("alert {alert_id} not found")))?;
+    drop(store);
+    if monitoring_changed {
+        state.publish_alerts_changed();
+    }
+    Ok(Json(alert))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AlertMonitoringRequest {
+    pub monitoring_period_days: u32,
+}
+
+async fn start_alert_monitoring(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(alert_id): Path<String>,
+    Json(request): Json<AlertMonitoringRequest>,
+) -> Result<Json<Alert>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    if let Some(repository) = state.repository() {
+        let alert = repository
+            .start_alert_monitoring(
+                &alert_id,
+                &actor.user_id,
+                request.monitoring_period_days,
+                &state.config.alert_detector,
+            )
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("already being monitored")
+                    || error.contains("closed alert")
+                {
+                    ApiError::Conflict(error)
+                } else if error.contains("monitoring period must") {
+                    ApiError::BadRequest(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "START_ALERT_MONITORING",
+                "alert",
+                Some(&alert_id),
+                Some(&request_id_from_headers(&headers)),
+                None,
+                json!({
+                    "monitoring_period_days": request.monitoring_period_days,
+                    "observation_period_days": alert.monitoring.as_ref().map(|item| item.observation_period_days),
+                }),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        state.publish_alerts_changed();
+        return Ok(Json(alert));
+    }
+
+    let observation_period_days = state.config.alert_detector.period_days;
+    if !anomaly::valid_monitoring_period(request.monitoring_period_days, observation_period_days) {
+        return Err(ApiError::BadRequest(
+            "monitoring period must be a positive multiple of the detector period (up to 12 periods)"
+                .to_owned(),
+        ));
+    }
+    let mut store = state.write_store()?;
+    let alert = store
+        .alerts
+        .get_mut(&alert_id)
+        .ok_or_else(|| ApiError::NotFound(format!("alert {alert_id} not found")))?;
+    if alert.status.eq_ignore_ascii_case("closed") {
+        return Err(ApiError::Conflict(
+            "cannot monitor a closed alert".to_owned(),
+        ));
+    }
+    if alert
+        .monitoring
+        .as_ref()
+        .is_some_and(|monitoring| monitoring.state == AlertMonitoringState::Monitoring)
+    {
+        return Err(ApiError::Conflict(
+            "alert is already being monitored".to_owned(),
+        ));
+    }
+    let started_at = Utc::now();
+    let ends_at = started_at + Duration::days(i64::from(request.monitoring_period_days));
+    alert.monitoring = Some(AlertMonitoring {
+        state: AlertMonitoringState::Monitoring,
+        monitoring_period_days: request.monitoring_period_days,
+        observation_period_days,
+        started_at: started_at.to_rfc3339(),
+        ends_at: ends_at.to_rfc3339(),
+        started_by: actor.user_id,
+        completed_at: None,
+        evidence: None,
+    });
+    let updated = alert.clone();
+    drop(store);
+    state.publish_alerts_changed();
+    Ok(Json(updated))
+}
+
+fn refresh_demo_alert_monitoring(alerts: &mut BTreeMap<String, Alert>, now: DateTime<Utc>) -> bool {
+    let mut changed = false;
+    for alert in alerts.values_mut() {
+        let Some(monitoring) = alert.monitoring.as_mut() else {
+            continue;
+        };
+        if monitoring.state != AlertMonitoringState::Monitoring {
+            continue;
+        }
+        let due = DateTime::parse_from_rfc3339(&monitoring.ends_at)
+            .map(|ends_at| ends_at.with_timezone(&Utc) <= now)
+            .unwrap_or(false);
+        if !due {
+            continue;
+        }
+        monitoring.state = AlertMonitoringState::InsufficientHistory;
+        monitoring.completed_at = Some(now.to_rfc3339());
+        monitoring.evidence = Some(json!({
+            "schema_version": "signal-monitoring.v1",
+            "source": "memory_demo",
+            "reason": "DEMO_SERIES_NOT_AUTHORITATIVE",
+            "message": "Демо-данные не подтверждают наблюдаемую серию для оценки сигнала.",
+        }));
+        changed = true;
+    }
+    changed
 }
 
 async fn ack_alert(
@@ -7045,6 +7207,13 @@ async fn detect_alerts(
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
     let config = state.config.alert_detector.clone();
     if let Some(repository) = state.repository() {
+        if repository
+            .refresh_due_alert_monitoring(None)
+            .await
+            .map_err(ApiError::Internal)?
+        {
+            state.publish_alerts_changed();
+        }
         let run = repository
             .detect_alerts(&config)
             .await
@@ -8425,6 +8594,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/alerts": { "get": { "summary": "List alerts" } },
             "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist region/topic anomaly alerts" } },
             "/api/v1/alerts/{alert_id}": { "get": { "summary": "Get alert detail and linked tickets" } },
+            "/api/v1/alerts/{alert_id}/monitor": { "post": { "summary": "Take a signal under observation for a bounded period" } },
             "/api/v1/alerts/{alert_id}/ack": { "post": { "summary": "Acknowledge alert" } },
             "/api/v1/alerts/{alert_id}/acknowledge": { "post": { "summary": "Acknowledge alert alias" } },
             "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },

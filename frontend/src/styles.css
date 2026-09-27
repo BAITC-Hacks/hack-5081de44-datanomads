@@ -447,6 +447,11 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .signal-location strong { overflow-wrap: anywhere; color: #bdcfc5; font-size: 10px; font-weight: 550; line-height: 1.35; }
 .signal-card .alert-facts { margin: 18px 0; }
 .signal-card .alert-facts strong { overflow-wrap: anywhere; }
+.signal-monitoring { display: grid; gap: 7px; margin: 18px 0; padding: 13px; border: 1px solid rgba(140,240,200,.14); border-radius: 7px; background: rgba(140,240,200,.035); }
+.signal-monitoring > strong { color: #c4e8d4; font-size: 12px; }
+.signal-monitoring > p { margin: 0; color: #91a69b; font-size: 10px; line-height: 1.45; }
+.signal-monitoring > small { color: #748a7e; font-size: 9px; }
+.signal-monitoring ul { display: grid; gap: 5px; margin: 4px 0 0; padding-left: 16px; color: #9eb3a8; font-size: 9px; line-height: 1.4; }
 .alert-detail-chart { min-width: 0; }
 .signal-card .data-chart { height: 225px; margin: 5px 0 10px; }
 .signal-reasons, .signal-sources { margin-top: 17px; padding-top: 14px; border-top: 1px solid rgba(214,236,225,.08); }
@@ -458,6 +463,8 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .signal-sources li { overflow: hidden; padding: 6px 8px; border: 1px solid rgba(214,236,225,.07); border-radius: 5px; color: #a9c0b2; background: rgba(0,0,0,.12); text-overflow: ellipsis; white-space: nowrap; }
 .signal-sources > p, .signal-missing-evidence { margin-top: 8px; color: #778a81; font-size: 10px; line-height: 1.45; }
 .signal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 15px; margin-top: 20px; padding-top: 14px; border-top: 1px solid rgba(214,236,225,.08); }
+.signal-monitoring-period { display: grid; gap: 4px; color: #81958b; font-size: 9px; }
+.signal-monitoring-period select { min-height: 30px; padding: 4px 7px; border: 1px solid rgba(214,236,225,.14); border-radius: 5px; color: #b8cbc0; background: #17211d; font: inherit; }
 .signal-open-tickets { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 0 11px; border: 1px solid rgba(140,240,200,.24); border-radius: 6px; color: var(--mint); background: rgba(140,240,200,.06); font-size: 10px; font-weight: 600; cursor: pointer; }
 .signal-open-tickets:hover { border-color: rgba(140,240,200,.5); background: rgba(140,240,200,.11); }
 .signal-open-tickets:focus-visible, .signal-card .text-button:focus-visible, .filter-chip:focus-visible { outline: 2px solid rgba(140,240,200,.7); outline-offset: 2px; }

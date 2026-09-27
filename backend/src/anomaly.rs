@@ -1,5 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::env;
 
 use crate::Alert;
@@ -17,15 +18,16 @@ const DEFAULT_CRITICAL_RATIO_THRESHOLD: f64 = 3.0;
 const DEFAULT_BASELINE_FLOOR: f64 = 1.0;
 const DEFAULT_COOLDOWN_HOURS: u32 = 168;
 const MAD_NORMALIZATION: f64 = 1.4826;
+const MAX_MONITORING_PERIODS: u32 = 12;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeasonalityMode {
     WeekdayAlignedWeekly,
     None,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AlertDetectorConfig {
     pub detector_version: String,
     pub period_days: u32,
@@ -40,8 +42,8 @@ pub struct AlertDetectorConfig {
     pub baseline_floor: f64,
     pub cooldown_hours: u32,
     pub seasonality: SeasonalityMode,
-    pub baseline_method: &'static str,
-    pub dispersion_method: &'static str,
+    pub baseline_method: String,
+    pub dispersion_method: String,
 }
 
 impl Default for AlertDetectorConfig {
@@ -60,8 +62,8 @@ impl Default for AlertDetectorConfig {
             baseline_floor: DEFAULT_BASELINE_FLOOR,
             cooldown_hours: DEFAULT_COOLDOWN_HOURS,
             seasonality: SeasonalityMode::WeekdayAlignedWeekly,
-            baseline_method: "median",
-            dispersion_method: "median_absolute_deviation",
+            baseline_method: "median".to_owned(),
+            dispersion_method: "median_absolute_deviation".to_owned(),
         }
     }
 }
@@ -119,55 +121,64 @@ impl AlertDetectorConfig {
     }
 
     pub fn validate(&self) {
-        assert!(
-            (1..=31).contains(&self.period_days),
-            "PULSE_ALERT_PERIOD_DAYS must be between 1 and 31"
-        );
-        assert!(
-            (1..=52).contains(&self.baseline_periods),
-            "PULSE_ALERT_BASELINE_PERIODS must be between 1 and 52"
-        );
-        assert!(
-            self.minimum_count <= i32::MAX as u32,
-            "PULSE_ALERT_MINIMUM_COUNT must fit in a 32-bit integer"
-        );
-        assert!(
-            self.minimum_count > 0,
-            "PULSE_ALERT_MINIMUM_COUNT must be positive"
-        );
-        assert!(
-            (1..=24 * 365).contains(&self.cooldown_hours),
-            "PULSE_ALERT_COOLDOWN_HOURS must be between 1 and 8760"
-        );
-        assert!(
-            !self.detector_version.trim().is_empty(),
-            "PULSE_ALERT_DETECTOR_VERSION must not be empty"
-        );
-        assert!(
-            self.robust_z_threshold.is_finite()
-                && self.ratio_threshold.is_finite()
-                && self.high_z_threshold.is_finite()
-                && self.critical_z_threshold.is_finite()
-                && self.high_ratio_threshold.is_finite()
-                && self.critical_ratio_threshold.is_finite()
-                && self.robust_z_threshold > 0.0
-                && self.ratio_threshold >= 1.0
-                && self.high_z_threshold >= self.robust_z_threshold
-                && self.critical_z_threshold >= self.high_z_threshold
-                && self.high_ratio_threshold >= self.ratio_threshold
-                && self.critical_ratio_threshold >= self.high_ratio_threshold,
-            "alert detector thresholds must be positive and ordered"
-        );
-        assert!(
-            self.baseline_floor.is_finite() && self.baseline_floor > 0.0,
-            "PULSE_ALERT_BASELINE_FLOOR must be positive"
-        );
-        if matches!(self.seasonality, SeasonalityMode::WeekdayAlignedWeekly) {
-            assert_eq!(
-                self.period_days, 7,
-                "weekday-aligned seasonality requires seven-day periods"
-            );
+        if let Some(message) = self.validation_error() {
+            panic!("{message}");
         }
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.validation_error().is_none()
+    }
+
+    fn validation_error(&self) -> Option<&'static str> {
+        if !(1..=31).contains(&self.period_days) {
+            return Some("PULSE_ALERT_PERIOD_DAYS must be between 1 and 31");
+        }
+        if !(1..=52).contains(&self.baseline_periods) {
+            return Some("PULSE_ALERT_BASELINE_PERIODS must be between 1 and 52");
+        }
+        if self.minimum_count > i32::MAX as u32 {
+            return Some("PULSE_ALERT_MINIMUM_COUNT must fit in a 32-bit integer");
+        }
+        if self.minimum_count == 0 {
+            return Some("PULSE_ALERT_MINIMUM_COUNT must be positive");
+        }
+        if !(1..=24 * 365).contains(&self.cooldown_hours) {
+            return Some("PULSE_ALERT_COOLDOWN_HOURS must be between 1 and 8760");
+        }
+        if self.detector_version.trim().is_empty() {
+            return Some("PULSE_ALERT_DETECTOR_VERSION must not be empty");
+        }
+        if self.baseline_method != "median" {
+            return Some("alert baseline method is not supported");
+        }
+        if self.dispersion_method != "median_absolute_deviation" {
+            return Some("alert dispersion method is not supported");
+        }
+        if !(self.robust_z_threshold.is_finite()
+            && self.ratio_threshold.is_finite()
+            && self.high_z_threshold.is_finite()
+            && self.critical_z_threshold.is_finite()
+            && self.high_ratio_threshold.is_finite()
+            && self.critical_ratio_threshold.is_finite()
+            && self.robust_z_threshold > 0.0
+            && self.ratio_threshold >= 1.0
+            && self.high_z_threshold >= self.robust_z_threshold
+            && self.critical_z_threshold >= self.high_z_threshold
+            && self.high_ratio_threshold >= self.ratio_threshold
+            && self.critical_ratio_threshold >= self.high_ratio_threshold)
+        {
+            return Some("alert detector thresholds must be positive and ordered");
+        }
+        if !(self.baseline_floor.is_finite() && self.baseline_floor > 0.0) {
+            return Some("PULSE_ALERT_BASELINE_FLOOR must be positive");
+        }
+        if matches!(self.seasonality, SeasonalityMode::WeekdayAlignedWeekly)
+            && self.period_days != 7
+        {
+            return Some("weekday-aligned seasonality requires seven-day periods");
+        }
+        None
     }
 }
 
@@ -255,6 +266,178 @@ pub(crate) enum AlertEvaluation {
     InsufficientHistory,
     BelowThreshold,
     Anomaly(AlertEvidence),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlertMonitoringState {
+    Monitoring,
+    Stabilized,
+    Persisting,
+    Worsening,
+    Recurred,
+    InsufficientHistory,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AlertMonitoring {
+    pub state: AlertMonitoringState,
+    pub monitoring_period_days: u32,
+    pub observation_period_days: u32,
+    pub started_at: String,
+    pub ends_at: String,
+    pub started_by: String,
+    pub completed_at: Option<String>,
+    pub evidence: Option<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MonitoringObservationInput {
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub current_count: i64,
+    pub source_ticket_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MonitoringObservation {
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub current_count: i64,
+    pub baseline: f64,
+    pub deviation: f64,
+    pub robust_z: Option<f64>,
+    pub ratio: f64,
+    pub severity: Option<String>,
+    pub signal_detected: bool,
+    pub source_ticket_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AlertMonitoringEvaluation {
+    pub state: AlertMonitoringState,
+    pub observations: Vec<MonitoringObservation>,
+}
+
+pub(crate) fn valid_monitoring_period(
+    monitoring_period_days: u32,
+    observation_period_days: u32,
+) -> bool {
+    observation_period_days > 0
+        && monitoring_period_days >= observation_period_days
+        && monitoring_period_days % observation_period_days == 0
+        && monitoring_period_days / observation_period_days <= MAX_MONITORING_PERIODS
+}
+
+pub(crate) fn evaluate_monitoring(
+    inputs: &[MonitoringObservationInput],
+    initial_count: i64,
+    baseline: Option<f64>,
+    median_absolute_deviation: Option<f64>,
+    config: Option<&AlertDetectorConfig>,
+) -> AlertMonitoringEvaluation {
+    let Some(config) = config else {
+        return insufficient_monitoring_history();
+    };
+    let (Some(baseline), Some(median_absolute_deviation)) = (baseline, median_absolute_deviation)
+    else {
+        return insufficient_monitoring_history();
+    };
+    if !config.is_valid()
+        || inputs.is_empty()
+        || initial_count < 0
+        || inputs.iter().any(|input| input.current_count < 0)
+        || !baseline.is_finite()
+        || baseline < 0.0
+        || !median_absolute_deviation.is_finite()
+        || median_absolute_deviation < 0.0
+        || inputs.iter().any(|input| {
+            input.period_end - input.period_start != Duration::days(i64::from(config.period_days))
+                || i64::try_from(input.source_ticket_ids.len()).ok() != Some(input.current_count)
+        })
+        || inputs
+            .windows(2)
+            .any(|pair| pair[0].period_end != pair[1].period_start)
+    {
+        return insufficient_monitoring_history();
+    }
+
+    let robust_dispersion = median_absolute_deviation * MAD_NORMALIZATION;
+    let observations = inputs
+        .iter()
+        .map(|input| {
+            let deviation = input.current_count as f64 - baseline;
+            let ratio = input.current_count as f64 / baseline.max(config.baseline_floor);
+            let robust_z = (robust_dispersion > 0.0).then(|| deviation / robust_dispersion);
+            let z_triggered = robust_z.is_some_and(|value| value >= config.robust_z_threshold);
+            let ratio_triggered = ratio >= config.ratio_threshold;
+            let signal_detected = input.current_count >= i64::from(config.minimum_count)
+                && (z_triggered || ratio_triggered);
+            let severity = if !signal_detected {
+                None
+            } else if ratio >= config.critical_ratio_threshold
+                || robust_z.is_some_and(|value| value >= config.critical_z_threshold)
+            {
+                Some("CRITICAL".to_owned())
+            } else if ratio >= config.high_ratio_threshold
+                || robust_z.is_some_and(|value| value >= config.high_z_threshold)
+            {
+                Some("HIGH".to_owned())
+            } else {
+                Some("MEDIUM".to_owned())
+            };
+            MonitoringObservation {
+                period_start: input.period_start,
+                period_end: input.period_end,
+                current_count: input.current_count,
+                baseline,
+                deviation,
+                robust_z,
+                ratio,
+                severity,
+                signal_detected,
+                source_ticket_ids: input.source_ticket_ids.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // The initial alert is an observed anomaly. A later signal after a full
+    // below-threshold observation is therefore a recurrence, not a new cause.
+    let mut below_after_initial_or_signal = false;
+    let mut recurred = false;
+    for observation in &observations {
+        if observation.signal_detected {
+            recurred |= below_after_initial_or_signal;
+        } else {
+            below_after_initial_or_signal = true;
+        }
+    }
+    let latest_observation = observations.last();
+    let latest_is_signal =
+        latest_observation.is_some_and(|observation| observation.signal_detected);
+    let latest_is_worse =
+        latest_observation.is_some_and(|observation| observation.current_count > initial_count);
+    let state = if recurred {
+        AlertMonitoringState::Recurred
+    } else if latest_is_signal && latest_is_worse {
+        AlertMonitoringState::Worsening
+    } else if latest_is_signal {
+        AlertMonitoringState::Persisting
+    } else {
+        AlertMonitoringState::Stabilized
+    };
+
+    AlertMonitoringEvaluation {
+        state,
+        observations,
+    }
+}
+
+fn insufficient_monitoring_history() -> AlertMonitoringEvaluation {
+    AlertMonitoringEvaluation {
+        state: AlertMonitoringState::InsufficientHistory,
+        observations: Vec::new(),
+    }
 }
 
 pub(crate) fn evaluate_series(
@@ -345,7 +528,10 @@ fn median(values: &mut [f64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate_series, AlertDetectorConfig, AlertEvaluation, AlertSeriesInput};
+    use super::{
+        evaluate_monitoring, evaluate_series, valid_monitoring_period, AlertDetectorConfig,
+        AlertEvaluation, AlertMonitoringState, AlertSeriesInput, MonitoringObservationInput,
+    };
     use chrono::{DateTime, Duration, Utc};
 
     fn period_end() -> DateTime<Utc> {
@@ -419,5 +605,58 @@ mod tests {
             evaluate_series(&input(2, &[1, 2, 1, 2], 6), &config),
             AlertEvaluation::BelowThreshold
         ));
+    }
+
+    fn monitoring_input(counts: &[i64]) -> Vec<MonitoringObservationInput> {
+        let first_start = period_end() - Duration::days((counts.len() as i64) * 7);
+        counts
+            .iter()
+            .enumerate()
+            .map(|(index, count)| {
+                let period_start = first_start + Duration::days((index as i64) * 7);
+                MonitoringObservationInput {
+                    period_start,
+                    period_end: period_start + Duration::days(7),
+                    current_count: *count,
+                    source_ticket_ids: (0..*count).map(|id| id.to_string()).collect(),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn monitoring_period_must_use_complete_detector_windows() {
+        assert!(valid_monitoring_period(7, 7));
+        assert!(valid_monitoring_period(84, 7));
+        assert!(!valid_monitoring_period(6, 7));
+        assert!(!valid_monitoring_period(91, 7));
+    }
+
+    #[test]
+    fn monitoring_outcomes_are_based_on_saved_detector_thresholds_and_series() {
+        let config = AlertDetectorConfig::default();
+        let assess = |counts: &[i64]| {
+            evaluate_monitoring(
+                &monitoring_input(counts),
+                5,
+                Some(2.0),
+                Some(0.5),
+                Some(&config),
+            )
+            .state
+        };
+
+        assert_eq!(assess(&[2, 2]), AlertMonitoringState::Stabilized);
+        assert_eq!(assess(&[4, 4]), AlertMonitoringState::Persisting);
+        assert_eq!(assess(&[4, 6]), AlertMonitoringState::Worsening);
+        assert_eq!(assess(&[6, 4]), AlertMonitoringState::Persisting);
+        assert_eq!(assess(&[2, 6]), AlertMonitoringState::Recurred);
+    }
+
+    #[test]
+    fn monitoring_without_reproducible_detector_evidence_is_explicitly_insufficient() {
+        let result = evaluate_monitoring(&monitoring_input(&[0, 0]), 5, None, None, None);
+        assert_eq!(result.state, AlertMonitoringState::InsufficientHistory);
+        assert!(result.observations.is_empty());
     }
 }

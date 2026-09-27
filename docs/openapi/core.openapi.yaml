@@ -936,6 +936,33 @@ paths:
         '200': { description: Request completed }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/alerts/{alert_id}/monitor:
+    post:
+      tags: [alerts]
+      summary: Take an observed signal under manager monitoring
+      description: Starts one bounded monitoring period using complete windows from the alert's saved detector configuration. The result describes observed ticket volume only.
+      parameters:
+        - name: alert_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertMonitoringRequest' }
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Manager monitoring period persisted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/alerts/{alert_id}/ack:
     post:
       tags: [alerts]
@@ -1867,7 +1894,7 @@ components:
         backtest: { type: object, nullable: true, additionalProperties: true }
     Alert:
       type: object
-      required: [id, incident_key, alert_type, severity, status, title, description, region_id, topic_id, ticket_count, current_count, linked_ticket_ids, created_at, detected_at, detail]
+      required: [id, incident_key, alert_type, severity, status, title, description, region_id, topic_id, ticket_count, current_count, linked_ticket_ids, created_at, detected_at, monitoring, detail]
       properties:
         id: { type: string }
         incident_key: { type: string }
@@ -1894,7 +1921,30 @@ components:
         acknowledged_at: { type: string, format: date-time, nullable: true }
         closed_by: { type: string, nullable: true }
         closed_at: { type: string, format: date-time, nullable: true }
+        monitoring: { allOf: [{ $ref: '#/components/schemas/AlertMonitoring' }], nullable: true }
         detail: { type: object, additionalProperties: true }
+    AlertMonitoringRequest:
+      type: object
+      additionalProperties: false
+      required: [monitoring_period_days]
+      properties:
+        monitoring_period_days:
+          type: integer
+          minimum: 1
+          maximum: 372
+          description: Must be an integer multiple of the saved detector period, up to 12 complete observation periods.
+    AlertMonitoring:
+      type: object
+      required: [state, monitoring_period_days, observation_period_days, started_at, ends_at, started_by, completed_at, evidence]
+      properties:
+        state: { type: string, enum: [MONITORING, STABILIZED, PERSISTING, WORSENING, RECURRED, INSUFFICIENT_HISTORY] }
+        monitoring_period_days: { type: integer, minimum: 1, maximum: 372 }
+        observation_period_days: { type: integer, minimum: 1, maximum: 31 }
+        started_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        started_by: { type: string }
+        completed_at: { type: string, format: date-time, nullable: true }
+        evidence: { type: object, nullable: true, additionalProperties: true, description: Includes the saved detector config/version, observed period counts and source ticket IDs when the period is complete. }
     AlertListResponse:
       type: object
       required: [items, total]

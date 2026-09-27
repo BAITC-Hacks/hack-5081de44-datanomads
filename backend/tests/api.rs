@@ -1608,6 +1608,25 @@ async fn alert_events_stream_snapshot_and_changes() {
         .unwrap();
     assert!(String::from_utf8_lossy(&snapshot).contains("event: alerts.snapshot"));
 
+    let monitored = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/alerts/alert-001/monitor")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"monitoring_period_days":7}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(monitored.status(), 200);
+    let monitoring_change = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&monitoring_change).contains("event: alerts.changed"));
+
     let acknowledged = application
         .oneshot(
             Request::post("/api/v1/alerts/alert-001/ack")
@@ -1674,6 +1693,72 @@ async fn demo_alert_detection_reports_insufficient_history_explicitly() {
     assert_eq!(detection["source"], "memory_demo");
     assert_eq!(detection["evaluated_series"], 0);
     assert_eq!(detection["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn manager_can_start_one_bounded_alert_monitoring_period_without_changing_alert_status() {
+    let application = app(AppState::demo());
+    let forbidden = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/alerts/alert-001/monitor")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"monitoring_period_days":14}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
+    let invalid_period = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/alerts/alert-001/monitor")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"monitoring_period_days":8}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_period.status(), 400);
+
+    let started = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/alerts/alert-001/monitor")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"monitoring_period_days":14}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), 200);
+    let started: serde_json::Value =
+        serde_json::from_slice(&to_bytes(started.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(started["status"], "open");
+    assert_eq!(started["monitoring"]["state"], "MONITORING");
+    assert_eq!(started["monitoring"]["monitoring_period_days"], 14);
+    assert_eq!(started["monitoring"]["observation_period_days"], 7);
+    assert!(started["monitoring"]["evidence"].is_null());
+    assert!(started["description"]
+        .as_str()
+        .unwrap()
+        .contains("Требуется проверка"));
+
+    let duplicate = application
+        .oneshot(
+            Request::post("/api/v1/alerts/alert-001/monitor")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"monitoring_period_days":7}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), 409);
 }
 
 #[tokio::test]

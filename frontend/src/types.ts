@@ -266,12 +266,50 @@ export interface Alert {
   ratio?: number
   detectorVersion?: string
   linkedTicketIds?: string[]
+  monitoring?: AlertMonitoring
   historyCounts?: number[]
   triggerReasons?: string[]
   robustZThreshold?: number
   ratioThreshold?: number
   periodDays?: number
   status: 'Новый' | 'В работе' | 'Закрыт'
+}
+
+export type AlertMonitoringState =
+  | 'MONITORING'
+  | 'STABILIZED'
+  | 'PERSISTING'
+  | 'WORSENING'
+  | 'RECURRED'
+  | 'INSUFFICIENT_HISTORY'
+
+export interface AlertMonitoringPeriod {
+  period_start: string
+  period_end: string
+  current_count: number
+  baseline?: number
+  deviation?: number
+  robust_z?: number | null
+  ratio?: number
+  severity?: string | null
+  signal_detected?: boolean
+  source_ticket_ids: string[]
+}
+
+export interface AlertMonitoring {
+  state: AlertMonitoringState
+  monitoring_period_days: number
+  observation_period_days: number
+  started_at: string
+  ends_at: string
+  started_by: string
+  completed_at?: string | null
+  evidence?: {
+    source?: string
+    reason?: string
+    interpretation_scope?: string
+    periods?: AlertMonitoringPeriod[]
+  } | null
 }
 
 export interface ForecastPoint {
