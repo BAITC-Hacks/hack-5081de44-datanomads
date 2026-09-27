@@ -375,7 +375,7 @@ paths:
   /api/v1/learning/cycle/close:
     post:
       tags: [learning]
-      summary: Close COLLECT and queue candidate training
+      summary: Close COLLECT; queue training only with enough structured operator decisions
       security: [{ pulseRole: [] }, {}]
       requestBody:
         required: false
@@ -387,12 +387,14 @@ paths:
                 cycle_id: { type: string }
       responses:
         '202':
-          description: Training job queued
+          description: Training job queued, or INSUFFICIENT_FEEDBACK without a job
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StoredResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Learning cycle not found }
+        '409': { description: Cycle is not in COLLECT }
   /api/v1/learning/candidate/evaluation:
     get:
       tags: [learning]
@@ -707,7 +709,7 @@ paths:
   /api/v1/learning/{cycle_id}/feedback:
     post:
       tags: [learning]
-      summary: Add validated feedback to a learning cycle
+      summary: Record unverified feedback metadata in a COLLECT cycle
       parameters:
         - name: cycle_id
           in: path
@@ -715,9 +717,11 @@ paths:
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
       responses:
-        '200': { description: Request completed }
+        '201': { description: Unverified feedback metadata recorded }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: Learning cycle or ticket not found }
+        '409': { description: Learning cycle is not in COLLECT }
   /api/v1/learning/{cycle_id}/promote:
     post:
       tags: [learning]

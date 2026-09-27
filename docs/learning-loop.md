@@ -49,6 +49,17 @@ validation_status
 feedback_created_at
 ```
 
+Решение оператора попадает в `learning_feedback` только при открытом
+`COLLECT` cycle. Core закрепляет за cycle версию модели из первой production
+prediction и не смешивает feedback разных версий. Если открытого подходящего
+cycle нет, операторское решение остаётся в PostgreSQL, но не включается в
+обучающую выборку. Endpoint `/api/v1/learning/{cycle_id}/feedback` сохраняет
+свободные заметки со статусом `UNVERIFIED`; они не увеличивают счётчик
+структурированных решений и сами по себе не запускают training job. Закрытие
+cycle и постановка job выполняются в одной транзакции после проверки этого
+счётчика. PII, dataset lineage и исключение frozen evaluation проверяются
+позже offline exporter и candidate builder до фактического обучения.
+
 `candidate_evaluations`:
 
 ```text

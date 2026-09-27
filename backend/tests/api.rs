@@ -85,6 +85,126 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
 }
 
 #[tokio::test]
+async fn learning_cycle_counts_operator_decisions_but_not_freeform_feedback() {
+    let application = app(AppState::demo());
+    let created = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value =
+        serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let first_cycle = created["id"].as_str().unwrap();
+
+    let note = application
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/v1/learning/{first_cycle}/feedback"))
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"ticket_id":"ticket-001","decision":"confirm"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(note.status(), 201);
+    let cycle = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/learning/{first_cycle}"))
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cycle: serde_json::Value =
+        serde_json::from_slice(&to_bytes(cycle.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(cycle["feedback_count"], 0);
+
+    let closed = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/cycle/close")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"cycle_id":"{first_cycle}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status(), 202);
+    let closed: serde_json::Value =
+        serde_json::from_slice(&to_bytes(closed.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(closed["state"], "INSUFFICIENT_FEEDBACK");
+    assert!(closed["job_id"].is_null());
+
+    let late_note = application
+        .clone()
+        .oneshot(
+            Request::post(format!("/api/v1/learning/{first_cycle}/feedback"))
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"ticket_id":"ticket-001","decision":"confirm"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(late_note.status(), 409);
+
+    let created = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value =
+        serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let second_cycle = created["id"].as_str().unwrap();
+    let decision = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/assist/ticket-001/confirm")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(decision.status(), 200);
+    let cycle = application
+        .oneshot(
+            Request::get(format!("/api/v1/learning/{second_cycle}"))
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cycle: serde_json::Value =
+        serde_json::from_slice(&to_bytes(cycle.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(cycle["feedback_count"], 1);
+}
+
+#[tokio::test]
 async fn operator_cannot_read_manager_analytics() {
     let response = app(AppState::demo())
         .oneshot(

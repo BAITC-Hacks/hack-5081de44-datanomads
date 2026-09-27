@@ -301,6 +301,13 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     cycle_id = str(cycle["id"])
     status, _, feedback = json_request(base_url, "POST", f"/api/v1/learning/{cycle_id}/feedback", body={"ticket_id": ticket_ids[0], "decision": "confirm"}, role="OPERATOR", timeout=timeout)
     expect(status == 201, f"learning feedback failed: {feedback}")
+    status, _, cycle_decision = json_request(
+        base_url, "POST", f"/api/v1/assist/{ticket_ids[1]}/confirm",
+        body={}, role="OPERATOR", timeout=timeout,
+    )
+    expect(status == 200 and cycle_decision.get("decision", {}).get("action") == "confirm", f"cycle decision failed: {cycle_decision}")
+    status, _, collecting = json_request(base_url, "GET", f"/api/v1/learning/{cycle_id}", role="ML_REVIEWER", timeout=timeout)
+    expect(status == 200 and collecting.get("feedback_count") == 1, f"unverified feedback counted as training evidence: {collecting}")
     status, _, closed_cycle = json_request(base_url, "POST", "/api/v1/learning/cycle/close", body={"cycle_id": cycle_id}, role="ML_REVIEWER", timeout=timeout)
     expect(status == 202 and closed_cycle.get("state") == "TRAINING", f"learning close failed: {closed_cycle}")
     evaluation: dict[str, Any] = {}

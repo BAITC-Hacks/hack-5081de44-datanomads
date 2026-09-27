@@ -2007,7 +2007,8 @@ async fn apply_decision(
     if let Some(cycle_id) = store
         .learning_cycles
         .values()
-        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .filter(|cycle| cycle.state == "COLLECT")
+        .max_by(|left, right| left.id.cmp(&right.id))
         .map(|cycle| cycle.id.clone())
     {
         let feedback = LearningFeedback {
@@ -3448,10 +3449,20 @@ async fn learning_overview(
             .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
-    let items = store.learning_cycles.values().cloned().collect::<Vec<_>>();
+    let items = store
+        .learning_cycles
+        .values()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
     let active_cycle = items
         .iter()
-        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .find(|cycle| {
+            !matches!(
+                cycle.state.as_str(),
+                "PROMOTED" | "REJECTED" | "INSUFFICIENT_FEEDBACK"
+            )
+        })
         .cloned();
     let production_model = store
         .models
@@ -3575,6 +3586,8 @@ async fn add_learning_feedback(
             .map_err(|error| {
                 if error.contains("not found") {
                     ApiError::NotFound(error)
+                } else if error.contains("not collecting") {
+                    ApiError::Conflict(error)
                 } else {
                     ApiError::Internal(error)
                 }
@@ -3582,10 +3595,18 @@ async fn add_learning_feedback(
         return Ok((StatusCode::CREATED, Json(feedback)));
     }
     let mut store = state.write_store()?;
-    if !store.learning_cycles.contains_key(&cycle_id) {
-        return Err(ApiError::NotFound(format!(
-            "learning cycle {cycle_id} not found"
-        )));
+    match store.learning_cycles.get(&cycle_id) {
+        None => {
+            return Err(ApiError::NotFound(format!(
+                "learning cycle {cycle_id} not found"
+            )))
+        }
+        Some(cycle) if cycle.state != "COLLECT" => {
+            return Err(ApiError::Conflict(
+                "learning cycle is not collecting feedback".to_owned(),
+            ));
+        }
+        Some(_) => {}
     }
     if !store.tickets.contains_key(&request.ticket_id) {
         return Err(ApiError::NotFound(format!(
@@ -3609,10 +3630,6 @@ async fn add_learning_feedback(
     };
     store.next_feedback_number += 1;
     store.learning_feedback.push(feedback.clone());
-    if let Some(cycle) = store.learning_cycles.get_mut(&cycle_id) {
-        cycle.feedback_count += 1;
-        cycle.updated_at = DEMO_TIMESTAMP.to_owned();
-    }
     Ok((StatusCode::CREATED, Json(feedback)))
 }
 
@@ -3746,7 +3763,15 @@ async fn close_learning_cycle(
         let result = repository
             .close_learning_cycle(&request)
             .await
-            .map_err(ApiError::Internal)?;
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("cannot close") || error.contains("no COLLECT") {
+                    ApiError::Conflict(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
         let _ = repository
             .audit(
                 &actor.user_id,
@@ -3779,6 +3804,19 @@ async fn close_learning_cycle(
             "cycle {} cannot close from state {}",
             cycle.id, cycle.state
         )));
+    }
+    if cycle.feedback_count == 0 {
+        cycle.state = "INSUFFICIENT_FEEDBACK".to_owned();
+        cycle.updated_at = DEMO_TIMESTAMP.to_owned();
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "job_id": Value::Null,
+                "state": cycle.state,
+                "cycle": cycle,
+                "production_model_unchanged": true,
+            })),
+        ));
     }
     cycle.state = "EVALUATE".to_owned();
     cycle.updated_at = DEMO_TIMESTAMP.to_owned();
@@ -4175,7 +4213,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },
             "/api/v1/learning": { "get": { "summary": "Learning loop status" }, "post": { "summary": "Start candidate cycle" } },
             "/api/v1/learning/{cycle_id}": { "get": { "summary": "Get learning cycle" } },
-            "/api/v1/learning/{cycle_id}/feedback": { "post": { "summary": "Add validated learning feedback" } },
+            "/api/v1/learning/{cycle_id}/feedback": { "post": { "summary": "Record unverified learning feedback metadata" } },
             "/api/v1/learning/{cycle_id}/promote": { "post": { "summary": "Promote candidate after human review" } },
             "/api/v1/learning/{cycle_id}/reject": { "post": { "summary": "Reject candidate after human review" } },
             "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
@@ -4334,7 +4372,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cycle.status(), StatusCode::OK);
-        assert_eq!(body_json(cycle).await["active_cycle"]["feedback_count"], 4);
+        assert_eq!(body_json(cycle).await["active_cycle"]["feedback_count"], 3);
 
         let relation = app
             .oneshot(
