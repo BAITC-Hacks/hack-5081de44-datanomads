@@ -1,10 +1,15 @@
 {
   "version": 1,
   "api": {
-    "openapi_candidates": [
-      "/openapi.json",
+    "public_docs_denied": [
       "/api/v1/openapi.json",
-      "/docs/openapi.json"
+      "/api/v1/docs",
+      "/openapi.json",
+      "/docs",
+      "/docs/",
+      "/docs/openapi.json",
+      "/redoc",
+      "/redoc/"
     ],
     "health_paths": [
       "/healthz",

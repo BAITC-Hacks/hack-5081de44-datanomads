@@ -49,6 +49,8 @@ services:
       PULSE_TEST_FAKE_TRAINER: ${PULSE_TEST_FAKE_TRAINER:-false}
     volumes:
       - ml-artifacts:/app/trained-artifacts
+    ports:
+      - "127.0.0.1:${ML_HTTP_PORT:-8000}:8000"
     expose:
       - "8000"
     healthcheck:
@@ -152,6 +154,8 @@ services:
       ML_SERVICE_URL: http://ml-service:8000
       RUST_LOG: ${RUST_LOG:-info}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8080}
+    ports:
+      - "127.0.0.1:${PULSE_CORE_HTTP_PORT:-8081}:8080"
     expose:
       - "8080"
     depends_on:

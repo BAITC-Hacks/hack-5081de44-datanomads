@@ -22,6 +22,25 @@ from contracts.validate import validate_demo_artifacts
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "ml-service/artifacts/manifest.json"
 ML_OPENAPI = ROOT / "docs/openapi/ml.openapi.yaml"
+HTTP_METHODS = {
+    "get",
+    "put",
+    "post",
+    "delete",
+    "options",
+    "head",
+    "patch",
+    "trace",
+}
+
+
+def openapi_operations(document: dict) -> set[tuple[str, str]]:
+    return {
+        (path, method)
+        for path, path_item in document["paths"].items()
+        for method in path_item
+        if method.lower() in HTTP_METHODS
+    }
 
 
 class SharedContractTests(unittest.TestCase):
@@ -129,6 +148,28 @@ class SharedContractTests(unittest.TestCase):
                 if parameter["in"] == "header"
             }
             self.assertEqual(documented_headers, runtime_headers)
+
+    def test_ml_openapi_documents_every_runtime_route(self) -> None:
+        published = yaml.safe_load(ML_OPENAPI.read_text(encoding="utf-8"))
+        runtime = ml_main.app.openapi()
+        self.assertEqual(
+            openapi_operations(runtime),
+            openapi_operations(published),
+        )
+
+    def test_documentation_is_available_only_on_loopback_service_ports(self) -> None:
+        compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            compose["services"]["core-api"]["ports"],
+            ["127.0.0.1:${PULSE_CORE_HTTP_PORT:-8081}:8080"],
+        )
+        self.assertEqual(
+            compose["services"]["ml-service"]["ports"],
+            ["127.0.0.1:${ML_HTTP_PORT:-8000}:8000"],
+        )
+        self.assertEqual(ml_main.app.docs_url, "/docs")
+        self.assertEqual(ml_main.app.redoc_url, "/redoc")
+        self.assertEqual(ml_main.app.openapi_url, "/openapi.json")
 
     def test_schema_errors_do_not_include_rejected_values(self) -> None:
         with self.assertRaises(ContractValidationError) as raised:

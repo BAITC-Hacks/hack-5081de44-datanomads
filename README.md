@@ -42,7 +42,11 @@ scripts/smoke
 
 Открыть `http://localhost:8080`. Health endpoints: `/healthz` и `/readyz`.
 OpenAPI-контракты находятся в `docs/openapi/`; Swagger/OpenAPI UI не
-проксируется наружу public contour.
+проксируется наружу public contour. В Compose ML Swagger доступен локально на
+`http://127.0.0.1:8000/docs`, OpenAPI JSON — на
+`http://127.0.0.1:8000/openapi.json`; Core route index — на
+`http://127.0.0.1:8081/api/v1/docs`. Эти порты привязаны только к loopback, а
+публичный Nginx возвращает 404 для документационных путей.
 
 Для полного локального reset PostgreSQL/Qdrant нужен явный флаг:
 

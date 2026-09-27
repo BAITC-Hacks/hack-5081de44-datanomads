@@ -48,7 +48,9 @@ python -m contracts.validate --check-demo
 uvicorn app.main:app --reload --no-access-log
 ```
 
-Документация OpenAPI доступна на `http://localhost:8000/docs`.
+Документация OpenAPI доступна на `http://127.0.0.1:8000/docs`, JSON-схема — на
+`http://127.0.0.1:8000/openapi.json`. Compose публикует этот порт только на
+loopback; публичный Nginx не проксирует `/docs`, `/redoc` или `/openapi.json`.
 
 ## Примеры
 

@@ -67,9 +67,12 @@ rolling backtest окон, MAE/RMSE и состояние короткой ис�
 
 ### API contract
 
-OpenAPI-файлы в `docs/openapi/` валидируются YAML/OpenAPI parser-ом и
-сверяются с route handlers. Любое изменение публичного request/response
-требует обновления схемы и обратного smoke check.
+`core.openapi.yaml` сверяется с методами Axum routes и Core route index;
+`ml.openapi.yaml` сверяется с `FastAPI.app.openapi()`. Smoke на запущенном
+стеке проверяет, что публичный Nginx возвращает 404 на docs paths. Локально
+ML Swagger и Core route index доступны на loopback-портах из `.env.example`.
+Любое изменение request/response требует обновления схемы и обратного smoke
+check.
 
 ### E2E / smoke
 

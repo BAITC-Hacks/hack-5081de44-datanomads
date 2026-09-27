@@ -808,18 +808,24 @@ def _production_version(payload: Any) -> str | None:
     return None
 
 
-def fetch_live_openapi(base_url: str, manifest: Mapping[str, Any], timeout: float) -> tuple[dict[str, Any] | None, str]:
-    for path in manifest["api"]["openapi_candidates"]:
+def check_public_docs_denied(
+    base_url: str, manifest: Mapping[str, Any], timeout: float
+) -> list[Check]:
+    checks: list[Check] = []
+    for path in manifest["api"]["public_docs_denied"]:
         result = http_request(base_url, path, timeout=timeout)
-        if result.status != 200:
-            continue
-        try:
-            payload = json.loads(result.body)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and isinstance(payload.get("paths"), dict):
-            return payload, path
-    return None, ""
+        if result.status is not None:
+            detail = f"HTTP {result.status}"
+        else:
+            detail = result.error or "request failed"
+        checks.append(
+            Check(
+                f"public docs blocked {path}",
+                result.status == 404,
+                detail,
+            )
+        )
+    return checks
 
 
 def run(args: argparse.Namespace) -> int:
@@ -846,12 +852,7 @@ def run(args: argparse.Namespace) -> int:
 
     if not args.offline:
         checks.extend(check_live_health(args.base_url, manifest, args.timeout))
-        live_openapi, openapi_route = fetch_live_openapi(args.base_url, manifest, args.timeout)
-        if live_openapi is None:
-            checks.append(Check("live OpenAPI document", False, "none of the candidate endpoints returned OpenAPI JSON"))
-        else:
-            checks.append(Check("live OpenAPI document", True, openapi_route))
-            checks.extend(check_openapi_document(live_openapi, manifest, core_only=True))
+        checks.extend(check_public_docs_denied(args.base_url, manifest, args.timeout))
         checks.extend(check_live_roles(args.base_url, manifest, args.timeout))
         checks.extend(check_learning_safety(args.base_url, args.timeout, args.learning_cycle_id))
 

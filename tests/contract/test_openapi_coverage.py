@@ -1,12 +1,14 @@
 """Keep the published Core route index and YAML in step with Axum routes."""
 
-from pathlib import Path
+import json
 import re
 import unittest
+from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 METHODS = r"get|post|put|delete"
+DOC_PREFIXES = ("/docs/", "/redoc/")
 
 
 def axum_routes(source: str) -> set[tuple[str, str]]:
@@ -57,6 +59,19 @@ class OpenApiCoverageTests(unittest.TestCase):
         actual = axum_routes(rust)
         self.assertEqual(actual, yaml_routes(yaml))
         self.assertEqual(actual, json_index_routes(rust))
+
+    def test_public_nginx_blocks_documentation_routes(self) -> None:
+        nginx = (ROOT / "docker/nginx/nginx.conf").read_text()
+        manifest = (ROOT / "tests/contract/contract_manifest.json").read_text()
+        public_docs = json.loads(manifest)["api"]["public_docs_denied"]
+        for path in public_docs:
+            prefix = next((item for item in DOC_PREFIXES if path.startswith(item)), None)
+            if prefix is not None:
+                location = r"location\s+\^~\s+" + re.escape(prefix)
+            else:
+                location = r"location\s*=\s+" + re.escape(path)
+            with self.subTest(path=path):
+                self.assertRegex(nginx, location + r"\s*\{\s*return\s+404;")
 
 
 if __name__ == "__main__":
