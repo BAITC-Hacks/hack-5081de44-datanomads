@@ -53,14 +53,21 @@ python scripts/pulse_sdg.py --model qwen3.5:9b --num-records 25
 Результат появляется в игнорируемом Git каталоге `data/sdg/runs/<время>/`:
 артефакты Data Designer, `candidates.jsonl` и `summary.json`. Каждый кандидат
 имеет `synthetic=true`, `split_group=scenario_id` и
-`review_status="PENDING"`. Это **не готовый обучающий корпус**.
+`review_status="PENDING"`. Записываются checksum source scenarios, версия
+prompt, model ID и seed запроса к локальной LLM. `variant_id` вычисляется из
+сценария, языка, стиля и текста, поэтому порядок строк не меняет ID.
+`--generator-seed` по умолчанию равен `109`; [Ollama OpenAI-compatible API](https://docs.ollama.com/api/openai-compatibility)
+поддерживает поле `seed` для chat completions. Seed задаётся для LLM запроса;
+он не доказывает детерминизм sampler Data Designer и полного повторного запуска.
+Это **не готовый обучающий корпус**.
 
 ## Проверки
 
 [`pulse_sdg.py`](../scripts/pulse_sdg.py) до обращения к модели проверяет, что
 каждый seed соответствует паре `CANDIDATE` с явным подтипом в каталоге. После
 генерации он отклоняет строки со сломанной схемой, слишком коротким или длинным
-текстом, точные повторы и некоторые очевидные шаблоны телефона, ИИН и e-mail.
+текстом, точные повторы и известные форматы PII (телефон, ИИН, e-mail,
+помеченные имя и адрес).
 Отчёт содержит только счётчики отклонений.
 
 Автоматическая проверка **не доказывает**, что модель сохранила смысл, правильно
