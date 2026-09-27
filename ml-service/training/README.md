@@ -10,7 +10,7 @@ PYTHONPATH=ml-service .venv/bin/python -m unittest discover \
   -s ml-service/training/tests -v
 ```
 
-The lock resolves 49 packages for Python 3.11.15 on Linux x86_64. Direct
+The lock resolves 63 packages for Python 3.11.15 on Linux x86_64. Direct
 requirements and the core version constraints are kept separately so the lock
 can be regenerated when training code changes. This lock pins package versions,
 but does not pin wheel hashes or other operating systems.
@@ -106,3 +106,23 @@ Recall@1/3/5, MRR, Precision@1/3/5 and graded nDCG@5. Relevance grades are
 Recall/MRR/nDCG average queries with at least one relevant candidate;
 precision includes queries without one. The report emits IDs and scores for a
 blind top-3 expert review queue, with `PENDING` status and no ticket text.
+
+## Forecast candidate comparison
+
+The daily count runner fits [Prophet](https://facebook.github.io/prophet/docs/quick_start.html)
+only on data before each rolling origin and compares it with the weekly
+seasonal naive baseline on identical windows:
+
+```bash
+MPLCONFIGDIR=/tmp/pulse109-mpl .venv/bin/python scripts/evaluate_forecast_candidates.py \
+  /path/to/regional_export.csv \
+  --output /tmp/regional-forecast-candidates.json
+```
+
+It evaluates 30/60/90-day horizons after at least 365 days of history, reports
+MAE, RMSE, WAPE, sMAPE and window counts, and uses lower WAPE with a baseline
+tie-break for provisional selection. It returns `INSUFFICIENT_HISTORY` without
+invented metrics when a horizon has no full window. Prophet uses fixed weekly
+seasonality, no yearly or daily seasonality, and no uncertainty sampling; the
+report contains no interval coverage. A single regional backtest does not
+qualify a model for runtime use.

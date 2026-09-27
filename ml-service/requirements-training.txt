@@ -1,4 +1,5 @@
 pydantic==2.10.4
+prophet==1.4.0
 scikit-learn==1.9.1
 torch==2.7.0
 transformers==4.57.6

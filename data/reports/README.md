@@ -18,6 +18,14 @@ training days plus each forecast horizon, so its report contains no error
 metrics. These are daily aggregate results for two regions, not evidence of
 hourly forecasts or quality across all regions.
 
+The [candidate comparison](vko_109_forecast_candidates.json) uses the same
+22/21/20 windows. Prophet WAPE is 0.4611/0.4964/0.5240, versus the seasonal
+naive values above. It wins only the 30-day horizon under the fixed WAPE rule;
+the 60- and 90-day baseline remains better. The
+[Almaty comparison](almaty_109_forecast_candidates.json) correctly records
+`INSUFFICIENT_HISTORY`. Neither report authorizes runtime promotion, and
+uncertainty intervals or peak-detection quality were not evaluated.
+
 The customer confirmed that `com_exp` is not useful citizen appeal text. Neither
 file contains original appeal text. Synthetic appeal texts were created
 separately; they are not reconstructions of these customer rows. These are two
@@ -31,6 +39,8 @@ To reproduce with the same local files:
 ```bash
 python3 scripts/data_audit.py /path/to/export.csv --output /tmp/source-audit.json
 python3 scripts/evaluate_forecast_csv.py /path/to/export.csv --output /tmp/forecast-baseline.json
+MPLCONFIGDIR=/tmp/pulse109-mpl .venv/bin/python scripts/evaluate_forecast_candidates.py \
+  /path/to/export.csv --output /tmp/forecast-candidates.json
 ```
 
 The output path must be new. Compare the output `sha256` or `source_sha256` with

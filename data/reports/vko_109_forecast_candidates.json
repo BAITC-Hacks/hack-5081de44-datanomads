@@ -1,0 +1,101 @@
+{
+  "calendar_days": 1035,
+  "count_prediction_policy": "clip_negative_to_zero",
+  "days_without_records": 2,
+  "first_date": "2023-01-01",
+  "interval_status": "NOT_EVALUATED",
+  "invalid_csv_or_date_row_count": 0,
+  "last_date": "2025-10-31",
+  "minimum_train_days": 365,
+  "origin_step_days": 30,
+  "peak_detection_status": "NO_REVIEWED_PEAK_LABELS",
+  "prophet_config": {
+    "changepoint_prior_scale": 0.05,
+    "daily_seasonality": false,
+    "uncertainty_samples": 0,
+    "weekly_seasonality": true,
+    "yearly_seasonality": false
+  },
+  "prophet_version": "1.4.0",
+  "record_count": 83385,
+  "report_version": "forecast-candidates.v1",
+  "results": [
+    {
+      "best_on_backtest": "prophet",
+      "horizon_days": 30,
+      "models": {
+        "prophet": {
+          "mae": 40.8356,
+          "rmse": 75.6503,
+          "sample_count": 660,
+          "smape": 0.4119,
+          "wape": 0.4611,
+          "window_count": 22
+        },
+        "seasonal_naive": {
+          "mae": 42.9955,
+          "rmse": 87.2172,
+          "sample_count": 660,
+          "smape": 0.4307,
+          "wape": 0.4855,
+          "window_count": 22
+        }
+      },
+      "selection_status": "PROVISIONAL_BACKTEST_ONLY",
+      "status": "EVALUATED"
+    },
+    {
+      "best_on_backtest": "seasonal_naive",
+      "horizon_days": 60,
+      "models": {
+        "prophet": {
+          "mae": 43.4977,
+          "rmse": 79.2799,
+          "sample_count": 1260,
+          "smape": 0.4431,
+          "wape": 0.4964,
+          "window_count": 21
+        },
+        "seasonal_naive": {
+          "mae": 42.5897,
+          "rmse": 85.9415,
+          "sample_count": 1260,
+          "smape": 0.4353,
+          "wape": 0.486,
+          "window_count": 21
+        }
+      },
+      "selection_status": "PROVISIONAL_BACKTEST_ONLY",
+      "status": "EVALUATED"
+    },
+    {
+      "best_on_backtest": "seasonal_naive",
+      "horizon_days": 90,
+      "models": {
+        "prophet": {
+          "mae": 44.7858,
+          "rmse": 77.2017,
+          "sample_count": 1800,
+          "smape": 0.4714,
+          "wape": 0.524,
+          "window_count": 20
+        },
+        "seasonal_naive": {
+          "mae": 41.6017,
+          "rmse": 81.5964,
+          "sample_count": 1800,
+          "smape": 0.4371,
+          "wape": 0.4867,
+          "window_count": 20
+        }
+      },
+      "selection_status": "PROVISIONAL_BACKTEST_ONLY",
+      "status": "EVALUATED"
+    }
+  ],
+  "runtime_eligible": false,
+  "scope": "total_daily_appeals_in_one_export",
+  "selection_policy": "lowest_wape_on_same_windows_tie_seasonal_naive.v1",
+  "source_sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+  "status": "EVALUATED"
+}
