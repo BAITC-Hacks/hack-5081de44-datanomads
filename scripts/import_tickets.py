@@ -76,8 +76,8 @@ def main() -> int:
         try:
             with urlopen(request, timeout=120) as response:
                 imported = json.load(response)
-        except Exception as error:
-            print(json.dumps({"error": f"Core import failed: {error}", **summary}, ensure_ascii=False))
+        except Exception:
+            print(json.dumps({"error": "CORE_IMPORT_FAILED", **summary}, ensure_ascii=False))
             return 1
         summary["persistence"] = imported
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

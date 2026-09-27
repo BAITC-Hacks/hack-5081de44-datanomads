@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+from contextlib import redirect_stdout
 import hashlib
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from data.importers import IKOMEK109Importer, get_importer
 from data.normalization import minimize_text, scan_pii
@@ -18,6 +21,7 @@ from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS, canonic
 from data.schemas.unified_ticket import UnifiedTicket
 from scripts.data_audit import build_report, build_source_report
 from scripts.generate_synthetic_sources import SPECS, generate as generate_synthetic_sources
+from scripts import import_tickets
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -271,6 +275,29 @@ class ImporterTests(unittest.TestCase):
 
 
 class ImportCliTests(unittest.TestCase):
+    def test_core_failure_does_not_print_exception_details(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.csv"
+            source.write_text(
+                "appealId,region,registeredAt,messageText\n"
+                "one,Астана,2026-01-01,Текст\n", encoding="utf-8",
+            )
+            output = root / "normalized.jsonl"
+            quarantine = root / "quarantine.jsonl"
+            stdout = StringIO()
+            argv = ["import_tickets.py", "--source", "AIKEY", str(source),
+                    "--output", str(output), "--quarantine", str(quarantine),
+                    "--api-url", "http://core.invalid"]
+            with (patch.object(sys, "argv", argv),
+                  patch("scripts.import_tickets.urlopen", side_effect=OSError("PRIVATE_SENTINEL")),
+                  redirect_stdout(stdout)):
+                self.assertEqual(import_tickets.main(), 1)
+            self.assertEqual(json.loads(stdout.getvalue())["error"], "CORE_IMPORT_FAILED")
+            self.assertNotIn("PRIVATE_SENTINEL", stdout.getvalue())
+            self.assertTrue(output.is_file())
+            self.assertTrue(quarantine.is_file())
+
     def test_import_creates_outputs_once_and_preserves_existing_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
