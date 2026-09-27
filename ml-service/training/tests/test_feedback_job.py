@@ -12,7 +12,7 @@ from unittest.mock import patch
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum
 from training.feedback_dataset import load_verified_candidate
-from training.feedback_job import FeedbackJobError, train_classifier_job
+from training.feedback_job import FeedbackJobError, _publish_directory, train_classifier_job
 from test_dataset_builder import build_fixture_package, fixture_inputs
 from test_feedback_export import feedback_row, link
 
@@ -121,21 +121,41 @@ class FeedbackJobTests(unittest.TestCase):
                 self.assertEqual(candidate_model_version, "candidate_v1")
                 self.assertEqual(len(samples), 1)
                 self.assertEqual(samples[0].topic_id, "electricity")
-                self.assertTrue((root / "policies/1.json").is_file())
+                self.assertEqual(output.parent.name, "models")
+                self.assertEqual((output.parent.parent / "policies/critical.json").read_text(encoding="utf-8"),
+                                 policy_path.read_text(encoding="utf-8"))
+                output.mkdir(parents=True)
+                (output / "model.safetensors").write_bytes(b"tiny-candidate-model")
+                candidate_checksum = checksum(output / "model.safetensors")
+                candidate_manifest = json.loads((production / "manifest.json").read_text(encoding="utf-8"))
+                candidate_manifest.update({"model_version": candidate_model_version,
+                                           "base_model": "production_v1", "status": "CANDIDATE",
+                                           "artifact_checksum": candidate_checksum})
+                (output / "manifest.json").write_text(json.dumps(candidate_manifest), encoding="utf-8")
                 return {"candidate_model_version": candidate_model_version,
                         "dataset_version": manifest.candidate_dataset_version,
                         "dataset_content_sha256": manifest.content_sha256,
                         "sample_count": len(samples), "artifact_uri": str(output),
-                        "artifact_checksum": "sha256:" + "a" * 64}
+                        "artifact_checksum": candidate_checksum}
 
             def fake_evaluator(package: Path, base_model: Path, candidate: Path, policy: Path) -> dict:
                 self.assertEqual(package, frozen)
                 self.assertEqual(base_model, production)
-                self.assertEqual(candidate, root / "models/candidate_v1")
+                self.assertEqual(candidate.name, "candidate_v1")
+                self.assertEqual(candidate.parent.name, "models")
                 self.assertEqual(policy.read_text(encoding="utf-8"), policy_path.read_text(encoding="utf-8"))
                 return {"report_version": "classifier-pair-evaluation.v1",
                         "dataset_version": "reviewed_v1", "frozen_evaluation_version": "eval_v1",
+                        "candidate": {"model_version": "candidate_v1",
+                                      "artifact_checksum": checksum(candidate / "model.safetensors")},
+                        "production": {"model_version": "production_v1"},
                         "regressed_critical_topics": [], "decision": "PENDING_HUMAN_REVIEW"}
+
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate", side_effect=RuntimeError("interrupted"))):
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    asyncio.run(train_classifier_job(pool, payload))
+            self.assertFalse((root / "cycles/1").exists())
 
             with (patch.dict(os.environ, environment),
                   patch("training.feedback_job.train_feedback_candidate", side_effect=fake_trainer),
@@ -147,14 +167,77 @@ class FeedbackJobTests(unittest.TestCase):
             self.assertIn("lc.id::text = $1", pool.query)
             self.assertEqual(pool.options, {"isolation": "repeatable_read", "readonly": True})
             self.assertFalse(root.stat().st_mode & 0o077)
-            self.assertEqual((root / "exports/1.jsonl").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((root / "cycles/1/exports/feedback.jsonl").stat().st_mode & 0o777, 0o600)
             self.assertEqual(result["offline_metrics"]["decision"], "PENDING_HUMAN_REVIEW")
-            self.assertTrue((root / "reports/1-offline.json").is_file())
+            self.assertTrue((root / "cycles/1/reports/offline.json").is_file())
+            self.assertEqual(result["dataset_manifest_uri"],
+                             str(root / "cycles/1/datasets/feedback_candidate_v1/manifest.json"))
+            self.assertEqual(result["manifest"]["artifact_uri"],
+                             str(root / "cycles/1/models/candidate_v1/manifest.json"))
             self.assertNotIn("На дороге", json.dumps(result, ensure_ascii=False))
 
-            with patch.dict(os.environ, environment):
-                with self.assertRaises(FileExistsError):
+            stale = root / ".staging/1-interrupted"
+            stale.mkdir(mode=0o700)
+            (stale / "stage_marker.json").write_text(json.dumps({
+                "kind": "pulse-feedback-stage.v1", "cycle_id": "1", "directory": stale.name,
+            }), encoding="utf-8")
+            (stale / "exports").mkdir()
+            (stale / "exports/feedback.jsonl").write_text("unfinished", encoding="utf-8")
+            empty_unmarked = root / ".staging/1-before-marker"
+            empty_unmarked.mkdir(mode=0o700)
+            partial_marker = root / ".staging/1-partial-marker"
+            partial_marker.mkdir(mode=0o700)
+            (partial_marker / "stage_marker.json").write_text("{", encoding="utf-8")
+
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                self.assertEqual(asyncio.run(train_classifier_job(pool, payload)), result)
+                trainer.assert_not_called()
+            self.assertFalse(stale.exists())
+            self.assertTrue(empty_unmarked.is_dir())
+            self.assertEqual((partial_marker / "stage_marker.json").read_text(encoding="utf-8"), "{")
+
+            unsafe = root / ".staging/1-unsafe"
+            unsafe.mkdir(mode=0o700)
+            (unsafe / "stage_marker.json").write_text(json.dumps({
+                "kind": "pulse-feedback-stage.v1", "cycle_id": "1", "directory": unsafe.name,
+            }), encoding="utf-8")
+            (unsafe / "exports").symlink_to(base, target_is_directory=True)
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                with self.assertRaisesRegex(FeedbackJobError, "STALE_STAGE_UNSAFE"):
                     asyncio.run(train_classifier_job(pool, payload))
+                trainer.assert_not_called()
+            self.assertTrue(unsafe.is_dir())
+            (unsafe / "exports").unlink()
+            (unsafe / "stage_marker.json").unlink()
+            unsafe.rmdir()
+
+            original_rows = pool.rows
+            pool.rows = [{**original_rows[0], "prediction_confidence": original_rows[0]["prediction_confidence"] + 1}]
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                with self.assertRaisesRegex(FeedbackJobError, "TRAINING_CYCLE_ARTIFACT_CHANGED"):
+                    asyncio.run(train_classifier_job(pool, payload))
+                trainer.assert_not_called()
+            pool.rows = original_rows
+
+            policy_path.write_text(policy_text.replace("0.1", "0.2"), encoding="utf-8")
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                with self.assertRaisesRegex(FeedbackJobError, "TRAINING_CYCLE_ARTIFACT_CHANGED"):
+                    asyncio.run(train_classifier_job(pool, payload))
+                trainer.assert_not_called()
+            policy_path.write_text(policy_text, encoding="utf-8")
+
+            report = root / "cycles/1/reports/offline.json"
+            report.write_text("{}", encoding="utf-8")
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                with self.assertRaisesRegex(FeedbackJobError, "TRAINING_CYCLE_ARTIFACT_CHANGED"):
+                    asyncio.run(train_classifier_job(pool, payload))
+                trainer.assert_not_called()
+            self.assertEqual(report.read_text(encoding="utf-8"), "{}")
 
             production_manifest_path = production / "manifest.json"
             wrong_production = json.loads(production_manifest_path.read_text(encoding="utf-8"))
@@ -198,6 +281,18 @@ class FeedbackJobTests(unittest.TestCase):
                     asyncio.run(train_classifier_job(FeedbackPool([]), {**payload, "dataset_version": "../bad"}))
                 with self.assertRaisesRegex(FeedbackJobError, "TRAINING_CYCLE_CHANGED"):
                     asyncio.run(train_classifier_job(FeedbackPool([], state="EVALUATE"), payload))
+
+    def test_atomic_publish_does_not_replace_existing_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stage = root / "stage"
+            destination = root / "cycle"
+            stage.mkdir()
+            destination.mkdir()
+            with self.assertRaisesRegex(FeedbackJobError, "TRAINING_CYCLE_EXISTS"):
+                _publish_directory(stage, destination)
+            self.assertEqual(list(destination.iterdir()), [])
+            self.assertTrue(stage.is_dir())
 
 
 if __name__ == "__main__":

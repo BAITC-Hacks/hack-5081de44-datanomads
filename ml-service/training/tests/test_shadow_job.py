@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from training.shadow_job import ShadowJobError, score_shadow_ticket
+from training.shadow_job import ShadowJobError, _candidate_model, score_shadow_ticket
 
 
 CHECKSUM = "sha256:" + "a" * 64
@@ -37,6 +37,37 @@ class ShadowPool:
 
 
 class ShadowJobTests(unittest.TestCase):
+    def test_prefers_published_cycle_model_and_rejects_wrong_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "cycles/1/models/candidate_v1"
+            model.mkdir(parents=True)
+            (model / "manifest.json").write_text("{}", encoding="utf-8")
+            legacy = root / "models/candidate_v1"
+            legacy.mkdir(parents=True)
+            (legacy / "manifest.json").write_text("{}", encoding="utf-8")
+
+            class StubClassifier:
+                model_version = "candidate_v1"
+                metadata = SimpleNamespace(artifact_checksum=CHECKSUM, model_extra={"status": "CANDIDATE"})
+
+            with (patch("training.shadow_job._cached_model", None),
+                  patch("training.shadow_job.TrainedClassifierService", return_value=StubClassifier()) as loader):
+                self.assertIsInstance(_candidate_model(root, "1", "candidate_v1", CHECKSUM,
+                                                        str(model / "manifest.json")), StubClassifier)
+                loader.assert_called_once_with(model)
+                with self.assertRaisesRegex(ShadowJobError, "SHADOW_ARTIFACT_INVALID"):
+                    _candidate_model(root, "1", "candidate_v1", CHECKSUM,
+                                     str(legacy / "manifest.json"))
+                old_root = root / "old-cycle-root"
+                old_model = old_root / "models/candidate_v1"
+                old_model.mkdir(parents=True)
+                (old_model / "manifest.json").write_text("{}", encoding="utf-8")
+                loader.reset_mock()
+                self.assertIsInstance(_candidate_model(old_root, "1", "candidate_v1", CHECKSUM,
+                                                        str(old_model / "manifest.json")), StubClassifier)
+                loader.assert_called_once_with(old_model)
+
     def test_scores_only_fresh_undecided_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

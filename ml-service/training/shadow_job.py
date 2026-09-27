@@ -19,20 +19,28 @@ class ShadowJobError(RuntimeError):
     """Stable failure code without ticket text."""
 
 
-_cached_model: tuple[str, str, TrainedClassifierService] | None = None
+_cached_model: tuple[str, str, str, TrainedClassifierService] | None = None
 
 
-def _candidate_model(root: Path, version: str, expected_checksum: str,
+def _candidate_model(root: Path, cycle_id: str, version: str, expected_checksum: str,
                      manifest_uri: str) -> TrainedClassifierService:
     global _cached_model
-    model_path = root / "models" / version
+    cycles = root / "cycles"
+    cycle = cycles / cycle_id
+    if cycle.exists() or cycle.is_symlink():
+        parents = (cycles, cycle, cycle / "models")
+        model_path = cycle / "models" / version
+    else:
+        parents = (root / "models",)
+        model_path = root / "models" / version
     manifest_path = model_path / "manifest.json"
-    if (model_path.is_symlink() or not model_path.is_dir() or
+    if (any(path.is_symlink() or not path.is_dir() for path in parents) or
+            model_path.is_symlink() or not model_path.is_dir() or
             any(path.is_symlink() for path in model_path.rglob("*")) or
             str(manifest_path.resolve()) != manifest_uri):
         raise ShadowJobError("SHADOW_ARTIFACT_INVALID")
-    if _cached_model is not None and _cached_model[:2] == (version, expected_checksum):
-        return _cached_model[2]
+    if _cached_model is not None and _cached_model[:3] == (manifest_uri, version, expected_checksum):
+        return _cached_model[3]
     previous = _cached_model
     _cached_model = None
     del previous
@@ -46,7 +54,7 @@ def _candidate_model(root: Path, version: str, expected_checksum: str,
             classifier.metadata.artifact_checksum != expected_checksum or
             (classifier.metadata.model_extra or {}).get("status") != "CANDIDATE"):
         raise ShadowJobError("SHADOW_ARTIFACT_INVALID")
-    _cached_model = (version, expected_checksum, classifier)
+    _cached_model = (manifest_uri, version, expected_checksum, classifier)
     return classifier
 
 
@@ -91,7 +99,8 @@ async def score_shadow_ticket(pool: Any, payload: dict[str, Any]) -> dict:
     if row["decided"]:
         return {"status": "SKIPPED_OPERATOR_DECIDED", "cycle_id": str(cycle_id),
                 "ticket_id": str(ticket_id)}
-    classifier = _candidate_model(root, candidate_version, expected_checksum, row["manifest_uri"])
+    classifier = _candidate_model(root, str(cycle_id), candidate_version, expected_checksum,
+                                  row["manifest_uri"])
     language = row["language"] if row["language"] in {"RU", "KZ"} else None
     prediction = classifier.classify(row["original_text"], language=language)
     if not math.isfinite(prediction.confidence) or not 0 <= prediction.confidence <= 1:

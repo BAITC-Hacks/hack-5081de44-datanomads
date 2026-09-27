@@ -8,7 +8,8 @@
     "observed_behavior": [
       "claim_job selects only QUEUED jobs and sets RUNNING without a lease or stale-job recovery",
       "complete_job marks the job COMPLETED before update_learning_cycle moves the cycle from TRAINING to EVALUATE",
-      "fail_job marks the job FAILED and update_learning_cycle moves the cycle to EVALUATE without a retry transition"
+      "fail_job marks the job FAILED and update_learning_cycle moves the cycle to EVALUATE without a retry transition",
+      "safe_job_error uses a fixed whitelist; new retry errors TRAINING_CYCLE_BUSY, TRAINING_CYCLE_EXISTS, TRAINING_CYCLE_ARTIFACT_CHANGED, TRAINING_INPUT_CHANGED, STALE_STAGE_UNSAFE, INVALID_TRAINING_ARTIFACT, INVALID_TRAINING_INPUT, INVALID_CYCLE_LOCK and ATOMIC_PUBLISH_UNAVAILABLE currently become JOB_FAILED"
     ],
     "failure_windows": [
       "worker exits while a job is RUNNING and no worker claims it again",
@@ -30,6 +31,7 @@
     "job_recovery": "Requeue stale RUNNING jobs only after an expired lease, with an attempt or fencing token that prevents an old worker from publishing a late result.",
     "completion_recovery": "Commit job completion and the learning cycle transition atomically, or reconcile COMPLETED jobs whose cycle remains TRAINING from the persisted result.",
     "failed_attempts": "Define an explicit authorized retry transition for FAILED jobs and cycles; preserve previous error and attempt history.",
+    "safe_error_codes": "Add reviewed retry error codes to the worker.py safe_job_error whitelist so the stored failure identifies the cause without exposing feedback content or paths.",
     "privacy": "Persist only safe error codes and aggregate evidence; never log feedback text, personal identifiers or attachments."
   },
   "acceptance_evidence": [
