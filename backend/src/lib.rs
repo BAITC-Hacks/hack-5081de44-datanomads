@@ -34,7 +34,9 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+mod anomaly;
 mod pg;
+pub use anomaly::AlertDetectorConfig;
 use pg::{default_qdrant_collection, PgRepository};
 
 const SERVICE_NAME: &str = "pulse109-core";
@@ -76,6 +78,7 @@ pub struct Config {
     pub learning_manual_close_enabled: bool,
     pub learning_promotion_policy_version: String,
     pub learning_evaluation_dataset_version: Option<String>,
+    pub alert_detector: AlertDetectorConfig,
 }
 
 impl Default for Config {
@@ -90,6 +93,7 @@ impl Default for Config {
             learning_manual_close_enabled: true,
             learning_promotion_policy_version: DEFAULT_LEARNING_PROMOTION_POLICY_VERSION.to_owned(),
             learning_evaluation_dataset_version: None,
+            alert_detector: AlertDetectorConfig::default(),
         }
     }
 }
@@ -153,6 +157,7 @@ impl Config {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
+            alert_detector: AlertDetectorConfig::from_env(),
         }
     }
 }
@@ -519,7 +524,16 @@ pub struct Alert {
     pub region_id: String,
     pub topic_id: String,
     pub ticket_count: u32,
+    pub period_start: Option<String>,
+    pub period_end: Option<String>,
+    pub current_count: u32,
+    pub baseline: Option<f64>,
+    pub deviation: Option<f64>,
+    pub robust_z: Option<f64>,
+    pub ratio: Option<f64>,
+    pub detector_version: Option<String>,
     pub linked_ticket_ids: Vec<String>,
+    pub created_at: String,
     pub detected_at: String,
     pub acknowledged_by: Option<String>,
     pub acknowledged_at: Option<String>,
@@ -1349,11 +1363,21 @@ impl Store {
                 severity: "high".to_owned(),
                 status: "open".to_owned(),
                 title: "Всплеск обращений по водоснабжению".to_owned(),
-                description: "Количество обращений выше сезонного baseline в 2.4 раза.".to_owned(),
+                description: "Зафиксирован необычный рост обращений. Требуется проверка."
+                    .to_owned(),
                 region_id: "R01".to_owned(),
                 topic_id: "TOPIC-WATER".to_owned(),
-                ticket_count: 18,
+                ticket_count: 1,
+                period_start: None,
+                period_end: None,
+                current_count: 1,
+                baseline: None,
+                deviation: None,
+                robust_z: None,
+                ratio: None,
+                detector_version: None,
                 linked_ticket_ids: vec!["ticket-001".to_owned()],
+                created_at: DEMO_TIMESTAMP.to_owned(),
                 detected_at: DEMO_TIMESTAMP.to_owned(),
                 acknowledged_by: None,
                 acknowledged_at: None,
@@ -1368,11 +1392,21 @@ impl Store {
                 severity: "medium".to_owned(),
                 status: "acknowledged".to_owned(),
                 title: "Аномальная динамика по транспорту".to_owned(),
-                description: "Рост повторных обращений по маршруту 12.".to_owned(),
+                description: "Зафиксирован необычный рост обращений. Требуется проверка."
+                    .to_owned(),
                 region_id: "R02".to_owned(),
                 topic_id: "TOPIC-TRANSPORT".to_owned(),
-                ticket_count: 9,
+                ticket_count: 1,
+                period_start: None,
+                period_end: None,
+                current_count: 1,
+                baseline: None,
+                deviation: None,
+                robust_z: None,
+                ratio: None,
+                detector_version: None,
                 linked_ticket_ids: vec!["ticket-005".to_owned()],
+                created_at: "2026-09-20T11:00:00Z".to_owned(),
                 detected_at: "2026-09-20T11:00:00Z".to_owned(),
                 acknowledged_by: Some("demo-manager".to_owned()),
                 acknowledged_at: Some("2026-09-20T12:00:00Z".to_owned()),
@@ -5089,6 +5123,18 @@ pub struct AlertListResponse {
     pub total: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AlertDetectionResponse {
+    pub status: String,
+    pub source: String,
+    pub detector_version: String,
+    pub evaluated_series: usize,
+    pub insufficient_history_series: usize,
+    pub config: AlertDetectorConfig,
+    pub items: Vec<Alert>,
+    pub total: usize,
+}
+
 async fn list_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -5250,23 +5296,46 @@ async fn close_alert(
 async fn detect_alerts(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<AlertListResponse>, ApiError> {
+) -> Result<Json<AlertDetectionResponse>, ApiError> {
     require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let config = state.config.alert_detector.clone();
     if let Some(repository) = state.repository() {
-        let items = repository
-            .detect_alerts()
+        let run = repository
+            .detect_alerts(&config)
             .await
             .map_err(ApiError::Internal)?;
-        let total = items.len();
-        if total > 0 {
+        let total = run.items.len();
+        if run.new_alerts > 0 {
             state.publish_alerts_changed();
         }
-        return Ok(Json(AlertListResponse { items, total }));
+        return Ok(Json(AlertDetectionResponse {
+            status: run.status.to_owned(),
+            source: run.source.to_owned(),
+            detector_version: config.detector_version.clone(),
+            evaluated_series: run.evaluated_series,
+            insufficient_history_series: run.insufficient_history_series,
+            config,
+            items: run.items,
+            total,
+        }));
     }
     let store = state.read_store()?;
-    let items = store.alerts.values().cloned().collect::<Vec<_>>();
-    let total = items.len();
-    Ok(Json(AlertListResponse { items, total }))
+    let insufficient_history_series = store
+        .tickets
+        .values()
+        .map(|ticket| (ticket.region_id.clone(), ticket.topic_id.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    Ok(Json(AlertDetectionResponse {
+        status: "INSUFFICIENT_HISTORY".to_owned(),
+        source: "memory_demo".to_owned(),
+        detector_version: config.detector_version.clone(),
+        evaluated_series: 0,
+        insufficient_history_series,
+        config,
+        items: Vec::new(),
+        total: 0,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -6253,7 +6322,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/events": { "get": { "summary": "SSE notifications" } },
             "/api/v1/forecast": { "get": { "summary": "Forecast baseline" } },
             "/api/v1/alerts": { "get": { "summary": "List alerts" } },
-            "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist spike alerts" } },
+            "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist region/topic anomaly alerts" } },
             "/api/v1/alerts/{alert_id}": { "get": { "summary": "Get alert detail and linked tickets" } },
             "/api/v1/alerts/{alert_id}/ack": { "post": { "summary": "Acknowledge alert" } },
             "/api/v1/alerts/{alert_id}/acknowledge": { "post": { "summary": "Acknowledge alert alias" } },

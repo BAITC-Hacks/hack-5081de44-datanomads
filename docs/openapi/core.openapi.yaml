@@ -417,12 +417,10 @@ paths:
       security: [{ pulseRole: [] }, {}]
       responses:
         '200':
-          description: Alert list
+          description: Persisted alert list
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Alert' }
+              schema: { $ref: '#/components/schemas/AlertListResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/events:
     get:
@@ -782,10 +780,14 @@ paths:
   /api/v1/alerts/detect:
     post:
       tags: [alerts]
-      summary: Detect and persist spike alerts
+      summary: Detect and persist region/topic anomaly alerts
       security: [{ pulseRole: [] }, {}]
       responses:
-        '200': { description: Request completed }
+        '200':
+          description: Evaluated region and topic series with reproducible anomaly evidence
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertDetectionResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/alerts/{alert_id}:
@@ -1416,16 +1418,71 @@ components:
         source: { type: string }
     Alert:
       type: object
-      required: [alert_id, status, severity]
+      required: [id, incident_key, alert_type, severity, status, title, description, region_id, topic_id, ticket_count, current_count, linked_ticket_ids, created_at, detected_at, detail]
       properties:
-        alert_id: { type: string }
-        status: { type: string, enum: [open, acknowledged, resolved] }
-        severity: { type: string, enum: [info, warning, critical] }
+        id: { type: string }
+        incident_key: { type: string }
+        alert_type: { type: string }
+        status: { type: string, description: OPEN, ACKNOWLEDGED, or CLOSED in PostgreSQL; demo fixtures may use lowercase values. }
+        severity: { type: string }
+        title: { type: string }
+        description: { type: string }
         region_id: { type: string }
         topic_id: { type: string }
-        metric: { type: string }
-        observed_value: { type: number }
-        baseline_value: { type: number }
+        ticket_count: { type: integer, minimum: 0 }
+        period_start: { type: string, format: date-time, nullable: true }
+        period_end: { type: string, format: date-time, nullable: true }
+        current_count: { type: integer, minimum: 0 }
+        baseline: { type: number, nullable: true }
+        deviation: { type: number, nullable: true, description: Absolute difference between current_count and baseline. }
+        robust_z: { type: number, nullable: true }
+        ratio: { type: number, nullable: true }
+        detector_version: { type: string, nullable: true }
+        linked_ticket_ids: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        detected_at: { type: string, format: date-time }
+        acknowledged_by: { type: string, nullable: true }
+        acknowledged_at: { type: string, format: date-time, nullable: true }
+        closed_by: { type: string, nullable: true }
+        closed_at: { type: string, format: date-time, nullable: true }
+        detail: { type: object, additionalProperties: true }
+    AlertListResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+        total: { type: integer, minimum: 0 }
+    AlertDetectionResponse:
+      type: object
+      required: [status, source, detector_version, evaluated_series, insufficient_history_series, config, items, total]
+      properties:
+        status: { type: string, enum: [OK, INSUFFICIENT_HISTORY] }
+        source: { type: string, enum: [postgresql, memory_demo] }
+        detector_version: { type: string }
+        evaluated_series: { type: integer, minimum: 0 }
+        insufficient_history_series: { type: integer, minimum: 0 }
+        config: { $ref: '#/components/schemas/AlertDetectorConfig' }
+        items: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+        total: { type: integer, minimum: 0 }
+    AlertDetectorConfig:
+      type: object
+      required: [detector_version, period_days, baseline_periods, minimum_count, robust_z_threshold, ratio_threshold, high_z_threshold, critical_z_threshold, high_ratio_threshold, critical_ratio_threshold, baseline_floor, cooldown_hours, seasonality, baseline_method, dispersion_method]
+      properties:
+        detector_version: { type: string }
+        period_days: { type: integer, minimum: 1, maximum: 31 }
+        baseline_periods: { type: integer, minimum: 1, maximum: 52 }
+        minimum_count: { type: integer, minimum: 1 }
+        robust_z_threshold: { type: number, exclusiveMinimum: 0 }
+        ratio_threshold: { type: number, minimum: 1 }
+        high_z_threshold: { type: number, exclusiveMinimum: 0 }
+        critical_z_threshold: { type: number, exclusiveMinimum: 0 }
+        high_ratio_threshold: { type: number, minimum: 1 }
+        critical_ratio_threshold: { type: number, minimum: 1 }
+        baseline_floor: { type: number, exclusiveMinimum: 0 }
+        cooldown_hours: { type: integer, minimum: 1, maximum: 8760 }
+        seasonality: { type: string, enum: [weekday_aligned_weekly, none] }
+        baseline_method: { type: string, enum: [median] }
+        dispersion_method: { type: string, enum: [median_absolute_deviation] }
     ForecastResponse:
       type: object
       required: [model_version]

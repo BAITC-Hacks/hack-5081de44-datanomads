@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -189,6 +190,68 @@ def postgres_ticket_count_lookback(
         ) from error
 
 
+def postgres_detector_history_counts(
+    repo_root: Path,
+    *,
+    region_ids: tuple[str, ...],
+    topic_id: str,
+) -> dict[str, list[int]]:
+    query = """
+        WITH bounds AS (SELECT now() AS period_end),
+        candidate_regions AS (
+          SELECT unnest(string_to_array(:'regions', ',')) AS region_id
+        ), periods AS (
+          SELECT r.region_id, bucket.period_index,
+            b.period_end - ((bucket.period_index + 1) * 7) * INTERVAL '1 day' AS period_start,
+            b.period_end - (bucket.period_index * 7) * INTERVAL '1 day' AS period_end
+          FROM candidate_regions r CROSS JOIN bounds b
+          CROSS JOIN LATERAL generate_series(1, 4) AS bucket(period_index)
+        ), period_counts AS (
+          SELECT p.region_id, p.period_index, count(t.id)::bigint AS ticket_count
+          FROM periods p
+          LEFT JOIN tickets t ON t.region_id = p.region_id AND t.topic_id = :'topic'
+            AND t.created_at >= p.period_start AND t.created_at < p.period_end
+          GROUP BY p.region_id, p.period_index
+        )
+        SELECT region_id, array_to_string(array_agg(ticket_count ORDER BY period_index), ',')
+        FROM period_counts
+        GROUP BY region_id
+        ORDER BY region_id;
+    """
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "sh",
+            "-lc",
+            'exec psql -XAtq -F "|" -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"',
+            "pulse109-detector-history-check",
+            "-v",
+            f"regions={','.join(region_ids)}",
+            "-v",
+            f"topic={topic_id}",
+        ],
+        cwd=repo_root,
+        input=query,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    counts_by_region: dict[str, list[int]] = {}
+    try:
+        for line in result.stdout.splitlines():
+            region, counts = line.split("|", 1)
+            counts_by_region[region] = [int(count) for count in counts.split(",")]
+    except ValueError as error:
+        raise AcceptanceError(
+            f"PostgreSQL returned invalid detector baseline counts: {result.stdout!r}"
+        ) from error
+    return counts_by_region
+
+
 def read_sse_event(response: Any) -> bytes:
     lines = []
     while line := response.readline():
@@ -205,8 +268,8 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     suffix = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     source = f"e2e_acceptance_{suffix}"
     dataset = f"e2e-dataset-{suffix}"
-    created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    external_ids = [f"{source}-{index}" for index in range(3)]
+    current_time = datetime.now(timezone.utc).replace(microsecond=0)
+    created_at = current_time.isoformat().replace("+00:00", "Z")
     quarantine = [
         {
             "row_number": 99,
@@ -221,10 +284,8 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     status, _, ready = json_request(base_url, "GET", "/readyz", timeout=timeout)
     expect(status == 200 and ready.get("storage") == "postgres", f"ready failed: {status} {ready}")
 
-    # Keep repeated acceptance runs isolated without weakening the production
-    # incident key/cooldown semantics.  A closed incident for the same
-    # region/topic/day must stay closed; choose a region whose water-series
-    # key has not already been consumed by an earlier run.
+    # Keep repeated acceptance runs isolated from active or closed incidents
+    # inside the detector's seven-day cooldown window.
     region_candidates = (
         "KZ-KYZYLORDA",
         "KZ-AKTOBE",
@@ -239,15 +300,39 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     )
     status, _, alert_list = json_request(base_url, "GET", "/api/v1/alerts?limit=500", role="MANAGER", timeout=timeout)
     expect(status == 200, f"alert list failed while selecting test series: {alert_list}")
-    today = datetime.now(timezone.utc).date().isoformat()
-    consumed_regions = {
-        str(item.get("incident_key", "")).split(":")[1]
-        for item in alert_list.get("items", [])
-        if str(item.get("incident_key", "")).startswith(f"topic_spike:")
-        and str(item.get("incident_key", "")).endswith(f":{today}")
-        and ":water_supply:" in str(item.get("incident_key", ""))
-    }
-    region = next((candidate for candidate in region_candidates if candidate not in consumed_regions), region_candidates[0])
+    cooldown_cutoff = current_time - timedelta(days=7)
+    consumed_regions = set()
+    for item in alert_list.get("items", []):
+        incident_key = str(item.get("incident_key", ""))
+        if not incident_key.startswith("topic_spike:") or ":water_supply:" not in incident_key:
+            continue
+        try:
+            created_at_value = datetime.fromisoformat(
+                str(item.get("created_at", "")).replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if created_at_value >= cooldown_cutoff:
+            consumed_regions.add(incident_key.split(":")[1])
+    available_regions = tuple(
+        candidate for candidate in region_candidates if candidate not in consumed_regions
+    ) or region_candidates
+    repo_root = Path(__file__).resolve().parent.parent
+    existing_history = postgres_detector_history_counts(
+        repo_root,
+        region_ids=available_regions,
+        topic_id="water_supply",
+    )
+
+    def required_current_count(region_id: str) -> int:
+        # The four added baseline tickets make the fixture's coverage complete.
+        counts = sorted(value + 1 for value in existing_history.get(region_id, [0, 0, 0, 0]))
+        baseline = (counts[1] + counts[2]) / 2
+        return max(3, math.floor(max(baseline, 1.0) * 1.5) + 1)
+
+    region = min(available_regions, key=lambda value: (required_current_count(value), value))
+    current_ticket_count = required_current_count(region)
+    external_ids = [f"{source}-{index}" for index in range(current_ticket_count)]
     tickets = [
         {
             "external_ticket_id": external_id,
@@ -261,6 +346,20 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         }
         for index, external_id in enumerate(external_ids)
     ]
+    historical_tickets = [
+        {
+            "external_ticket_id": f"{source}-baseline-{index}",
+            "region_id": region,
+            "created_at": (current_time - timedelta(days=days)).isoformat().replace("+00:00", "Z"),
+            "original_text": f"E2E baseline fixture {suffix}-{index}",
+            "language": "ru",
+            "topic_raw": "water_supply",
+            "status": "OPEN",
+            "channel": "e2e",
+        }
+        for index, days in enumerate((8, 15, 22, 29, 36))
+    ]
+    import_tickets = tickets + historical_tickets
     import_payload = {
         "source_system": source,
         "source_uri": f"memory://{source}.json",
@@ -268,17 +367,26 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         "manifest_uri": f"memory://{dataset}/manifest.json",
         "manifest_sha256": "e2e-test-manifest",
         "is_synthetic": True,
-        "tickets": tickets,
+        "tickets": import_tickets,
         "quarantine": quarantine,
     }
 
     status, _, imported = json_request(base_url, "POST", "/api/v1/import", body=import_payload, timeout=timeout)
     expect(status == 201, f"first import failed: {status} {imported}")
-    expect(imported.get("imported_rows") == 3 and imported.get("indexed_rows") == 3, f"import counts: {imported}")
+    expect(
+        imported.get("imported_rows") == len(import_tickets)
+        and imported.get("indexed_rows") == len(import_tickets),
+        f"import counts: {imported}",
+    )
     expect(imported.get("quarantined_rows") == 1, f"quarantine count: {imported}")
     status, _, repeated = json_request(base_url, "POST", "/api/v1/import", body=import_payload, timeout=timeout)
     expect(status == 201, f"repeat import failed: {status} {repeated}")
-    expect(repeated.get("imported_rows") == 0 and repeated.get("duplicate_rows") == 3 and repeated.get("indexed_rows") == 0, f"repeat import is not idempotent: {repeated}")
+    expect(
+        repeated.get("imported_rows") == 0
+        and repeated.get("duplicate_rows") == len(import_tickets)
+        and repeated.get("indexed_rows") == 0,
+        f"repeat import is not idempotent: {repeated}",
+    )
     changed_payload = json.loads(json.dumps(import_payload))
     changed_payload["tickets"][0]["original_text"] = "Изменённый текст с прежней версией набора"
     status, _, conflict = json_request(base_url, "POST", "/api/v1/import", body=changed_payload, timeout=timeout)
@@ -291,12 +399,15 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     next_version["dataset_version"] = f"{dataset}-same-ticket"
     next_version["manifest_uri"] = f"memory://{dataset}-same-ticket/manifest.json"
     status, _, linked = json_request(base_url, "POST", "/api/v1/import", body=next_version, timeout=timeout)
-    expect(status == 201 and linked.get("duplicate_rows") == 3, f"new dataset could not link unchanged tickets: {status} {linked}")
+    expect(
+        status == 201 and linked.get("duplicate_rows") == len(import_tickets),
+        f"new dataset could not link unchanged tickets: {status} {linked}",
+    )
 
     status, _, listed = json_request(base_url, "GET", "/api/v1/tickets?limit=100", timeout=timeout)
     expect(status == 200, f"ticket list failed: {status} {listed}")
     selected = [item for item in listed.get("items", []) if item.get("external_ref") in external_ids]
-    expect(len(selected) == 3, f"imported tickets not visible: {external_ids}")
+    expect(len(selected) == len(external_ids), f"imported tickets not visible: {external_ids}")
     ticket_ids = [str(item["id"]) for item in selected]
 
     status, _, preview = json_request(base_url, "POST", "/api/v1/assist/preview", body={"ticket_id": ticket_ids[0]}, timeout=timeout)
@@ -351,7 +462,6 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     )
     expect(status == 201 and "relation:REPEAT:CONFIRMED" == relation.get("feedback_type"), f"relation feedback failed: {relation}")
 
-    repo_root = Path(__file__).resolve().parent.parent
     region_filters = {
         "range": "30d",
         "region_id": region,
@@ -466,8 +576,61 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         )
 
     status, _, detected = json_request(base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout)
-    expect(status == 200 and detected.get("items"), f"spike detector found no alert: {detected}")
-    alert_id = str(detected["items"][0]["id"])
+    expect(
+        status == 200
+        and detected.get("status") in ("OK", "INSUFFICIENT_HISTORY")
+        and detected.get("items"),
+        f"spike detector found no alert: {detected}",
+    )
+    e2e_ticket_ids = set(ticket_ids)
+    alert = next(
+        (
+            item
+            for item in detected.get("items", [])
+            if e2e_ticket_ids.intersection(map(str, item.get("linked_ticket_ids", [])))
+        ),
+        None,
+    )
+    expect(alert is not None, f"detector did not link the E2E source tickets: {detected}")
+    source_ticket_ids = list(map(str, alert.get("linked_ticket_ids", [])))
+    evidence = alert.get("detail", {})
+    expect(
+        alert.get("current_count") == len(source_ticket_ids)
+        and alert.get("ticket_count") == len(source_ticket_ids)
+        and evidence.get("source_ticket_ids") == source_ticket_ids
+        and e2e_ticket_ids.issubset(set(source_ticket_ids)),
+        f"alert evidence does not reproduce its source tickets: {alert}",
+    )
+    expect(
+        alert.get("detector_version") == detected.get("detector_version")
+        and evidence.get("configuration") == detected.get("config")
+        and len(evidence.get("historical_counts", [])) == detected.get("config", {}).get("baseline_periods"),
+        f"alert did not preserve its detector configuration and baseline: {alert}",
+    )
+    expect(
+        alert.get("description") == "Зафиксирован необычный рост обращений. Требуется проверка."
+        and alert.get("incident_key"),
+        f"alert copy or incident key is invalid: {alert}",
+    )
+    alert_id = str(alert["id"])
+    status, _, repeated_detection = json_request(
+        base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout
+    )
+    repeated_alert = next(
+        (
+            item
+            for item in repeated_detection.get("items", [])
+            if str(item.get("id")) == alert_id
+        ),
+        None,
+    )
+    expect(
+        status == 200
+        and repeated_alert is not None
+        and repeated_alert.get("detail") == evidence
+        and repeated_alert.get("linked_ticket_ids") == source_ticket_ids,
+        f"detector cooldown changed persisted evidence: {repeated_detection}",
+    )
     event_request = Request(
         base_url.rstrip("/") + "/api/v1/events",
         headers={"Accept": "text/event-stream", "X-Pulse-Role": "MANAGER", "X-User-Id": "e2e-acceptance"},
@@ -482,6 +645,14 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         expect(b"event: alerts.changed" in changed, f"SSE alert update missing: {changed[:160]!r}")
     status, _, closed = json_request(base_url, "POST", f"/api/v1/alerts/{alert_id}/close", role="MANAGER", timeout=timeout)
     expect(status == 200 and closed.get("status") == "CLOSED", f"alert close failed: {closed}")
+    status, _, after_close_detection = json_request(
+        base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout
+    )
+    expect(
+        status == 200
+        and all(str(item.get("id")) != alert_id for item in after_close_detection.get("items", [])),
+        f"detector reopened a closed incident during cooldown: {after_close_detection}",
+    )
 
     for report_path, magic in (("/api/v1/analytics/export.pdf", b"%PDF-1.4"), ("/api/v1/analytics/export.xlsx", b"PK\x03\x04")):
         filtered_path = f"{report_path}?{topic_analytics_query}"

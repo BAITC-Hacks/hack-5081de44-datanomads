@@ -23,7 +23,7 @@
     "/api/v1/taxonomy": { "get": { "summary": "Current regions, topics, services and available ticket filters" } },
     "/api/v1/retrieval/reindex": { "post": { "summary": "Queue a PostgreSQL-backed Qdrant reindex" } },
     "/api/v1/alerts": { "get": { "summary": "Alerts" } },
-    "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist spike alerts" } },
+    "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist region/topic anomaly alerts" } },
     "/api/v1/alerts/{alert_id}": { "get": { "summary": "Get alert detail and linked tickets" } },
     "/api/v1/alerts/{alert_id}/ack": { "post": { "summary": "Acknowledge alert" } },
     "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },

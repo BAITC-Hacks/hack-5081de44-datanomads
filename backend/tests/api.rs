@@ -1084,6 +1084,56 @@ async fn alert_events_stream_snapshot_and_changes() {
 }
 
 #[tokio::test]
+async fn demo_alert_detection_reports_insufficient_history_explicitly() {
+    let application = app(AppState::demo());
+    let list_response = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/alerts")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_response.status(), 200);
+    let alerts: serde_json::Value = serde_json::from_slice(
+        &to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(alerts["total"], 2);
+    for alert in alerts["items"].as_array().unwrap() {
+        assert_eq!(
+            alert["current_count"].as_u64(),
+            Some(alert["linked_ticket_ids"].as_array().unwrap().len() as u64)
+        );
+        assert_eq!(
+            alert["description"],
+            "Зафиксирован необычный рост обращений. Требуется проверка."
+        );
+    }
+
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/alerts/detect")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let detection: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(detection["status"], "INSUFFICIENT_HISTORY");
+    assert_eq!(detection["source"], "memory_demo");
+    assert_eq!(detection["evaluated_series"], 0);
+    assert_eq!(detection["items"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn response_templates_require_explicit_approval_and_exact_confirmed_selectors() {
     let application = app(AppState::demo());
     let preview_request = || {

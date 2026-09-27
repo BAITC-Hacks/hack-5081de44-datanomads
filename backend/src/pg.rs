@@ -5,6 +5,9 @@
 //! repository instead.  PostgreSQL is the source of truth; Qdrant only keeps
 //! the vector index and the ML service owns classification/embedding.
 
+use crate::anomaly::{
+    evaluate_series, AlertDetectionRun, AlertDetectorConfig, AlertEvaluation, AlertSeriesInput,
+};
 use crate::{
     manual_response_template, metric_rate, related_ticket_candidate, render_template_body, Alert,
     AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse,
@@ -3289,119 +3292,316 @@ impl PgRepository {
         self.alert_from_id(id).await
     }
 
-    pub async fn detect_alerts(&self) -> Result<Vec<Alert>, String> {
+    pub async fn detect_alerts(
+        &self,
+        config: &AlertDetectorConfig,
+    ) -> Result<AlertDetectionRun, String> {
+        config.validate();
+        let period_days = i32::try_from(config.period_days)
+            .map_err(|_| "alert period_days exceeds PostgreSQL integer range".to_owned())?;
+        let baseline_periods = i32::try_from(config.baseline_periods)
+            .map_err(|_| "alert baseline_periods exceeds PostgreSQL integer range".to_owned())?;
         let rows = sqlx::query(
-            "SELECT region_id, topic_id, COUNT(*) FILTER (WHERE created_at >= now() - interval '7 days' AND created_at <= now())::bigint AS current_count, COUNT(*) FILTER (WHERE created_at < now() - interval '7 days' AND created_at >= now() - interval '35 days')::bigint AS previous_count FROM tickets WHERE created_at >= now() - interval '35 days' AND created_at <= now() GROUP BY region_id, topic_id HAVING COUNT(*) FILTER (WHERE created_at >= now() - interval '7 days' AND created_at <= now()) >= 3",
+            r#"
+            WITH detector_bounds AS (
+                SELECT now() AS period_end, $1::integer AS period_days, $2::integer AS baseline_periods
+            ), pairs AS (
+                SELECT DISTINCT t.region_id, t.topic_id
+                FROM tickets t CROSS JOIN detector_bounds b
+                WHERE t.region_id IS NOT NULL AND t.topic_id IS NOT NULL
+                  AND t.created_at >= b.period_end - ((b.period_days * (b.baseline_periods + 1)) * interval '1 day')
+                  AND t.created_at < b.period_end
+            ), coverage AS (
+                SELECT t.region_id, min(t.created_at) AS coverage_start
+                FROM tickets t CROSS JOIN detector_bounds b
+                WHERE t.created_at < b.period_end AND t.region_id IS NOT NULL
+                GROUP BY t.region_id
+            ), periods AS (
+                SELECT p.region_id, p.topic_id, bucket.period_index,
+                    b.period_end - ((bucket.period_index + 1) * b.period_days) * interval '1 day' AS period_start,
+                    b.period_end - (bucket.period_index * b.period_days) * interval '1 day' AS period_end
+                FROM pairs p CROSS JOIN detector_bounds b
+                CROSS JOIN LATERAL generate_series(0, b.baseline_periods) AS bucket(period_index)
+            ), period_counts AS (
+                SELECT p.region_id, p.topic_id, p.period_index, p.period_start, p.period_end,
+                    count(t.id)::bigint AS ticket_count
+                FROM periods p LEFT JOIN tickets t
+                  ON t.region_id = p.region_id AND t.topic_id = p.topic_id
+                 AND t.created_at >= p.period_start AND t.created_at < p.period_end
+                GROUP BY p.region_id, p.topic_id, p.period_index, p.period_start, p.period_end
+            )
+            SELECT counts.region_id, counts.topic_id, coverage.coverage_start,
+                array_agg(counts.ticket_count ORDER BY counts.period_index) AS period_counts,
+                max(counts.period_end) FILTER (WHERE counts.period_index = 0) AS period_end,
+                ARRAY(
+                    SELECT t.id FROM tickets t CROSS JOIN detector_bounds b
+                    WHERE t.region_id = counts.region_id AND t.topic_id = counts.topic_id
+                      AND t.created_at >= b.period_end - (b.period_days * interval '1 day')
+                      AND t.created_at < b.period_end
+                    ORDER BY t.id
+                ) AS current_ticket_ids
+            FROM period_counts counts
+            JOIN coverage ON coverage.region_id = counts.region_id
+            GROUP BY counts.region_id, counts.topic_id, coverage.coverage_start
+            ORDER BY counts.region_id, counts.topic_id
+            "#,
         )
+        .bind(period_days)
+        .bind(baseline_periods)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| format!("detect alert series: {error}"))?;
-        let day = Utc::now().date_naive().to_string();
+
+        let mut evaluated_series = 0;
+        let mut insufficient_history_series = 0;
+        let mut new_alerts = 0;
         let mut alert_ids = Vec::new();
         for row in rows {
-            let region_id: String = row
-                .try_get("region_id")
-                .map_err(|error| format!("alert region: {error}"))?;
-            let topic_id: String = row
-                .try_get("topic_id")
-                .map_err(|error| format!("alert topic: {error}"))?;
-            let current: i64 = row.try_get("current_count").unwrap_or(0);
-            let previous: i64 = row.try_get("previous_count").unwrap_or(0);
-            let baseline = previous as f64 / 4.0;
-            let deviation = if baseline > 0.0 {
-                current as f64 / baseline
-            } else {
-                current as f64
+            let input = AlertSeriesInput {
+                region_id: row
+                    .try_get("region_id")
+                    .map_err(|error| format!("alert region: {error}"))?,
+                topic_id: row
+                    .try_get("topic_id")
+                    .map_err(|error| format!("alert topic: {error}"))?,
+                period_end: row
+                    .try_get("period_end")
+                    .map_err(|error| format!("alert period end: {error}"))?,
+                coverage_start: row
+                    .try_get("coverage_start")
+                    .map_err(|error| format!("alert history coverage: {error}"))?,
+                counts: row
+                    .try_get("period_counts")
+                    .map_err(|error| format!("alert period counts: {error}"))?,
+                current_ticket_ids: row
+                    .try_get("current_ticket_ids")
+                    .map_err(|error| format!("alert source ticket ids: {error}"))?,
             };
-            if deviation < 1.5 {
+            let evidence = match evaluate_series(&input, config) {
+                AlertEvaluation::InsufficientHistory => {
+                    insufficient_history_series += 1;
+                    continue;
+                }
+                AlertEvaluation::BelowThreshold => {
+                    evaluated_series += 1;
+                    continue;
+                }
+                AlertEvaluation::Anomaly(evidence) => {
+                    evaluated_series += 1;
+                    evidence
+                }
+            };
+            if input.current_ticket_ids.len() as i64 != evidence.current_count {
+                return Err(format!(
+                    "alert source ticket count changed while evaluating {} × {}",
+                    input.region_id, input.topic_id
+                ));
+            }
+
+            let source_ticket_ids = input
+                .current_ticket_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let required_start = evidence.period_start
+                - chrono::Duration::days(
+                    i64::from(config.period_days) * i64::from(config.baseline_periods),
+                );
+            let detail = json!({
+                "schema_version": 1,
+                "detector": "region_topic_median_mad",
+                "detector_version": config.detector_version,
+                "configuration": config,
+                "message": "Зафиксирован необычный рост обращений. Требуется проверка.",
+                "region_id": evidence.region_id,
+                "topic_id": evidence.topic_id,
+                "period_start": evidence.period_start,
+                "period_end": evidence.period_end,
+                "current_count": evidence.current_count,
+                "source_ticket_ids": source_ticket_ids,
+                "coverage_start": input.coverage_start,
+                "required_history_start": required_start,
+                "historical_counts": evidence.historical_counts,
+                "baseline": evidence.baseline,
+                "median_absolute_deviation": evidence.median_absolute_deviation,
+                "robust_dispersion": evidence.robust_dispersion,
+                "deviation": evidence.deviation,
+                "robust_z": evidence.robust_z,
+                "ratio": evidence.ratio,
+                "severity": evidence.severity,
+                "trigger_reasons": evidence.reasons,
+            });
+            let cooldown_start =
+                Utc::now() - chrono::Duration::hours(i64::from(config.cooldown_hours));
+            let lock_key = format!(
+                "pulse109-alert:{}:{}",
+                evidence.region_id, evidence.topic_id
+            );
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| format!("begin alert persistence: {error}"))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(lock_key)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| format!("lock alert incident: {error}"))?;
+            let recent = sqlx::query(
+                "SELECT id, status FROM alerts WHERE alert_type = 'TOPIC_SPIKE' AND region_id = $1 AND topic_id = $2 AND created_at >= $3 ORDER BY created_at DESC, id DESC LIMIT 1",
+            )
+            .bind(&evidence.region_id)
+            .bind(&evidence.topic_id)
+            .bind(cooldown_start)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| format!("find alert cooldown: {error}"))?;
+            if let Some(recent) = recent {
+                let id: i64 = recent
+                    .try_get("id")
+                    .map_err(|error| format!("cooldown alert id: {error}"))?;
+                let status: String = recent
+                    .try_get("status")
+                    .map_err(|error| format!("cooldown alert status: {error}"))?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| format!("finish alert cooldown check: {error}"))?;
+                if status != "CLOSED" {
+                    alert_ids.push(id);
+                }
                 continue;
             }
-            let severity = if deviation >= 3.0 {
-                "CRITICAL"
-            } else if deviation >= 2.0 {
-                "HIGH"
+
+            let incident_key = format!(
+                "topic_spike:{}:{}:{}",
+                evidence.region_id,
+                evidence.topic_id,
+                evidence.period_end.date_naive()
+            );
+            let current_count = i32::try_from(evidence.current_count)
+                .map_err(|_| "alert current_count exceeds PostgreSQL integer range".to_owned())?;
+            let inserted_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO alerts (incident_key, alert_type, severity, status, region_id, topic_id, period_start, period_end, current_count, baseline, deviation, detail) VALUES ($1, 'TOPIC_SPIKE', $2, 'OPEN', $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (incident_key) DO NOTHING RETURNING id",
+            )
+            .bind(&incident_key)
+            .bind(evidence.severity)
+            .bind(&evidence.region_id)
+            .bind(&evidence.topic_id)
+            .bind(evidence.period_start)
+            .bind(evidence.period_end)
+            .bind(current_count)
+            .bind(evidence.baseline)
+            .bind(evidence.deviation)
+            .bind(detail)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| format!("persist alert: {error}"))?;
+            let id = if let Some(id) = inserted_id {
+                id
             } else {
-                "MEDIUM"
-            };
-            let incident_key = format!("topic_spike:{region_id}:{topic_id}:{day}");
-            let detail = json!({
-                "detector": "robust_baseline",
-                "window_days": 7,
-                "baseline_days": 28,
-                "current_count": current,
-                "baseline": baseline,
-                "deviation": deviation,
-            });
-            let id = sqlx::query_scalar::<_, i64>("INSERT INTO alerts (incident_key, alert_type, severity, status, region_id, topic_id, period_start, period_end, current_count, baseline, deviation, detail) VALUES ($1, 'TOPIC_SPIKE', $2, 'OPEN', $3, $4, now() - interval '7 days', now(), $5, $6, $7, $8) ON CONFLICT (incident_key) DO UPDATE SET current_count = EXCLUDED.current_count, baseline = EXCLUDED.baseline, deviation = EXCLUDED.deviation, detail = EXCLUDED.detail WHERE alerts.status <> 'CLOSED' RETURNING id")
-                .bind(&incident_key)
-                .bind(severity)
-                .bind(&region_id)
-                .bind(&topic_id)
-                .bind(current as i32)
-                .bind(baseline)
-                .bind(deviation)
-                .bind(detail)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|error| format!("persist alert: {error}"))?;
-            let Some(id) = id else {
-                // A closed incident is intentionally not reopened by a
-                // repeated detector run during the same cooldown window.
+                let existing = sqlx::query("SELECT id, status FROM alerts WHERE incident_key = $1")
+                    .bind(&incident_key)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(|error| format!("fetch existing alert: {error}"))?;
+                let status: String = existing
+                    .try_get("status")
+                    .map_err(|error| format!("existing alert status: {error}"))?;
+                let id: i64 = existing
+                    .try_get("id")
+                    .map_err(|error| format!("existing alert id: {error}"))?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| format!("finish existing alert check: {error}"))?;
+                if status != "CLOSED" {
+                    alert_ids.push(id);
+                }
                 continue;
             };
-            sqlx::query("INSERT INTO alert_ticket_links (alert_id, ticket_id) SELECT $1, id FROM tickets WHERE region_id = $2 AND topic_id = $3 AND created_at >= now() - interval '7 days' AND created_at <= now() ON CONFLICT DO NOTHING")
-                .bind(id)
-                .bind(&region_id)
-                .bind(&topic_id)
-                .execute(&self.pool)
+            sqlx::query(
+                "INSERT INTO alert_ticket_links (alert_id, ticket_id) SELECT $1, ticket_id FROM unnest($2::bigint[]) AS linked(ticket_id) ON CONFLICT DO NOTHING",
+            )
+            .bind(id)
+            .bind(&input.current_ticket_ids)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("link alert source tickets: {error}"))?;
+            transaction
+                .commit()
                 .await
-                .map_err(|error| format!("link alert tickets: {error}"))?;
+                .map_err(|error| format!("commit detected alert: {error}"))?;
+            new_alerts += 1;
             alert_ids.push(id);
         }
-        let mut alerts = Vec::with_capacity(alert_ids.len());
+
+        let mut items = Vec::with_capacity(alert_ids.len());
         for id in alert_ids {
-            alerts.push(self.alert_from_id(id).await?);
+            items.push(self.alert_from_id(id).await?);
         }
-        Ok(alerts)
+        Ok(AlertDetectionRun {
+            status: if evaluated_series == 0 || insufficient_history_series > 0 {
+                "INSUFFICIENT_HISTORY"
+            } else {
+                "OK"
+            },
+            source: "postgresql",
+            evaluated_series,
+            insufficient_history_series,
+            new_alerts,
+            items,
+        })
     }
 
     async fn alert_from_id(&self, id: i64) -> Result<Alert, String> {
-        let row = sqlx::query("SELECT a.id, a.incident_key, a.alert_type, a.severity, a.status, a.region_id, a.topic_id, a.current_count, a.created_at, a.acknowledged_at, a.acknowledged_by, a.closed_at, a.closed_by, COALESCE(a.detail, '{}'::jsonb) AS detail, COALESCE(r.name_ru, a.region_id, 'Все регионы') AS region_name, COALESCE(tp.name_ru, tp.name_kk, a.topic_id, 'Все темы') AS topic_name FROM alerts a LEFT JOIN regions r ON r.id = a.region_id LEFT JOIN topics tp ON tp.id = a.topic_id WHERE a.id = $1")
+        let row = sqlx::query("SELECT a.id, a.incident_key, a.alert_type, a.severity, a.status, a.region_id, a.topic_id, a.period_start, a.period_end, a.current_count, a.baseline::double precision AS baseline, a.deviation::double precision AS deviation, a.created_at, a.acknowledged_at, a.acknowledged_by, a.closed_at, a.closed_by, COALESCE(a.detail, '{}'::jsonb) AS detail, COALESCE(tp.name_ru, tp.name_kk, a.topic_id, 'Все темы') AS topic_name FROM alerts a LEFT JOIN topics tp ON tp.id = a.topic_id WHERE a.id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| format!("fetch alert: {error}"))?
             .ok_or_else(|| format!("alert {id} not found"))?;
-        let links = sqlx::query(
+        let link_rows = sqlx::query(
             "SELECT ticket_id::text FROM alert_ticket_links WHERE alert_id = $1 ORDER BY ticket_id",
         )
         .bind(id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| format!("fetch alert links: {error}"))?
-        .into_iter()
-        .filter_map(|item| item.try_get::<String, _>("ticket_id").ok())
-        .collect::<Vec<_>>();
-        let detail: Value = row.try_get("detail").unwrap_or_else(|_| json!({}));
-        let region_name: String = row
-            .try_get("region_name")
-            .unwrap_or_else(|_| "Все регионы".to_owned());
+        .map_err(|error| format!("fetch alert links: {error}"))?;
+        let mut links = Vec::with_capacity(link_rows.len());
+        for item in link_rows {
+            links.push(
+                item.try_get::<String, _>("ticket_id")
+                    .map_err(|error| format!("alert link ticket id: {error}"))?,
+            );
+        }
+        let detail: Value = row
+            .try_get("detail")
+            .map_err(|error| format!("alert detail: {error}"))?;
         let topic_name: String = row
             .try_get("topic_name")
             .unwrap_or_else(|_| "Все темы".to_owned());
-        let current_count: i32 = row.try_get("current_count").unwrap_or(0);
+        let current_count: i32 = row
+            .try_get("current_count")
+            .map_err(|error| format!("alert current_count: {error}"))?;
+        let period_start: DateTime<Utc> = row
+            .try_get("period_start")
+            .map_err(|error| format!("alert period_start: {error}"))?;
+        let period_end: DateTime<Utc> = row
+            .try_get("period_end")
+            .map_err(|error| format!("alert period_end: {error}"))?;
+        let baseline: Option<f64> = row
+            .try_get("baseline")
+            .map_err(|error| format!("alert baseline: {error}"))?;
+        let deviation: Option<f64> = row
+            .try_get("deviation")
+            .map_err(|error| format!("alert deviation: {error}"))?;
         let title = detail
             .get("title")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("Всплеск обращений: {topic_name}"));
-        let description = detail
-            .get("description")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| {
-                format!("{current_count} обращений за последние 7 дней; регион: {region_name}.")
-            });
+        let description = "Зафиксирован необычный рост обращений. Требуется проверка.".to_owned();
         let detected_at: DateTime<Utc> = row
             .try_get("created_at")
             .map_err(|error| format!("alert created_at: {error}"))?;
@@ -3420,7 +3620,19 @@ impl PgRepository {
                 .unwrap_or_else(|_| "ALL".to_owned()),
             topic_id: row.try_get("topic_id").unwrap_or_else(|_| "ALL".to_owned()),
             ticket_count: current_count.max(0) as u32,
+            period_start: Some(period_start.to_rfc3339()),
+            period_end: Some(period_end.to_rfc3339()),
+            current_count: current_count.max(0) as u32,
+            baseline,
+            deviation,
+            robust_z: detail.get("robust_z").and_then(Value::as_f64),
+            ratio: detail.get("ratio").and_then(Value::as_f64),
+            detector_version: detail
+                .get("detector_version")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
             linked_ticket_ids: links,
+            created_at: detected_at.to_rfc3339(),
             detected_at: detected_at.to_rfc3339(),
             acknowledged_by: row.try_get("acknowledged_by").unwrap_or(None),
             acknowledged_at: acknowledged_at.map(|value| value.to_rfc3339()),
