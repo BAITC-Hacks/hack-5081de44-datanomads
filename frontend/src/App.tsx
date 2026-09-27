@@ -744,6 +744,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
                 <button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, relation, 'CONFIRMED', item.suggestion)}>Подтвердить</button>
                 <button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, relation, 'REJECTED', item.suggestion)}>Отклонить</button>
               </div>
+              {item.relation === 'Возможное повторное обращение' && <p className="recurrence-monitoring-note" role="note">Возможный повтор после недавнего закрытия. Проверьте предыдущую историю.</p>}
             </div>
           }) : <p className="panel-note">{emptyHistoryMessage}</p>}
         </div>

@@ -51,7 +51,7 @@ const FORECAST_HISTORY_DAYS: i64 = 366;
 const FORECAST_SEASON_LENGTH_DAYS: usize = 7;
 pub(crate) const RELATED_CANDIDATE_THRESHOLD: f32 = 0.78;
 pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
-const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
+const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v2";
 pub(crate) const ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM: &str = "DEMO_SIMULATION";
 pub(crate) const ROUTING_FEEDBACK_PENDING_STATUS: &str = "PENDING_OFFLINE_REVIEW";
 pub(crate) const CONTEXT_HANDOFF_PACKAGE_VERSION: &str = "context-handoff.v1";
@@ -640,6 +640,16 @@ pub struct SimilarTicket {
     pub created_at: Option<String>,
     pub matched_factors: Vec<String>,
     pub suggestion: RelationSuggestionSnapshot,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RelatedTicketMetadata<'a> {
+    pub topic_id: &'a str,
+    pub region_id: &'a str,
+    pub created_at: Option<&'a DateTime<Utc>>,
+    pub status: &'a str,
+    pub closed_at: Option<&'a DateTime<Utc>>,
+    pub object: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3085,12 +3095,8 @@ fn known_relation_identifier(value: &str) -> bool {
 pub(crate) fn related_ticket_candidate(
     ticket_id: String,
     score: f32,
-    current_topic_id: &str,
-    current_region_id: &str,
-    current_created_at: Option<&DateTime<Utc>>,
-    candidate_topic_id: String,
-    candidate_region_id: String,
-    candidate_created_at: Option<&DateTime<Utc>>,
+    current: &RelatedTicketMetadata<'_>,
+    candidate: &RelatedTicketMetadata<'_>,
     model_version: &str,
     distance_metric: &str,
 ) -> Option<SimilarTicket> {
@@ -3098,17 +3104,19 @@ pub(crate) fn related_ticket_candidate(
         return None;
     }
 
-    let same_topic = known_relation_identifier(current_topic_id)
-        && known_relation_identifier(&candidate_topic_id)
-        && current_topic_id
+    let same_topic = known_relation_identifier(current.topic_id)
+        && known_relation_identifier(candidate.topic_id)
+        && current
+            .topic_id
             .trim()
-            .eq_ignore_ascii_case(candidate_topic_id.trim());
-    let same_region = known_relation_identifier(current_region_id)
-        && known_relation_identifier(&candidate_region_id)
-        && current_region_id
+            .eq_ignore_ascii_case(candidate.topic_id.trim());
+    let same_region = known_relation_identifier(current.region_id)
+        && known_relation_identifier(candidate.region_id)
+        && current
+            .region_id
             .trim()
-            .eq_ignore_ascii_case(candidate_region_id.trim());
-    let within_time_window = match (current_created_at, candidate_created_at) {
+            .eq_ignore_ascii_case(candidate.region_id.trim());
+    let within_time_window = match (current.created_at, candidate.created_at) {
         (Some(current), Some(candidate)) => {
             current
                 .signed_duration_since(candidate.to_owned())
@@ -3118,15 +3126,28 @@ pub(crate) fn related_ticket_candidate(
         }
         _ => false,
     };
+    let same_object = normalized_related_object(current.object)
+        .zip(normalized_related_object(candidate.object))
+        .is_some_and(|(current, candidate)| current == candidate);
+    let closed_within_time_window = is_resolved_ticket_status(candidate.status)
+        && match (current.created_at, candidate.closed_at) {
+            (Some(current), Some(closed)) => {
+                let elapsed = current.signed_duration_since(closed.to_owned());
+                elapsed >= Duration::zero() && elapsed <= Duration::days(30)
+            }
+            _ => false,
+        };
 
-    let (relation, threshold) = if score >= DUPLICATE_CANDIDATE_THRESHOLD
+    let (relation, threshold) = if same_topic && same_object && closed_within_time_window {
+        ("repeat", RELATED_CANDIDATE_THRESHOLD)
+    } else if score >= DUPLICATE_CANDIDATE_THRESHOLD
         && same_topic
         && same_region
         && within_time_window
+        && known_relation_identifier(candidate.status)
+        && !is_resolved_ticket_status(candidate.status)
     {
         ("duplicate", DUPLICATE_CANDIDATE_THRESHOLD)
-    } else if same_topic && within_time_window {
-        ("repeat", RELATED_CANDIDATE_THRESHOLD)
     } else {
         ("similar", RELATED_CANDIDATE_THRESHOLD)
     };
@@ -3137,6 +3158,12 @@ pub(crate) fn related_ticket_candidate(
     if same_region {
         matched_factors.push("region_match".to_owned());
     }
+    if same_object {
+        matched_factors.push("object_match".to_owned());
+    }
+    if closed_within_time_window {
+        matched_factors.push("closed_within_30_days".to_owned());
+    }
     if within_time_window {
         matched_factors.push("within_30_days".to_owned());
     }
@@ -3145,9 +3172,9 @@ pub(crate) fn related_ticket_candidate(
         ticket_id,
         score,
         relation: relation.to_owned(),
-        topic_id: candidate_topic_id,
-        region_id: candidate_region_id,
-        created_at: candidate_created_at.map(DateTime::to_rfc3339),
+        topic_id: candidate.topic_id.to_owned(),
+        region_id: candidate.region_id.to_owned(),
+        created_at: candidate.created_at.map(DateTime::to_rfc3339),
         matched_factors,
         suggestion: RelationSuggestionSnapshot {
             score,
@@ -3159,11 +3186,33 @@ pub(crate) fn related_ticket_candidate(
     })
 }
 
+fn normalized_related_object(value: Option<&str>) -> Option<String> {
+    let normalized = value?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (!normalized.is_empty() && known_relation_identifier(&normalized)).then_some(normalized)
+}
+
 // Offline fixture-only related-ticket behavior. Real mode uses Qdrant vector search.
 fn demo_related_tickets(store: &Store, ticket: &Ticket, topic_id: &str) -> Vec<SimilarTicket> {
     let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
         .ok()
         .map(|value| value.with_timezone(&Utc));
+    let current_closed_at = ticket
+        .closed_at
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let current = RelatedTicketMetadata {
+        topic_id,
+        region_id: &ticket.region_id,
+        created_at: current_created_at.as_ref(),
+        status: &ticket.status,
+        closed_at: current_closed_at.as_ref(),
+        object: None,
+    };
     store
         .tickets
         .values()
@@ -3175,15 +3224,24 @@ fn demo_related_tickets(store: &Store, ticket: &Ticket, topic_id: &str) -> Vec<S
             let candidate_created_at = DateTime::parse_from_rfc3339(&candidate.created_at)
                 .ok()
                 .map(|value| value.with_timezone(&Utc));
+            let candidate_closed_at = candidate
+                .closed_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc));
+            let candidate_metadata = RelatedTicketMetadata {
+                topic_id: &candidate.topic_id,
+                region_id: &candidate.region_id,
+                created_at: candidate_created_at.as_ref(),
+                status: &candidate.status,
+                closed_at: candidate_closed_at.as_ref(),
+                object: None,
+            };
             related_ticket_candidate(
                 candidate.id.clone(),
                 (0.91 - index as f32 * 0.11).max(0.5),
-                topic_id,
-                &ticket.region_id,
-                current_created_at.as_ref(),
-                candidate.topic_id.clone(),
-                candidate.region_id.clone(),
-                candidate_created_at.as_ref(),
+                &current,
+                &candidate_metadata,
                 "unavailable",
                 "fixture",
             )
@@ -9235,29 +9293,48 @@ mod tests {
         let previous_date = DateTime::parse_from_rfc3339("2026-09-10T08:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let current = RelatedTicketMetadata {
+            topic_id: "TOPIC-ROADS",
+            region_id: "R01",
+            created_at: Some(&current_date),
+            status: "OPEN",
+            closed_at: None,
+            object: Some("Astana station 12"),
+        };
+        let open_candidate = RelatedTicketMetadata {
+            topic_id: "TOPIC-ROADS",
+            region_id: "R01",
+            created_at: Some(&previous_date),
+            status: "OPEN",
+            closed_at: None,
+            object: Some(" astana   STATION 12 "),
+        };
         let weak = related_ticket_candidate(
             "ticket-weak".to_owned(),
             0.77,
-            "TOPIC-ROADS",
-            "R01",
-            Some(&current_date),
-            "TOPIC-ROADS".to_owned(),
-            "R01".to_owned(),
-            Some(&previous_date),
+            &current,
+            &open_candidate,
             "embedder-test-v1",
             "Cosine",
         );
         assert!(weak.is_none());
 
+        let open_repeat = related_ticket_candidate(
+            "ticket-open-repeat".to_owned(),
+            0.82,
+            &current,
+            &open_candidate,
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(open_repeat.relation, "similar");
+
         let duplicate = related_ticket_candidate(
             "ticket-duplicate".to_owned(),
             0.95,
-            "TOPIC-ROADS",
-            "R01",
-            Some(&current_date),
-            "TOPIC-ROADS".to_owned(),
-            "R01".to_owned(),
-            Some(&previous_date),
+            &current,
+            &open_candidate,
             "embedder-test-v1",
             "Cosine",
         )
@@ -9265,31 +9342,115 @@ mod tests {
         assert_eq!(duplicate.relation, "duplicate");
         assert_eq!(
             duplicate.matched_factors,
-            ["topic_match", "region_match", "within_30_days"]
+            [
+                "topic_match",
+                "region_match",
+                "object_match",
+                "within_30_days"
+            ]
         );
         assert_eq!(
             duplicate.suggestion.threshold,
             DUPLICATE_CANDIDATE_THRESHOLD
         );
-        assert_eq!(duplicate.suggestion.rule_version, "related-ticket-rules.v1");
+        assert_eq!(duplicate.suggestion.rule_version, "related-ticket-rules.v2");
         assert_eq!(duplicate.suggestion.model_version, "embedder-test-v1");
         assert_eq!(duplicate.suggestion.distance_metric, "Cosine");
 
+        let old_creation_date = DateTime::parse_from_rfc3339("2026-08-01T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let recent_close_date = DateTime::parse_from_rfc3339("2026-09-20T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let closed_candidate = RelatedTicketMetadata {
+            topic_id: "TOPIC-ROADS",
+            region_id: "R02",
+            created_at: Some(&old_creation_date),
+            status: "CLOSED",
+            closed_at: Some(&recent_close_date),
+            object: Some("ASTANA station 12"),
+        };
         let repeat = related_ticket_candidate(
             "ticket-repeat".to_owned(),
             0.82,
-            "TOPIC-ROADS",
-            "R01",
-            Some(&current_date),
-            "TOPIC-ROADS".to_owned(),
-            "R02".to_owned(),
-            Some(&previous_date),
+            &current,
+            &closed_candidate,
             "embedder-test-v1",
             "Cosine",
         )
         .unwrap();
         assert_eq!(repeat.relation, "repeat");
-        assert_eq!(repeat.matched_factors, ["topic_match", "within_30_days"]);
+        assert_eq!(
+            repeat.matched_factors,
+            ["topic_match", "object_match", "closed_within_30_days"]
+        );
         assert_eq!(repeat.suggestion.threshold, RELATED_CANDIDATE_THRESHOLD);
+
+        let missing_object = RelatedTicketMetadata {
+            object: None,
+            ..closed_candidate
+        };
+        let unknown_object = related_ticket_candidate(
+            "ticket-unknown-object".to_owned(),
+            0.82,
+            &current,
+            &missing_object,
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(unknown_object.relation, "similar");
+
+        let future_close_date = DateTime::parse_from_rfc3339("2026-09-22T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let future_closed_candidate = RelatedTicketMetadata {
+            closed_at: Some(&future_close_date),
+            ..closed_candidate
+        };
+        let not_yet_closed = related_ticket_candidate(
+            "ticket-future-close".to_owned(),
+            0.82,
+            &current,
+            &future_closed_candidate,
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(not_yet_closed.relation, "similar");
+
+        let different_object = RelatedTicketMetadata {
+            object: Some("different station"),
+            ..closed_candidate
+        };
+        let unrelated_object = related_ticket_candidate(
+            "ticket-different-object".to_owned(),
+            0.82,
+            &current,
+            &different_object,
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(unrelated_object.relation, "similar");
+
+        let stale_close_date = DateTime::parse_from_rfc3339("2026-08-20T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stale_candidate = RelatedTicketMetadata {
+            closed_at: Some(&stale_close_date),
+            ..closed_candidate
+        };
+        let stale_repeat = related_ticket_candidate(
+            "ticket-stale-close".to_owned(),
+            0.82,
+            &current,
+            &stale_candidate,
+            "embedder-test-v1",
+            "Cosine",
+        )
+        .unwrap();
+        assert_eq!(stale_repeat.relation, "similar");
     }
 }

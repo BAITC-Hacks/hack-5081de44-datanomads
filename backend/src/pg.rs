@@ -21,10 +21,10 @@ use crate::{
     ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
     LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
     OutcomeVerificationEvidence, OutcomeVerificationRecord, OutcomeVerificationSnapshot,
-    OutcomeVerificationState, Prediction, QueryIntentRequest, RelationSuggestionSnapshot,
-    ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord, ResponseTemplatesResponse,
-    RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
-    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    OutcomeVerificationState, Prediction, QueryIntentRequest, RelatedTicketMetadata,
+    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
+    ResponseTemplatesResponse, RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics,
+    Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
     ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
 };
 use chrono::{DateTime, NaiveDate, Utc};
@@ -36,6 +36,7 @@ use sqlx::{
     migrate::Migrator, postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row,
 };
 use std::{
+    collections::HashMap,
     env,
     time::{Duration, Instant},
 };
@@ -747,6 +748,17 @@ struct DbTicket {
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DbRelatedTicketFacts {
+    id: i64,
+    topic_id: String,
+    region_id: String,
+    created_at: DateTime<Utc>,
+    status: String,
+    closed_at: Option<DateTime<Utc>>,
+    object: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -1813,6 +1825,23 @@ impl PgRepository {
             .await
             .map_err(|error| format!("finish similarity index read: {error}"))?;
         Ok((active_index, hits))
+    }
+
+    async fn fetch_related_ticket_facts(
+        &self,
+        ticket_ids: &[i64],
+    ) -> Result<HashMap<i64, DbRelatedTicketFacts>, String> {
+        if ticket_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = sqlx::query_as::<_, DbRelatedTicketFacts>(
+            "SELECT t.id, COALESCE(d.confirmed_topic_id, t.topic_id) AS topic_id, t.region_id, t.created_at, t.status, t.closed_at, t.object FROM tickets t LEFT JOIN LATERAL (SELECT confirmed_topic_id FROM operator_decisions WHERE ticket_id = t.id ORDER BY created_at DESC, id DESC LIMIT 1) d ON TRUE WHERE t.id = ANY($1)",
+        )
+        .bind(ticket_ids.to_vec())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("fetch related ticket facts: {error}"))?;
+        Ok(rows.into_iter().map(|row| (row.id, row)).collect())
     }
 
     async fn resolve_routing(
@@ -5612,20 +5641,74 @@ impl PgRepository {
                     None,
                 ));
                 let relation_started = Instant::now();
+                let mut related_ticket_ids = hits.iter().map(|hit| hit.id).collect::<Vec<_>>();
+                if let Some(current_ticket_id) = exclude_id {
+                    related_ticket_ids.push(current_ticket_id);
+                }
+                let (related_facts, related_facts_available) =
+                    match self.fetch_related_ticket_facts(&related_ticket_ids).await {
+                        Ok(facts) => {
+                            let complete = related_ticket_ids
+                                .iter()
+                                .all(|ticket_id| facts.contains_key(ticket_id));
+                            (facts, complete)
+                        }
+                        Err(_) => (HashMap::new(), false),
+                    };
+                if !related_facts_available {
+                    needs_review = true;
+                }
+                let current_facts = exclude_id.and_then(|ticket_id| related_facts.get(&ticket_id));
+                let current_closed_at = ticket
+                    .closed_at
+                    .as_deref()
+                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc));
+                let current_metadata = RelatedTicketMetadata {
+                    topic_id: relation_topic_id,
+                    region_id: current_facts
+                        .map(|facts| facts.region_id.as_str())
+                        .unwrap_or(&ticket.region_id),
+                    created_at: current_facts
+                        .map(|facts| &facts.created_at)
+                        .or(current_created_at.as_ref()),
+                    status: current_facts
+                        .map(|facts| facts.status.as_str())
+                        .unwrap_or(&ticket.status),
+                    closed_at: current_facts
+                        .and_then(|facts| facts.closed_at.as_ref())
+                        .or(current_closed_at.as_ref()),
+                    object: current_facts.and_then(|facts| facts.object.as_deref()),
+                };
                 similar = hits
                     .into_iter()
                     .filter_map(|hit| {
                         let similarity =
                             qdrant_score_to_similarity(hit.score, &active_index.distance_metric)?;
+                        let candidate_facts = related_facts.get(&hit.id);
+                        let candidate_metadata = match candidate_facts {
+                            Some(facts) => RelatedTicketMetadata {
+                                topic_id: &facts.topic_id,
+                                region_id: &facts.region_id,
+                                created_at: Some(&facts.created_at),
+                                status: &facts.status,
+                                closed_at: facts.closed_at.as_ref(),
+                                object: facts.object.as_deref(),
+                            },
+                            None => RelatedTicketMetadata {
+                                topic_id: &hit.topic_id,
+                                region_id: &hit.region_id,
+                                created_at: hit.created_at.as_ref(),
+                                status: "unknown",
+                                closed_at: None,
+                                object: None,
+                            },
+                        };
                         related_ticket_candidate(
                             hit.id.to_string(),
                             similarity,
-                            relation_topic_id,
-                            &ticket.region_id,
-                            current_created_at.as_ref(),
-                            hit.topic_id.clone(),
-                            hit.region_id.clone(),
-                            hit.created_at.as_ref(),
+                            &current_metadata,
+                            &candidate_metadata,
                             &active_index.embedder_version,
                             &active_index.distance_metric,
                         )
@@ -5633,10 +5716,14 @@ impl PgRepository {
                     .collect();
                 stages.push(assist_stage(
                     "duplicate_repeat",
-                    "completed",
+                    if related_facts_available {
+                        "completed"
+                    } else {
+                        "unavailable"
+                    },
                     relation_started.elapsed().as_secs_f64() * 1000.0,
                     None,
-                    None,
+                    (!related_facts_available).then_some("RECURRENCE_METADATA_UNAVAILABLE"),
                 ));
             }
             Err(_) => {

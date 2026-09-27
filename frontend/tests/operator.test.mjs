@@ -153,9 +153,11 @@ test('reports only exact topic and region matches as similarity factors', () => 
 })
 
 test('maps only supported relation factors to operator-facing explanations', () => {
-  assert.deepEqual(mapRelatedFactors(['topic_match', 'within_30_days', 'topic_match', 'object_match']), [
+  assert.deepEqual(mapRelatedFactors(['topic_match', 'within_30_days', 'topic_match', 'object_match', 'closed_within_30_days']), [
     'Совпадает тема',
     'В пределах 30 дней',
+    'Совпадает структурированный объект',
+    'Закрыто не более 30 дней назад',
   ])
 })
 

@@ -323,6 +323,7 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .routing-feedback-error { color: #ff9d9d; font-size: 10px; line-height: 1.45; }
 .routing-feedback-notice { color: #8cf0c8; font-size: 10px; line-height: 1.45; }
 .resolution-memory-state { margin: 8px 0; color: #f8d488; font-size: 10px; font-weight: 700; overflow-wrap: anywhere; }
+.recurrence-monitoring-note { margin: 0; padding: 7px 9px; border-left: 2px solid var(--amber); color: #d7c28e; background: rgba(248,212,136,.045); font-size: 10px; line-height: 1.45; }
 .context-handoff-panel { background: rgba(112,175,255,.025); }
 .handoff-version { color: #90b6e8; font-size: 8px; font-weight: 700; letter-spacing: .07em; }
 .handoff-package { display: grid; gap: 10px; margin-top: 12px; }

@@ -1530,7 +1530,10 @@ components:
         created_at: { type: string, format: date-time, nullable: true }
         matched_factors:
           type: array
-          items: { type: string, enum: [topic_match, region_match, within_30_days] }
+          description: >-
+            Evidence codes only; object_match never returns the object value,
+            and closed_within_30_days uses the official close time.
+          items: { type: string, enum: [topic_match, region_match, object_match, within_30_days, closed_within_30_days] }
         suggestion: { $ref: '#/components/schemas/RelationSuggestionSnapshot' }
     RelationSuggestionSnapshot:
       type: object

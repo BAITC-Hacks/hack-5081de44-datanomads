@@ -1395,6 +1395,8 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
     assert!(related_tickets
         .iter()
         .all(|candidate| candidate["topic_id"] == "TOPIC-ROADS"));
+    // Similarity alone is not recurrence without structured object and close-time evidence.
+    assert!(preview["repeat_candidates"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

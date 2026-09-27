@@ -248,7 +248,9 @@ export function topRelatedCandidates(
 const RELATED_FACTOR_LABELS: Record<string, string> = {
   topic_match: 'Совпадает тема',
   region_match: 'Совпадает регион',
+  object_match: 'Совпадает структурированный объект',
   within_30_days: 'В пределах 30 дней',
+  closed_within_30_days: 'Закрыто не более 30 дней назад',
 }
 
 export function mapRelatedFactors(factors?: readonly string[]) {

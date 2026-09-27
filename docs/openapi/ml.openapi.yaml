@@ -5,6 +5,9 @@ info:
     Local deterministic baseline for classification, retrieval embeddings,
     forecast and anomaly APIs. Classification returns topic signals only;
     Core owns routing and priority rules and exposes their source provenance.
+    Core also determines possible recurrence from retrieval candidates and
+    PostgreSQL status, closure time, topic and structured object; the ML service
+    does not classify recurrence.
   version: 0.1.0
 paths:
   /healthz:
