@@ -199,6 +199,34 @@ artifact directory because it contains model weights. Status remains
 the reviewed synthetic package contains no real citizen appeal texts and cannot
 establish quality on the customer CSV exports.
 
+## Production and candidate comparison
+
+`scripts/evaluate_classifier_pair.py` compares two local classifier artifacts
+on the same verified frozen test. Supply a policy file fixed before evaluating
+the candidate; it must contain `policy_version` set to
+`classifier-critical-regression.v1`, `critical_topics`, `max_f1_drop`,
+`min_topic_support` and `min_total_samples`. No regression threshold is chosen
+by the evaluator.
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/evaluate_classifier_pair.py \
+  --dataset data/processed/reviewed-v1 \
+  --production /path/to/production-classifier \
+  --candidate /path/to/candidate-classifier \
+  --policy /path/to/approved-critical-regression-policy.json \
+  --output data/processed/reports/production-vs-candidate.json
+```
+
+The report records both model versions, artifact checksums, the policy checksum,
+one frozen sample-ID checksum, aggregate metrics and each critical topic's F1
+drop. It returns `CRITICAL_REGRESSION` when a supported critical topic exceeds
+the policy limit, `INSUFFICIENT_EVIDENCE` when minimum support is unmet, or
+`PENDING_HUMAN_REVIEW`. It contains no ticket text and does not promote a model.
+Current reviewed packages are synthetic, so the comparison cannot establish
+performance on actual citizen appeals. The feedback candidate trainer and a
+production model pointer are still required to run a real controlled-learning
+comparison.
+
 ## Retrieval baselines
 
 Evaluate relation groups from the same reviewed package:
