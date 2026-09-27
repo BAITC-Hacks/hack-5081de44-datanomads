@@ -32,14 +32,24 @@ class _AcquireContext:
 
 
 class _Connection:
-    def __init__(self, cycle: dict[str, Any] | None) -> None:
+    def __init__(
+        self,
+        cycle: dict[str, Any] | None,
+        evaluation_cycle: dict[str, Any] | None = None,
+    ) -> None:
         self.cycle = cycle
+        self.evaluation_cycle = evaluation_cycle
+        self.fetchrow_calls: list[str] = []
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
 
     def transaction(self) -> _AsyncContext:
         return _AsyncContext()
 
     async def fetchrow(self, query: str) -> dict[str, Any] | None:
+        self.fetchrow_calls.append(query)
+        if "WITH expired AS" in query:
+            assert "state = 'EVALUATE' AND evaluation_ends_at <= now()" in query
+            return self.evaluation_cycle
         assert "collect_ends_at <= now()" in query
         return self.cycle
 
@@ -49,8 +59,12 @@ class _Connection:
 
 
 class _Pool:
-    def __init__(self, cycle: dict[str, Any] | None) -> None:
-        self.connection = _Connection(cycle)
+    def __init__(
+        self,
+        cycle: dict[str, Any] | None,
+        evaluation_cycle: dict[str, Any] | None = None,
+    ) -> None:
+        self.connection = _Connection(cycle, evaluation_cycle)
 
     def acquire(self) -> _AcquireContext:
         return _AcquireContext(self.connection)
@@ -115,6 +129,16 @@ def _cycle(feedback_count: int) -> dict[str, Any]:
 
 
 class LearningCycleWorkerTests(unittest.TestCase):
+    def test_expired_evaluation_window_advances_to_decision_before_collect(self) -> None:
+        pool = _Pool(_cycle(feedback_count=3), evaluation_cycle={"id": 12})
+
+        self.assertTrue(asyncio.run(advance_expired_learning_cycle(pool)))
+
+        self.assertEqual(len(pool.connection.fetchrow_calls), 1)
+        self.assertIn("SET state = 'DECISION'", pool.connection.fetchrow_calls[0])
+        self.assertIn("EVALUATION_WINDOW_CLOSED", pool.connection.fetchrow_calls[0])
+        self.assertEqual(pool.connection.executed, [])
+
     def test_expired_cycle_below_minimum_closes_without_training_job(self) -> None:
         pool = _Pool(_cycle(feedback_count=2))
 

@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from contracts import ContractValidationError, validate_document
 
 from .constants import DEMO_IMPLEMENTATIONS, MODEL_VERSIONS, TOPICS, TOPIC_BY_ID, Topic
+from .candidate_runtime import CandidateArtifactError, classify_candidate
 from .schemas import (
     Alternative,
     AnomalyPoint,
@@ -106,7 +107,27 @@ class ClassifierService:
     def _topic_name(topic: Topic, language: str) -> str:
         return topic.name_kz if language == "KZ" else topic.name_ru
 
-    def classify(self, text: str, language: str | None = None, top_k: int = 3) -> Classification:
+    def classify(
+        self,
+        text: str,
+        language: str | None = None,
+        top_k: int = 3,
+        model_version: str | None = None,
+        expected_artifact_checksum: str | None = None,
+    ) -> Classification:
+        if model_version is not None and model_version != self.model_version:
+            if expected_artifact_checksum is None:
+                raise CandidateArtifactError("CANDIDATE_ARTIFACT_CHECKSUM_REQUIRED")
+            detected = detect_language(text, language)
+            return classify_candidate(
+                model_version,
+                expected_artifact_checksum,
+                text,
+                detected,
+                top_k,
+            )
+        if expected_artifact_checksum is not None:
+            raise CandidateArtifactError("PRODUCTION_ARTIFACT_CHECKSUM_NOT_ALLOWED")
         normalized = " ".join(text.lower().split())
         detected = detect_language(text, language)
         scores: dict[str, float] = {topic.topic_id: 0.0 for topic in self.topics}

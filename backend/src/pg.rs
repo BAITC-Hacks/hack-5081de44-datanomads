@@ -196,6 +196,14 @@ struct MlClassifyResponse {
     predictions: Vec<MlClassification>,
 }
 
+#[derive(Debug)]
+struct CandidateShadowWindow {
+    learning_cycle_id: i64,
+    candidate_model_version: String,
+    production_model_version: Option<String>,
+    artifact_checksum: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct MlClassification {
     language: String,
@@ -730,6 +738,19 @@ impl PgRepository {
         request_id: &str,
         trace_id: &str,
     ) -> Result<MlClassificationWithModel, String> {
+        self.classify_versioned(text, language, request_id, trace_id, None, None)
+            .await
+    }
+
+    async fn classify_versioned(
+        &self,
+        text: &str,
+        language: Option<&str>,
+        request_id: &str,
+        trace_id: &str,
+        model_version: Option<&str>,
+        expected_artifact_checksum: Option<&str>,
+    ) -> Result<MlClassificationWithModel, String> {
         let response = self
             .client
             .post(format!("{}/internal/v1/classify", self.ml_service_url))
@@ -739,6 +760,8 @@ impl PgRepository {
                 "text": text,
                 "language": language,
                 "top_k": 3,
+                "model_version": model_version,
+                "expected_artifact_checksum": expected_artifact_checksum,
                 "request_id": request_id,
             }))
             .send()
@@ -758,6 +781,38 @@ impl PgRepository {
             model_version: response.model_version,
             prediction,
         })
+    }
+
+    async fn shadow_window_for_ticket(
+        &self,
+        ticket_created_at: DateTime<Utc>,
+    ) -> Result<Option<CandidateShadowWindow>, String> {
+        let row = sqlx::query(
+            "SELECT lc.id, lc.candidate_model_version, lc.production_model_version, mv.artifact_checksum FROM learning_cycles lc LEFT JOIN model_versions mv ON mv.model_version = lc.candidate_model_version WHERE lc.evaluation_started_at IS NOT NULL AND lc.evaluation_ends_at IS NOT NULL AND lc.evaluation_started_at <= $1 AND lc.evaluation_ends_at >= $1 ORDER BY lc.evaluation_started_at DESC, lc.id DESC LIMIT 1",
+        )
+        .bind(ticket_created_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("find candidate shadow window: {error}"))?;
+
+        row.map(|row| {
+            Ok(CandidateShadowWindow {
+                learning_cycle_id: row
+                    .try_get("id")
+                    .map_err(|error| format!("shadow cycle id: {error}"))?,
+                candidate_model_version: row
+                    .try_get::<Option<String>, _>("candidate_model_version")
+                    .map_err(|error| format!("shadow candidate version: {error}"))?
+                    .ok_or_else(|| "shadow candidate version is unavailable".to_owned())?,
+                production_model_version: row
+                    .try_get("production_model_version")
+                    .map_err(|error| format!("shadow production version: {error}"))?,
+                artifact_checksum: row
+                    .try_get("artifact_checksum")
+                    .map_err(|error| format!("shadow artifact checksum: {error}"))?,
+            })
+        })
+        .transpose()
     }
 
     async fn embed(
@@ -1467,6 +1522,38 @@ impl PgRepository {
             Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
         let now = Utc::now();
+        let shadow_window = self.shadow_window_for_ticket(now).await?;
+        let (candidate_shadow_prediction, candidate_shadow_error) = if let Some(window) =
+            shadow_window.as_ref()
+        {
+            if window.production_model_version.as_deref() != Some(&classification.model_version) {
+                (None, Some("PRODUCTION_MODEL_VERSION_MISMATCH"))
+            } else if window.candidate_model_version == classification.model_version {
+                (None, Some("CANDIDATE_MODEL_VERSION_CONFLICT"))
+            } else if let Some(checksum) = window.artifact_checksum.as_deref() {
+                match self
+                    .classify_versioned(
+                        text,
+                        language,
+                        request_id,
+                        request_id,
+                        Some(&window.candidate_model_version),
+                        Some(checksum),
+                    )
+                    .await
+                {
+                    Ok(candidate) if candidate.model_version == window.candidate_model_version => {
+                        (Some(candidate), None)
+                    }
+                    Ok(_) => (None, Some("CANDIDATE_MODEL_VERSION_MISMATCH")),
+                    Err(_) => (None, Some("CANDIDATE_INFERENCE_FAILED")),
+                }
+            } else {
+                (None, Some("CANDIDATE_ARTIFACT_CHECKSUM_UNAVAILABLE"))
+            }
+        } else {
+            (None, None)
+        };
         let mut index_tx = self
             .pool
             .begin()
@@ -1538,6 +1625,41 @@ impl PgRepository {
         .execute(&mut *tx)
         .await
         .map_err(|error| format!("insert prediction: {error}"))?;
+
+        if let Some(window) = shadow_window.as_ref() {
+            let candidate_prediction_value =
+                candidate_shadow_prediction.as_ref().map(|candidate| {
+                    json!({
+                        "model_version": candidate.model_version,
+                        "language": candidate.prediction.language,
+                        "topic_id": candidate.prediction.topic_id,
+                        "topic": candidate.prediction.topic,
+                        "confidence": candidate.prediction.confidence,
+                        "confidence_state": candidate.prediction.confidence_state,
+                        "needs_review": candidate.prediction.needs_review,
+                        "alternatives": candidate.prediction.alternatives,
+                    })
+                });
+            sqlx::query(
+                "INSERT INTO learning_cycle_shadow_predictions (learning_cycle_id, ticket_id, predicted_at, production_model_version, candidate_model_version, production_prediction, candidate_prediction, candidate_inference_status, candidate_error_code) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (learning_cycle_id, ticket_id) DO NOTHING",
+            )
+            .bind(window.learning_cycle_id)
+            .bind(ticket_id)
+            .bind(now)
+            .bind(&classification.model_version)
+            .bind(&window.candidate_model_version)
+            .bind(json!(&prediction))
+            .bind(candidate_prediction_value)
+            .bind(if candidate_shadow_prediction.is_some() {
+                "COMPLETED"
+            } else {
+                "FAILED"
+            })
+            .bind(candidate_shadow_error)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("persist candidate shadow prediction: {error}"))?;
+        }
         tx.commit()
             .await
             .map_err(|error| format!("commit ticket transaction: {error}"))?;
@@ -3225,18 +3347,18 @@ impl PgRepository {
             .await
             .map_err(|error| format!("begin learning cycle close: {error}"))?;
         let row = if let Some(cycle_id) = request.cycle_id.as_deref() {
-            sqlx::query("SELECT id, cycle_id, state, collect_ends_at, manual_close_enabled, min_feedback_count, candidate_model_version, production_model_version, frozen_evaluation_dataset_version FROM learning_cycles WHERE cycle_id = $1 OR id::text = $1 LIMIT 1 FOR UPDATE")
+            sqlx::query("SELECT id, cycle_id, state, collect_ends_at, evaluation_ends_at, manual_close_enabled, min_feedback_count, candidate_model_version, production_model_version, frozen_evaluation_dataset_version FROM learning_cycles WHERE cycle_id = $1 OR id::text = $1 LIMIT 1 FOR UPDATE")
                 .bind(cycle_id)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(|error| format!("find learning cycle to close: {error}"))?
                 .ok_or_else(|| format!("learning cycle {cycle_id} not found"))?
         } else {
-            sqlx::query("SELECT id, cycle_id, state, collect_ends_at, manual_close_enabled, min_feedback_count, candidate_model_version, production_model_version, frozen_evaluation_dataset_version FROM learning_cycles WHERE state = 'COLLECT' AND (manual_close_enabled OR collect_ends_at <= now()) ORDER BY collect_ends_at, id LIMIT 1 FOR UPDATE SKIP LOCKED")
+            sqlx::query("SELECT id, cycle_id, state, collect_ends_at, evaluation_ends_at, manual_close_enabled, min_feedback_count, candidate_model_version, production_model_version, frozen_evaluation_dataset_version FROM learning_cycles WHERE (state = 'COLLECT' AND (manual_close_enabled OR collect_ends_at <= now())) OR (state = 'EVALUATE' AND (manual_close_enabled OR evaluation_ends_at <= now())) ORDER BY CASE state WHEN 'COLLECT' THEN collect_ends_at ELSE evaluation_ends_at END, id LIMIT 1 FOR UPDATE SKIP LOCKED")
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| format!("find eligible COLLECT cycle: {error}"))?
-                .ok_or_else(|| "no eligible COLLECT cycle is available".to_owned())?
+                .map_err(|error| format!("find eligible learning cycle: {error}"))?
+                .ok_or_else(|| "no eligible COLLECT or EVALUATE cycle is available".to_owned())?
         };
         let cycle_db_id: i64 = row
             .try_get("id")
@@ -3247,7 +3369,7 @@ impl PgRepository {
         let cycle_state: String = row
             .try_get("state")
             .map_err(|error| format!("learning cycle state: {error}"))?;
-        if cycle_state != "COLLECT" {
+        if !matches!(cycle_state.as_str(), "COLLECT" | "EVALUATE") {
             return Err(format!(
                 "cycle {cycle_id} cannot close from state {cycle_state}"
             ));
@@ -3258,14 +3380,40 @@ impl PgRepository {
         let manual_close_enabled: bool = row
             .try_get("manual_close_enabled")
             .map_err(|error| format!("learning manual close policy: {error}"))?;
+        let evaluation_ends_at: Option<DateTime<Utc>> = row
+            .try_get("evaluation_ends_at")
+            .map_err(|error| format!("learning evaluation end: {error}"))?;
+        let window_ends_at = if cycle_state == "COLLECT" {
+            collect_ends_at
+        } else {
+            evaluation_ends_at
+        };
         if !manual_close_enabled
-            && collect_ends_at
+            && window_ends_at
                 .map(|ends_at| ends_at > Utc::now())
                 .unwrap_or(true)
         {
             return Err(format!(
-                "learning cycle {cycle_id} is not eligible for manual close before collect_ends_at"
+                "learning cycle {cycle_id} is not eligible to close before its window ends"
             ));
+        }
+        if cycle_state == "EVALUATE" {
+            sqlx::query(
+                "UPDATE learning_cycles SET state = 'DECISION', evaluation_ends_at = LEAST(COALESCE(evaluation_ends_at, now()), now()), updated_at = now(), decision_note = 'EVALUATION_WINDOW_CLOSED' WHERE id = $1 AND state = 'EVALUATE'",
+            )
+            .bind(cycle_db_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("close candidate evaluation window: {error}"))?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit evaluation window close: {error}"))?;
+            return Ok(json!({
+                "job_id": Value::Null,
+                "state": "DECISION",
+                "cycle": self.learning_cycle_from_id_lookup(&cycle_id).await?,
+                "production_model_unchanged": true,
+            }));
         }
         let min_feedback_count: i32 = row
             .try_get("min_feedback_count")
@@ -3368,7 +3516,7 @@ impl PgRepository {
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|error| format!("check candidate evaluation: {error}"))?;
-            if candidate_exists && test_fake_trainer_enabled() {
+            if candidate_exists && cycle.state == "DECISION" && test_fake_trainer_enabled() {
                 let evaluation_id = format!(
                     "evaluation-{}-{}",
                     cycle.id,
@@ -3383,11 +3531,6 @@ impl PgRepository {
                     .execute(&self.pool)
                     .await
                     .map_err(|error| format!("persist candidate evaluation: {error}"))?;
-                sqlx::query("UPDATE learning_cycles SET state = 'DECISION', decision_note = 'READY_TO_REVIEW', updated_at = now() WHERE id = $1 AND state = 'EVALUATE'")
-                    .bind(cycle.id.parse::<i64>().unwrap_or_default())
-                    .execute(&self.pool)
-                .await
-                .map_err(|error| format!("advance learning decision: {error}"))?;
             }
         }
         let evaluation = sqlx::query("SELECT evaluation_id, model_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1")
@@ -3432,14 +3575,6 @@ impl PgRepository {
             == Some("FAKE_TRAINER_NO_METRICS");
         if test_only_fake_evidence && !test_fake_trainer_enabled() {
             decision = "TEST_ONLY_FAKE_EVIDENCE".to_owned();
-        }
-        if matches!(decision.as_str(), "READY_TO_REVIEW" | "READY_TO_PROMOTE") {
-            sqlx::query("UPDATE learning_cycles SET state = 'DECISION', decision_note = $2, updated_at = now() WHERE id = $1 AND state = 'EVALUATE'")
-                .bind(cycle.id.parse::<i64>().unwrap_or_default())
-                .bind(&decision)
-                .execute(&self.pool)
-                .await
-                .map_err(|error| format!("advance evaluated cycle to decision: {error}"))?;
         }
         let cycle = self.learning_cycle_from_id_lookup(&cycle.id).await?;
         Ok(json!({
@@ -3697,12 +3832,39 @@ impl PgRepository {
     }
 
     async fn learning_cycle_from_id(&self, id: i64) -> Result<LearningCycle, String> {
-        let row = sqlx::query("SELECT lc.id, lc.cycle_id, lc.state, COALESCE(lc.candidate_dataset_version, 'pending') AS dataset_version, COALESCE(lc.candidate_model_version, 'pending') AS candidate_model_version, lc.collect_started_at, lc.collect_ends_at, lc.production_model_version, lc.frozen_evaluation_dataset_version, lc.candidate_dataset_checksum, lc.min_feedback_count, lc.promotion_policy_version, lc.manual_close_enabled, lc.created_at, lc.updated_at, lc.decision_note, (SELECT COUNT(*)::int FROM learning_feedback lf WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_count, COALESCE((SELECT me.metrics_json FROM model_evaluations me WHERE me.model_version = lc.candidate_model_version ORDER BY me.created_at DESC LIMIT 1), '{}'::jsonb) AS metrics_json FROM learning_cycles lc WHERE lc.id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|error| format!("fetch learning cycle: {error}"))?
-            .ok_or_else(|| format!("learning cycle {id} not found"))?;
+        let row = sqlx::query(
+            r#"
+            SELECT lc.id, lc.cycle_id, lc.state,
+                   COALESCE(lc.candidate_dataset_version, 'pending') AS dataset_version,
+                   COALESCE(lc.candidate_model_version, 'pending') AS candidate_model_version,
+                   lc.collect_started_at, lc.collect_ends_at,
+                   lc.evaluation_started_at, lc.evaluation_ends_at,
+                   lc.blind_ab_enabled, lc.production_model_version,
+                   lc.frozen_evaluation_dataset_version, lc.candidate_dataset_checksum,
+                   lc.min_feedback_count, lc.promotion_policy_version,
+                   lc.manual_close_enabled, lc.created_at, lc.updated_at, lc.decision_note,
+                   (SELECT COUNT(*)::int FROM learning_feedback lf
+                    WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_count,
+                   (SELECT COUNT(*)::int FROM learning_cycle_shadow_predictions sp
+                    WHERE sp.learning_cycle_id = lc.id) AS shadow_prediction_count,
+                   (SELECT COUNT(*)::int FROM learning_cycle_shadow_predictions sp
+                    WHERE sp.learning_cycle_id = lc.id
+                      AND sp.candidate_inference_status = 'FAILED') AS shadow_inference_failures,
+                   (SELECT COUNT(*)::int FROM learning_cycle_shadow_predictions sp
+                    WHERE sp.learning_cycle_id = lc.id
+                      AND sp.operator_decision_id IS NOT NULL) AS shadow_operator_decision_count,
+                   COALESCE((SELECT me.metrics_json FROM model_evaluations me
+                             WHERE me.model_version = lc.candidate_model_version
+                             ORDER BY me.created_at DESC LIMIT 1), '{}'::jsonb) AS metrics_json
+            FROM learning_cycles lc
+            WHERE lc.id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("fetch learning cycle: {error}"))?
+        .ok_or_else(|| format!("learning cycle {id} not found"))?;
         let created_at: DateTime<Utc> = row
             .try_get("created_at")
             .map_err(|error| format!("cycle created_at: {error}"))?;
@@ -3715,6 +3877,12 @@ impl PgRepository {
         let collect_ends_at: Option<DateTime<Utc>> = row
             .try_get("collect_ends_at")
             .map_err(|error| format!("cycle collect_ends_at: {error}"))?;
+        let evaluation_started_at: Option<DateTime<Utc>> = row
+            .try_get("evaluation_started_at")
+            .map_err(|error| format!("cycle evaluation_started_at: {error}"))?;
+        let evaluation_ends_at: Option<DateTime<Utc>> = row
+            .try_get("evaluation_ends_at")
+            .map_err(|error| format!("cycle evaluation_ends_at: {error}"))?;
         Ok(LearningCycle {
             id: row.try_get::<i64, _>("id").unwrap_or(id).to_string(),
             cycle_id: row.try_get("cycle_id").unwrap_or_default(),
@@ -3727,6 +3895,21 @@ impl PgRepository {
                 .unwrap_or_else(|_| "pending".to_owned()),
             collect_started_at: collect_started_at.unwrap_or(created_at).to_rfc3339(),
             collect_ends_at: collect_ends_at.unwrap_or(created_at).to_rfc3339(),
+            evaluation_started_at: evaluation_started_at.map(|value| value.to_rfc3339()),
+            evaluation_ends_at: evaluation_ends_at.map(|value| value.to_rfc3339()),
+            shadow_prediction_count: row
+                .try_get::<i32, _>("shadow_prediction_count")
+                .unwrap_or(0)
+                .max(0) as u32,
+            shadow_inference_failures: row
+                .try_get::<i32, _>("shadow_inference_failures")
+                .unwrap_or(0)
+                .max(0) as u32,
+            shadow_operator_decision_count: row
+                .try_get::<i32, _>("shadow_operator_decision_count")
+                .unwrap_or(0)
+                .max(0) as u32,
+            blind_ab_enabled: row.try_get("blind_ab_enabled").unwrap_or(false),
             production_model_version: row.try_get("production_model_version").unwrap_or(None),
             frozen_evaluation_dataset_version: row
                 .try_get("frozen_evaluation_dataset_version")
@@ -4494,6 +4677,14 @@ impl PgRepository {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("update ticket decision: {error}"))?;
+        sqlx::query(
+            "UPDATE learning_cycle_shadow_predictions SET operator_decision_id = $2 WHERE ticket_id = $1",
+        )
+        .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
+        .bind(decision_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("link shadow prediction to operator decision: {error}"))?;
         let active_collect_cycle = sqlx::query("SELECT id, cycle_id FROM learning_cycles WHERE state = 'COLLECT' AND collect_ends_at > now() ORDER BY collect_started_at DESC, id DESC LIMIT 1 FOR UPDATE")
             .fetch_optional(&mut *tx)
             .await

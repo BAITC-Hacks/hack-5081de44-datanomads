@@ -69,6 +69,58 @@ async fn learning_feedback_rejects_a_cycle_outside_collect() {
 }
 
 #[tokio::test]
+async fn viewing_candidate_evaluation_does_not_close_its_window() {
+    let application = app(AppState::demo());
+    let evaluation = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/learning/candidate/evaluation")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(evaluation.status(), 200);
+    let evaluation: serde_json::Value =
+        serde_json::from_slice(&to_bytes(evaluation.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(evaluation["state"], "EVALUATE");
+    assert_eq!(evaluation["offline_metrics"]["status"], "DEMO_SYNTHETIC");
+    assert_eq!(evaluation["shadow_metrics"]["blind_ab_enabled"], false);
+
+    let promotion = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/candidate/promote")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::from(r#"{"note":"must wait for evaluation close"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(promotion.status(), 409);
+
+    let close = application
+        .oneshot(
+            Request::post("/api/v1/learning/cycle/close")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::from(r#"{"cycle_id":"cycle-001"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(close.status(), 202);
+    let close: serde_json::Value =
+        serde_json::from_slice(&to_bytes(close.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(close["state"], "DECISION");
+    assert_eq!(close["production_model_unchanged"], true);
+    assert_eq!(close["cycle"]["state"], "DECISION");
+}
+
+#[tokio::test]
 async fn operator_decision_reports_when_no_collect_cycle_is_open() {
     let application = app(AppState::demo());
     let response = application

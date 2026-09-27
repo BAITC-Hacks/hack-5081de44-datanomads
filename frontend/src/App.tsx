@@ -795,7 +795,9 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         const result = await closeLearningCycle(learning.id)
         onToast(result.state === 'INSUFFICIENT_FEEDBACK'
           ? `Сбор закрыт: ${result.cycle.feedback_count}/${result.cycle.min_feedback_count} валидных записей, кандидат не создан`
-          : 'Сбор обратной связи закрыт; обучение поставлено в очередь')
+          : result.state === 'DECISION'
+            ? 'Окно shadow evaluation закрыто; production не изменён'
+            : 'Сбор обратной связи закрыт; обучение поставлено в очередь')
       } else if (action === 'evaluation') {
         setEvaluation(await loadCandidateEvaluation())
         onToast('Оценка candidate перечитана из backend')
@@ -816,13 +818,21 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
   if (learning.id === 'нет данных') return <div className="analytics-page"><section className="panel"><NoData message="Активного цикла обучения нет." /><button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button></section></div>
 
   const offlineStatus = evaluation?.offline_metrics?.status
-  const readyToReview = evaluation?.decision === 'READY_TO_REVIEW'
+  const readyToReview = learning.stage === 'DECISION' && evaluation?.decision === 'READY_TO_REVIEW'
   const collectEndTimestamp = Date.parse(learning.collectEndsAt)
   const collectEndReached = Number.isFinite(collectEndTimestamp) && collectEndTimestamp <= Date.now()
   const canCloseCollect = learning.manualCloseEnabled || collectEndReached
+  const evaluationEndTimestamp = learning.evaluationEndsAt ? Date.parse(learning.evaluationEndsAt) : Number.NaN
+  const evaluationEndReached = Number.isFinite(evaluationEndTimestamp) && evaluationEndTimestamp <= Date.now()
+  const canCloseEvaluation = learning.manualCloseEnabled || evaluationEndReached
   const collectWindowLabel = learning.collectStartedAt && learning.collectEndsAt
     ? `${new Date(learning.collectStartedAt).toLocaleString('ru-RU')} — ${new Date(learning.collectEndsAt).toLocaleString('ru-RU')}`
     : 'не задано'
+  const evaluationWindowLabel = learning.evaluationStartedAt && learning.evaluationEndsAt
+    ? `${new Date(learning.evaluationStartedAt).toLocaleString('ru-RU')} — ${new Date(learning.evaluationEndsAt).toLocaleString('ru-RU')}`
+    : learning.evaluationStartedAt
+      ? `${new Date(learning.evaluationStartedAt).toLocaleString('ru-RU')} — конец не задан`
+      : 'ещё не началось'
   return <div className="analytics-page">
     <section className="panel">
       <PanelHeading title={'Цикл ' + learning.id} />
@@ -830,6 +840,11 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
       <div className="dataset-stat"><span>Обратная связь</span><strong>{learning.feedbackCount}</strong></div>
       <div className="dataset-stat"><span>Порог обратной связи</span><strong>{learning.minFeedbackCount}</strong></div>
       <div className="dataset-stat"><span>Окно COLLECT</span><strong>{collectWindowLabel}</strong></div>
+      <div className="dataset-stat"><span>Окно shadow evaluation</span><strong>{evaluationWindowLabel}</strong></div>
+      <div className="dataset-stat"><span>Shadow predictions</span><strong>{learning.shadowPredictionCount ?? 0}</strong></div>
+      <div className="dataset-stat"><span>Ошибки shadow inference</span><strong>{learning.shadowInferenceFailures ?? 0}</strong></div>
+      <div className="dataset-stat"><span>Связанные решения оператора</span><strong>{learning.shadowOperatorDecisionCount ?? 0}</strong></div>
+      <div className="dataset-stat"><span>Blind A/B signal</span><strong>{learning.blindAbEnabled ? 'включён' : 'отключён'}</strong></div>
       <div className="dataset-stat"><span>Production baseline</span><strong>{learning.productionModelVersion ?? 'не зафиксирована'}</strong></div>
       <div className="dataset-stat"><span>Frozen evaluation dataset</span><strong>{learning.frozenEvaluationDatasetVersion ?? 'не настроен'}</strong></div>
       {learning.candidateDatasetChecksum && <div className="dataset-stat"><span>Candidate dataset SHA-256</span><strong>{learning.candidateDatasetChecksum}</strong></div>}
@@ -839,9 +854,12 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
       <div className="learning-actions" aria-label="Действия reviewer">
         {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && <button className="button button-primary" disabled={busy !== null || !canCloseCollect} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть цикл'}</button>}
         {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && !canCloseCollect && <p className="panel-note">Сбор завершится автоматически по окончании окна COLLECT.</p>}
-        {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK', 'DATASET_BUILD_FAILED'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
+        {learning.stage === 'EVALUATE' && learning.id !== 'нет данных' && <button className="button button-primary" disabled={busy !== null || !canCloseEvaluation} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть окно evaluation'}</button>}
+        {learning.stage === 'EVALUATE' && learning.id !== 'нет данных' && !canCloseEvaluation && <p className="panel-note">Shadow evaluation завершится автоматически по окончании окна.</p>}
+        {!learning.blindAbEnabled && <p className="panel-note">Слепое сравнение A/B отключено; предпочтения не собираются.</p>}
+        {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK', 'DATASET_BUILD_FAILED', 'TRAINING_FAILED'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <button className="button button-secondary" disabled={busy !== null} onClick={() => void runAction('evaluation')}>{busy === 'evaluation' ? 'Читаем…' : 'Показать evaluation'}</button>}
-        {['EVALUATE', 'DECISION'].includes(learning.stage) && <>
+        {learning.stage === 'DECISION' && <>
           <input className="learning-note" aria-label="Комментарий reviewer" placeholder="Комментарий к решению (необязательно)" value={note} onChange={(event) => setNote(event.target.value)} disabled={busy !== null} />
           <button className="button button-primary" disabled={busy !== null || !readyToReview} onClick={() => void runAction('promote')}>{busy === 'promote' ? 'Продвигаем…' : 'Promote'}</button>
           <button className="button button-quiet" disabled={busy !== null} onClick={() => void runAction('reject')}>{busy === 'reject' ? 'Отклоняем…' : 'Reject'}</button>

@@ -12,6 +12,7 @@ from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
+from .candidate_runtime import CandidateArtifactError
 from .schemas import (
     AnomalyRequest,
     AnomalyResponse,
@@ -138,9 +139,26 @@ async def classify(
     x_trace_id: str | None = Header(default=None, alias="x-trace-id"),
 ) -> ClassifyResponse:
     configured = require_model_runtime("classifier")
-    if request.model_version is not None and request.model_version != configured.model_version:
+    if (
+        request.model_version is not None
+        and request.model_version != configured.model_version
+        and request.expected_artifact_checksum is None
+    ):
         raise HTTPException(status_code=404, detail="requested model version is not loaded")
-    predictions = [classifier.classify(text, request.language, request.top_k) for text in request.get_texts()]
+    try:
+        predictions = [
+            classifier.classify(
+                text,
+                request.language,
+                request.top_k,
+                request.model_version,
+                request.expected_artifact_checksum,
+            )
+            for text in request.get_texts()
+        ]
+    except CandidateArtifactError as error:
+        status_code = 404 if str(error) == "CANDIDATE_MODEL_NOT_FOUND" else 503
+        raise HTTPException(status_code=status_code, detail=str(error)) from error
     first = predictions[0] if len(predictions) == 1 else None
     return ClassifyResponse(
         model_version=predictions[0].model_version,

@@ -20,6 +20,15 @@ validation does not import Rust Core, React, `data/**`, or training code.
 | `CandidateEvaluation` | `candidate-evaluation.v1` | Offline/shadow evidence and policy decision state |
 | `ModelManifest` | `model-manifest.v1` | ML service model manifest envelope |
 
+Candidate shadow inference uses the classify request with an explicit
+`model_version` and `expected_artifact_checksum`. ML resolves only a trained
+candidate manifest whose version and checksum match; a missing or invalid
+candidate fails that shadow prediction and never falls back to production.
+Core stores the production and candidate outputs separately in
+`learning_cycle_shadow_predictions` and links an operator decision by its
+PostgreSQL decision ID. Ticket text and operator notes are not copied into
+that evidence row. Blind A/B preference collection is disabled and reported.
+
 The checked-in `data/schemas/unified_ticket.schema.json` remains the Data
 importer's schema. The standalone package carries the same v1 schema so an
 artifact bundle can be checked by itself; `--check-demo` rejects any drift

@@ -3,10 +3,11 @@
 
 This intentionally exercises the public contract instead of importing service
 internals. It is safe to run repeatedly: every run uses a unique source and
-the import is checked for idempotency. The normal worker trains a candidate;
-evaluation remains pending until the evaluation-window flow is configured.
-When ``PULSE_TEST_FAKE_TRAINER=true`` is enabled in demo/test mode, the same
-flow also verifies candidate promotion using explicitly test-only evidence.
+the import is checked for idempotency. The normal worker trains and
+shadow-serves a candidate during its evaluation window while production
+remains the operator recommendation. When ``PULSE_TEST_FAKE_TRAINER=true`` is
+enabled in demo/test mode, the same flow also verifies candidate promotion
+using explicitly test-only evidence.
 """
 
 from __future__ import annotations
@@ -348,20 +349,101 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     status, _, closed_cycle = json_request(base_url, "POST", "/api/v1/learning/cycle/close", body={"cycle_id": cycle_id}, role="ML_REVIEWER", timeout=timeout)
     expect(status == 202 and closed_cycle.get("state") == "TRAINING", f"learning close failed: {closed_cycle}")
     evaluation: dict[str, Any] = {}
-    for _ in range(20):
+    for _ in range(40):
         time.sleep(0.5)
         status, _, evaluation = json_request(base_url, "GET", "/api/v1/learning/candidate/evaluation", role="ML_REVIEWER", timeout=timeout)
+        expect(status == 200, f"candidate evaluation read failed: HTTP {status}")
         if evaluation.get("state") != "TRAINING":
             break
-    if evaluation.get("decision") == "READY_TO_REVIEW":
+    expect(evaluation.get("state") == "EVALUATE", f"normal worker did not start the evaluation window: {evaluation}")
+
+    fake_trainer = os.getenv("PULSE_TEST_FAKE_TRAINER", "false").strip().lower() in {"1", "true", "yes"}
+    if not fake_trainer:
+        status, _, shadow_ticket = json_request(
+            base_url,
+            "POST",
+            "/api/v1/tickets",
+            body={
+                "text": f"E2E {suffix}: нет воды в доме",
+                "language": "RU",
+                "region_id": region,
+                "source": "e2e-shadow",
+            },
+            role="OPERATOR",
+            timeout=timeout,
+        )
+        expect(status == 201, f"shadow ticket creation failed: HTTP {status}")
+        expect(
+            shadow_ticket.get("prediction", {}).get("model_version") == cycle.get("production_model_version"),
+            "ticket recommendation did not remain on the production model",
+        )
+        shadow_ticket_id = str(shadow_ticket.get("ticket", {}).get("id", ""))
+        expect(bool(shadow_ticket_id), "shadow ticket response has no ticket id")
+        status, _, operator_decision = json_request(
+            base_url,
+            "POST",
+            f"/api/v1/assist/{shadow_ticket_id}/confirm",
+            body={},
+            role="OPERATOR",
+            timeout=timeout,
+        )
+        expect(
+            status == 200 and operator_decision.get("decision", {}).get("action") == "confirm",
+            f"shadow ticket decision failed: HTTP {status}",
+        )
+
+        status, _, learning = json_request(base_url, "GET", "/api/v1/learning", role="ML_REVIEWER", timeout=timeout)
+        expect(status == 200, f"learning cycle read failed: HTTP {status}")
+        active_cycle = learning.get("active_cycle") or {}
+        expect(active_cycle.get("state") == "EVALUATE", f"evaluation window closed before requested: {active_cycle}")
+        expect(
+            active_cycle.get("shadow_prediction_count", 0) >= 1
+            and active_cycle.get("shadow_inference_failures", 0) == 0
+            and active_cycle.get("shadow_operator_decision_count", 0) >= 1,
+            f"fresh ticket did not produce a successful shadow prediction: {active_cycle}",
+        )
+        expect(
+            active_cycle.get("blind_ab_enabled") is False,
+            "blind A/B preference collection must remain disabled",
+        )
+
+    status, _, closed_evaluation = json_request(
+        base_url,
+        "POST",
+        "/api/v1/learning/cycle/close",
+        body={"cycle_id": cycle_id},
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    expect(
+        status == 202
+        and closed_evaluation.get("state") == "DECISION"
+        and closed_evaluation.get("production_model_unchanged") is True,
+        f"evaluation window did not close without changing production: {closed_evaluation}",
+    )
+    status, _, evaluation = json_request(
+        base_url,
+        "GET",
+        "/api/v1/learning/candidate/evaluation",
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    expect(status == 200 and evaluation.get("state") == "DECISION", f"closed candidate evaluation is unavailable: {evaluation}")
+    if fake_trainer and evaluation.get("decision") == "READY_TO_REVIEW":
         status, _, promoted = json_request(base_url, "POST", "/api/v1/learning/candidate/promote", body={"note": "e2e fake trainer"}, role="ML_REVIEWER", timeout=timeout)
         expect(status == 200 and promoted.get("state") == "PROMOTED", f"candidate promotion failed: {promoted}")
         learning_result = "PROMOTED_TEST_CANDIDATE"
     else:
-        expect(evaluation.get("offline_metrics", {}).get("status") == "EVALUATION_NOT_AVAILABLE", f"normal worker did not produce a candidate: {evaluation}")
+        if not fake_trainer:
+            expect(evaluation.get("offline_metrics", {}).get("status") == "EVALUATION_NOT_AVAILABLE", f"normal worker produced unexpected evaluation evidence: {evaluation}")
         status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e evaluation pending"}, role="ML_REVIEWER", timeout=timeout)
-        expect(status == 200 and rejected.get("state") == "REJECTED", f"candidate rejection failed: {rejected}")
-        learning_result = "TRAINED_CANDIDATE_EVALUATION_PENDING_AND_REJECTED"
+        expect(
+            status == 200
+            and rejected.get("state") == "REJECTED"
+            and rejected.get("production_model_version") == cycle.get("production_model_version"),
+            f"candidate rejection failed or changed production: {rejected}",
+        )
+        learning_result = "SHADOW_EVALUATION_VERIFIED_AND_REJECTED" if not fake_trainer else "FAKE_CANDIDATE_REJECTED"
 
     return {
         "source_system": source,

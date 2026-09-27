@@ -83,8 +83,9 @@ Stateful E2E дополнительно держит `/api/v1/events` откры
 
 ```text
 demo ticket → preview → prediction → operator confirm/correct
-→ persisted feedback → close collect → candidate evaluation
-→ human promote/reject → analytics → alert → forecast → export
+→ persisted feedback → close COLLECT → candidate training and shadow window
+→ fresh ticket shadow evidence → close evaluation → human promote/reject
+→ analytics → alert → forecast → export
 ```
 
 Полный stateful acceptance-контур запускается через public Nginx gateway:
@@ -103,8 +104,11 @@ PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py --restart-
 idempotency, затем проверяет PostgreSQL/Qdrant preview, refetch решения после
 перезаписи, relation feedback, analytics drill-down, QueryIntent, forecast
 30/60/90, spike detector → ACK/CLOSE → SSE, PDF/XLSX, RBAC, Qdrant reindex и
-learning-cycle. В normal mode ожидается `TRAINER_NOT_CONFIGURED`; test-only
-fake trainer включается отдельно и не считается реальной ML-метрикой.
+learning-cycle. В normal mode ожидается реальный candidate artifact; test-only
+fake trainer включается отдельно и не считается реальной ML-метрикой. Normal
+acceptance также проверяет окно `EVALUATE`, checksum-pinned shadow prediction
+для нового ticket, ссылку на его operator decision, сохранение production
+model version и ручной переход в `DECISION` без promotion.
 
 ## Data/PII safety tests
 
@@ -112,6 +116,9 @@ fake trainer включается отдельно и не считается р
 - frozen evaluation IDs/version передаются candidate builder-у и не попадают в candidate train;
 - payload `TRAIN_CLASSIFIER` содержит только version/artifact references и не содержит ticket text;
 - normal `TRAIN_CLASSIFIER` job builds a checksummed candidate artifact and never changes the production pointer;
+- shadow classification requires the registered artifact checksum and never falls back to production;
+- evaluation reads do not close the window, while expiry/manual close advance it to `DECISION`;
+- synthetic candidate artifacts are rejected by production shadow serving;
 - fake trainer is rejected when `PULSE_ENV=production`, and synthetic candidates cannot be promoted there;
 - candidate builder failure виден как `DATASET_BUILD_FAILED` и `background_jobs.FAILED`;
 - полный ticket text, IIN, phone, name, address и attachments отсутствуют в

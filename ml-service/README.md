@@ -23,15 +23,19 @@
 - `POST /internal/v1/evaluation[/<model_type>]` — classifier/forecast/anomaly
   baseline metrics;
 - `GET /internal/v1/models` и `/internal/v1/models/<model_type>` — immutable
-  version manifest.
+  version manifest. Shadow candidates are loaded on demand only when classify
+  receives an explicit model version and expected artifact checksum; there is
+  no fallback to the configured production classifier.
 
 Это честный deterministic demo baseline, а не утверждение о качестве на
 реальном dataset 109. `artifacts/manifest.json` явно содержит
 `schema_version`, `dataset_version`, `model_version`, `artifact_kind`,
 `synthetic`, `metrics`, labels и checksum-поле. Demo identifier не является
 криптографическим checksum. Trained artifact обязан иметь `sha256:<64 hex>` и
-artifact URI. Реальные fine-tuned artifacts используют те же versioned
-contracts; runtime остаётся unready, пока для них нет serving adapter.
+artifact URI. The deterministic baseline remains the configured production/demo
+model. Versioned Multinomial Naive Bayes candidate artifacts use the same
+contracts and a checksum-verifying shadow adapter; they do not replace that
+configured model until Core records an authorized human promotion.
 
 ## Локальный запуск
 

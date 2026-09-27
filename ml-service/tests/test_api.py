@@ -153,7 +153,10 @@ def test_anomaly_flags_latest_spike() -> None:
     assert body["anomalies"][-1]["index"] == 6
 
 
-def test_versioned_model_manifest_preserves_demo_fields_and_checks_explicit_version() -> None:
+def test_versioned_model_manifest_preserves_demo_fields_and_checks_explicit_version(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
     manifest = client.get("/internal/v1/models")
     assert manifest.status_code == 200
     body = manifest.json()
@@ -177,6 +180,17 @@ def test_versioned_model_manifest_preserves_demo_fields_and_checks_explicit_vers
     )
     assert accepted.status_code == 200
     assert rejected.status_code == 404
+
+    candidate_without_artifact = client.post(
+        "/internal/v1/classify",
+        json={
+            "text": "Нет воды",
+            "model_version": "candidate-not-loaded",
+            "expected_artifact_checksum": f"sha256:{'0' * 64}",
+        },
+    )
+    assert candidate_without_artifact.status_code == 404
+    assert candidate_without_artifact.json()["detail"] == "CANDIDATE_MODEL_NOT_FOUND"
 
 
 def test_training_evaluation_and_manifest(monkeypatch) -> None:

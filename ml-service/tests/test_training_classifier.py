@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from app.candidate_runtime import CandidateArtifactError, classify_candidate
 from app.schemas import CandidateTrainingJob
 from app.training.classifier import train_candidate_classifier
 from contracts import validate_document
@@ -155,6 +156,61 @@ class CandidateClassifierTrainerTests(unittest.TestCase):
             )
             self.assertNotIn("Не работает насосная станция", artifact_bytes.decode())
 
+    def test_shadow_runtime_serves_only_the_checksum_pinned_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            job = _training_job(directory)
+
+            with patch.dict(os.environ, {"MODEL_DIR": str(directory), "PULSE_ENV": "test"}):
+                result = train_candidate_classifier(job)
+                prediction = classify_candidate(
+                    result.candidate_model_version,
+                    result.artifact_checksum,
+                    "Не работает насосная станция",
+                    "RU",
+                    2,
+                )
+                self.assertEqual(prediction.model_version, result.candidate_model_version)
+                self.assertEqual(prediction.topic_id, "water_supply")
+                self.assertEqual(len(prediction.alternatives), 2)
+                with self.assertRaisesRegex(
+                    CandidateArtifactError, "CANDIDATE_ARTIFACT_CHECKSUM_MISMATCH"
+                ):
+                    classify_candidate(
+                        result.candidate_model_version,
+                        f"sha256:{'0' * 64}",
+                        "Не работает насосная станция",
+                        "RU",
+                        2,
+                    )
+
+    def test_production_runtime_rejects_synthetic_candidate_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            original_job = _training_job(directory)
+            manifest_path = Path(original_job.dataset_manifest_uri.removeprefix("file://"))
+            manifest = json.loads(manifest_path.read_bytes())
+            manifest["synthetic"] = True
+            manifest_bytes = _canonical_json(manifest)
+            manifest_path.write_bytes(manifest_bytes)
+            job_payload = original_job.model_dump()
+            job_payload["dataset_manifest_sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+            job = CandidateTrainingJob.model_validate(job_payload)
+
+            with patch.dict(os.environ, {"MODEL_DIR": str(directory), "PULSE_ENV": "production"}):
+                result = train_candidate_classifier(job)
+                self.assertTrue(result.synthetic)
+                with self.assertRaisesRegex(
+                    CandidateArtifactError, "CANDIDATE_SYNTHETIC_ARTIFACT_FORBIDDEN"
+                ):
+                    classify_candidate(
+                        result.candidate_model_version,
+                        result.artifact_checksum,
+                        "Не работает насосная станция",
+                        "RU",
+                        2,
+                    )
+
     def test_rejects_a_dataset_checksum_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             valid_job = _training_job(Path(temporary_directory))
@@ -178,7 +234,7 @@ class CandidateClassifierTrainerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "CANDIDATE_MODEL_VERSION_CONFLICT"):
                 train_candidate_classifier(invalid_job)
 
-    def test_normal_worker_trains_candidate_and_only_registers_candidate_status(self) -> None:
+    def test_normal_worker_starts_shadow_evaluation_without_promoting_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             job_payload = _training_job(directory).model_dump(mode="json")
@@ -212,7 +268,7 @@ class CandidateClassifierTrainerTests(unittest.TestCase):
                 for query, args in pool.executed
                 if "INSERT INTO model_versions" in query
             )
-            self.assertIn("'CANDIDATE'", model_registration[0])
+            self.assertIn("'SHADOW'", model_registration[0])
             self.assertNotIn("'PRODUCTION'", model_registration[0])
             self.assertEqual(
                 model_registration[1][3],
@@ -231,6 +287,14 @@ class CandidateClassifierTrainerTests(unittest.TestCase):
             self.assertEqual(training_result["candidate_model_version"], job_payload["candidate_model_version"])
             self.assertEqual(training_result["status"], "COMPLETED")
             self.assertNotIn("samples", training_result)
+            cycle_update = next(
+                query
+                for query, _ in pool.executed
+                if "UPDATE learning_cycles SET state = 'EVALUATE'" in query
+            )
+            self.assertIn("evaluation_started_at = now()", cycle_update)
+            self.assertIn("evaluation_ends_at = now() + (collect_ends_at - collect_started_at)", cycle_update)
+            self.assertIn("blind_ab_enabled = false", cycle_update)
 
 
 if __name__ == "__main__":

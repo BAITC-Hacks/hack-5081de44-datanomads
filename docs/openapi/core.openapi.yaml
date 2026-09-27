@@ -520,7 +520,7 @@ paths:
   /api/v1/learning/cycle/close:
     post:
       tags: [learning]
-      summary: Close an eligible COLLECT cycle
+      summary: Close an eligible COLLECT or EVALUATE window
       security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
@@ -1005,11 +1005,17 @@ components:
     Forbidden:
       description: Role is not allowed
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    NotFound:
+      description: Requested resource was not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     Conflict:
       description: State transition or dataset version conflict
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     DependencyUnavailable:
       description: ML/Qdrant dependency unavailable
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Unavailable:
+      description: Required service or storage is unavailable
       content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   schemas:
     ErrorResponse:
@@ -1438,15 +1444,21 @@ components:
         resolved: { type: integer }
     LearningCycle:
       type: object
-      required: [id, cycle_id, state, dataset_version, candidate_model_version, collect_started_at, collect_ends_at, frozen_evaluation_dataset_version, candidate_dataset_checksum, min_feedback_count, promotion_policy_version, manual_close_enabled, feedback_count, created_at, updated_at]
+      required: [id, cycle_id, state, dataset_version, candidate_model_version, collect_started_at, collect_ends_at, evaluation_started_at, evaluation_ends_at, shadow_prediction_count, shadow_inference_failures, shadow_operator_decision_count, blind_ab_enabled, frozen_evaluation_dataset_version, candidate_dataset_checksum, min_feedback_count, promotion_policy_version, manual_close_enabled, feedback_count, created_at, updated_at]
       properties:
         id: { type: string }
         cycle_id: { type: string }
-        state: { type: string, enum: [COLLECT, TRAINING, EVALUATE, DECISION, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK, DATASET_BUILD_FAILED] }
+        state: { type: string, enum: [COLLECT, TRAINING, TRAINING_FAILED, EVALUATE, DECISION, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK, DATASET_BUILD_FAILED] }
         dataset_version: { type: string }
         candidate_model_version: { type: string }
         collect_started_at: { type: string, format: date-time }
         collect_ends_at: { type: string, format: date-time }
+        evaluation_started_at: { type: string, format: date-time, nullable: true }
+        evaluation_ends_at: { type: string, format: date-time, nullable: true }
+        shadow_prediction_count: { type: integer, minimum: 0 }
+        shadow_inference_failures: { type: integer, minimum: 0 }
+        shadow_operator_decision_count: { type: integer, minimum: 0, description: Shadow predictions linked to a persisted operator decision. }
+        blind_ab_enabled: { type: boolean, description: Blind A/B preference collection is disabled for this cycle. }
         production_model_version: { type: string, nullable: true }
         frozen_evaluation_dataset_version: { type: string, nullable: true }
         candidate_dataset_checksum: { type: string, nullable: true, pattern: '^[a-f0-9]{64}$' }
@@ -1480,16 +1492,28 @@ components:
         decision: { type: string }
         source: { type: string }
         comment: { type: string }
+    LearningFeedback:
+      type: object
+      required: [id, ticket_id, feedback_type, user_id, created_at]
+      properties:
+        id: { type: string }
+        ticket_id: { type: string }
+        cycle_id: { type: string, nullable: true }
+        feedback_type: { type: string }
+        comment: { type: string, nullable: true }
+        suggestion: { allOf: [{ $ref: '#/components/schemas/RelationSuggestionSnapshot' }], nullable: true }
+        user_id: { type: string }
+        created_at: { type: string, format: date-time }
     CloseLearningCycleRequest:
       type: object
       properties:
-        cycle_id: { type: string, description: Defaults to an eligible COLLECT cycle when omitted. }
+        cycle_id: { type: string, description: Defaults to an eligible COLLECT or EVALUATE cycle when omitted. }
     CloseLearningCycleResponse:
       type: object
       required: [job_id, state, cycle, production_model_unchanged]
       properties:
         job_id: { type: string, nullable: true }
-        state: { type: string, enum: [TRAINING, INSUFFICIENT_FEEDBACK] }
+        state: { type: string, enum: [TRAINING, DECISION, INSUFFICIENT_FEEDBACK] }
         cycle: { $ref: '#/components/schemas/LearningCycle' }
         production_model_unchanged: { type: boolean }
     CandidateEvaluation:

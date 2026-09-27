@@ -542,6 +542,12 @@ pub struct LearningCycle {
     pub candidate_model_version: String,
     pub collect_started_at: String,
     pub collect_ends_at: String,
+    pub evaluation_started_at: Option<String>,
+    pub evaluation_ends_at: Option<String>,
+    pub shadow_prediction_count: u32,
+    pub shadow_inference_failures: u32,
+    pub shadow_operator_decision_count: u32,
+    pub blind_ab_enabled: bool,
     pub production_model_version: Option<String>,
     pub frozen_evaluation_dataset_version: Option<String>,
     pub candidate_dataset_checksum: Option<String>,
@@ -1390,6 +1396,12 @@ impl Store {
             candidate_model_version: "classifier-candidate-2026-09-001".to_owned(),
             collect_started_at: "2026-09-18T10:00:00Z".to_owned(),
             collect_ends_at: "2026-09-25T10:00:00Z".to_owned(),
+            evaluation_started_at: Some("2026-09-25T10:00:00Z".to_owned()),
+            evaluation_ends_at: Some("2026-10-02T10:00:00Z".to_owned()),
+            shadow_prediction_count: 0,
+            shadow_inference_failures: 0,
+            shadow_operator_decision_count: 0,
+            blind_ab_enabled: false,
             production_model_version: Some("classifier-demo-2026-09-001".to_owned()),
             frozen_evaluation_dataset_version: None,
             candidate_dataset_checksum: None,
@@ -4975,6 +4987,12 @@ async fn create_learning_cycle(
         }),
         collect_started_at: started_at.to_rfc3339(),
         collect_ends_at: ends_at.to_rfc3339(),
+        evaluation_started_at: None,
+        evaluation_ends_at: None,
+        shadow_prediction_count: 0,
+        shadow_inference_failures: 0,
+        shadow_operator_decision_count: 0,
+        blind_ab_enabled: false,
         production_model_version,
         frozen_evaluation_dataset_version: request
             .evaluation_dataset_version
@@ -5278,6 +5296,7 @@ async fn close_learning_cycle(
                 if error.contains("not found") {
                     ApiError::NotFound(error)
                 } else if error.contains("COLLECT cycle")
+                    || error.contains("no eligible")
                     || error.contains("cannot close")
                     || error.contains("not eligible")
                 {
@@ -5304,28 +5323,51 @@ async fn close_learning_cycle(
         store
             .learning_cycles
             .values()
-            .find(|cycle| cycle.state == "COLLECT")
+            .find(|cycle| matches!(cycle.state.as_str(), "COLLECT" | "EVALUATE"))
             .map(|cycle| cycle.id.clone())
     });
-    let cycle_id =
-        cycle_id.ok_or_else(|| ApiError::Conflict("no COLLECT cycle is available".to_owned()))?;
+    let cycle_id = cycle_id.ok_or_else(|| {
+        ApiError::Conflict("no COLLECT or EVALUATE cycle is available".to_owned())
+    })?;
     let cycle = store
         .learning_cycles
         .get_mut(&cycle_id)
         .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
-    if cycle.state != "COLLECT" {
+    if !matches!(cycle.state.as_str(), "COLLECT" | "EVALUATE") {
         return Err(ApiError::Conflict(format!(
             "cycle {} cannot close from state {}",
             cycle.id, cycle.state
         )));
     }
+    let evaluation_stage = cycle.state == "EVALUATE";
+    let window_end = if evaluation_stage {
+        cycle.evaluation_ends_at.as_deref()
+    } else {
+        Some(cycle.collect_ends_at.as_str())
+    };
     if !cycle.manual_close_enabled
-        && !learning_collect_end_is_due(&cycle.collect_ends_at, Utc::now())
+        && !window_end.is_some_and(|value| learning_collect_end_is_due(value, Utc::now()))
     {
         return Err(ApiError::Conflict(format!(
-            "learning cycle {} is not eligible to close before collect_ends_at",
+            "learning cycle {} is not eligible to close before its window ends",
             cycle.id
         )));
+    }
+    if evaluation_stage {
+        let closed_at = Utc::now().to_rfc3339();
+        cycle.evaluation_ends_at = Some(closed_at.clone());
+        cycle.state = "DECISION".to_owned();
+        cycle.decision_note = Some("EVALUATION_WINDOW_CLOSED".to_owned());
+        cycle.updated_at = closed_at;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "job_id": Value::Null,
+                "state": "DECISION",
+                "cycle": cycle,
+                "production_model_unchanged": true,
+            })),
+        ));
     }
     if cycle.feedback_count < cycle.min_feedback_count {
         cycle.state = "INSUFFICIENT_FEEDBACK".to_owned();
@@ -5364,12 +5406,12 @@ async fn candidate_evaluation(
                 }
             });
     }
-    let mut store = state.write_store()?;
+    let store = state.read_store()?;
     let cycle_id = active_cycle_id(&store)
         .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?;
     let cycle = store
         .learning_cycles
-        .get_mut(&cycle_id)
+        .get(&cycle_id)
         .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?;
     if !matches!(cycle.state.as_str(), "EVALUATE" | "DECISION") {
         return Err(ApiError::Conflict(format!(
@@ -5377,17 +5419,23 @@ async fn candidate_evaluation(
             cycle.id, cycle.state
         )));
     }
-    if cycle.state == "EVALUATE" {
-        cycle.state = "DECISION".to_owned();
-        cycle.decision_note = Some("DEMO_EVALUATION_REVIEW".to_owned());
-        cycle.updated_at = Utc::now().to_rfc3339();
-    }
     let cycle = cycle.clone();
     Ok(Json(json!({
         "cycle_id": cycle.id,
         "state": cycle.state,
-        "offline_metrics": cycle.metrics,
-        "shadow_metrics": {"agreement": 0.88, "correction_rate_delta": -0.04, "sample_size": cycle.feedback_count},
+        "offline_metrics": {
+            "status": "DEMO_SYNTHETIC",
+            "macro_f1": cycle.metrics.macro_f1,
+            "accuracy": cycle.metrics.accuracy,
+            "evaluated_samples": cycle.metrics.evaluated_samples,
+        },
+        "shadow_metrics": {
+            "status": "DEMO_SYNTHETIC",
+            "agreement": 0.88,
+            "correction_rate_delta": -0.04,
+            "sample_size": cycle.feedback_count,
+            "blind_ab_enabled": cycle.blind_ab_enabled,
+        },
         "critical_regressions": [],
         "promotion_policy_version": cycle.promotion_policy_version,
         "decision": "READY_TO_REVIEW"

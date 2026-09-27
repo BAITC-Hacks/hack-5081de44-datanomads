@@ -1,9 +1,8 @@
 """PostgreSQL-backed ML background worker.
 
 The worker claims queued rows with FOR UPDATE SKIP LOCKED so multiple
-instances can safely process the same queue. Training/evaluation remains the
-deterministic baseline for now; the durable job lifecycle is real and ready
-for versioned model artifacts later.
+instances can safely process the same queue. Versioned candidate artifacts
+remain in shadow until an authorized human promotes or rejects them.
 """
 
 from __future__ import annotations
@@ -81,6 +80,28 @@ async def advance_expired_learning_cycle(pool: Any) -> bool:
 
     async with pool.acquire() as connection:
         async with connection.transaction():
+            closed_evaluation = await connection.fetchrow(
+                """
+                WITH expired AS (
+                    SELECT id
+                    FROM learning_cycles
+                    WHERE state = 'EVALUATE' AND evaluation_ends_at <= now()
+                    ORDER BY evaluation_ends_at, id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE learning_cycles AS cycle
+                SET state = 'DECISION',
+                    decision_note = 'EVALUATION_WINDOW_CLOSED',
+                    updated_at = now()
+                FROM expired
+                WHERE cycle.id = expired.id
+                RETURNING cycle.id
+                """
+            )
+            if closed_evaluation is not None:
+                return True
+
             cycle = await connection.fetchrow(
                 """
                 SELECT lc.id, lc.cycle_id, lc.min_feedback_count,
@@ -226,7 +247,7 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
         return
     if error:
         await pool.execute(
-            "UPDATE learning_cycles SET state = 'EVALUATE', decision_note = $2, updated_at = now() WHERE cycle_id = $1 OR id::text = $1",
+            "UPDATE learning_cycles SET state = 'TRAINING_FAILED', decision_note = $2, updated_at = now() WHERE cycle_id = $1 OR id::text = $1",
             str(cycle_id),
             error[:4000],
         )
@@ -246,7 +267,7 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
         if manifest_uri is None:
             manifest_uri = manifest.get("artifact_uri")
         await pool.execute(
-            "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, $2, $3, 'CANDIDATE', $4, $5) ON CONFLICT (model_version) DO UPDATE SET status = 'CANDIDATE', manifest_uri = EXCLUDED.manifest_uri, artifact_checksum = EXCLUDED.artifact_checksum",
+            "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, $2, $3, 'SHADOW', $4, $5) ON CONFLICT (model_version) DO UPDATE SET status = 'SHADOW', manifest_uri = EXCLUDED.manifest_uri, artifact_checksum = EXCLUDED.artifact_checksum",
             str(candidate),
             str(manifest.get("model_family") or "classifier-baseline-candidate"),
             str(candidate_dataset_version),
@@ -255,7 +276,7 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
         )
     fake_trainer_used = manifest.get("implementation") == "test-fake-trainer"
     await pool.execute(
-        "UPDATE learning_cycles SET state = 'EVALUATE', updated_at = now(), decision_note = $2 WHERE cycle_id = $1 OR id::text = $1",
+        "UPDATE learning_cycles SET state = 'EVALUATE', evaluation_started_at = now(), evaluation_ends_at = now() + (collect_ends_at - collect_started_at), blind_ab_enabled = false, updated_at = now(), decision_note = $2 WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING'",
         str(cycle_id),
         "FAKE_TRAINER_COMPLETED" if fake_trainer_used else "TRAINING_COMPLETED",
     )

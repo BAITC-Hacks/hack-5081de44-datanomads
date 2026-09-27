@@ -50,6 +50,7 @@ class ClassifyRequest(APIModel):
     language: str | None = None
     top_k: int = Field(default=3, ge=1, le=10)
     model_version: str | None = None
+    expected_artifact_checksum: str | None = Field(default=None, pattern=r"^sha256:[a-f0-9]{64}$")
     request_id: str | None = None
 
     @model_validator(mode="after")
@@ -57,6 +58,8 @@ class ClassifyRequest(APIModel):
         values = [self.text is not None, bool(self.texts), bool(self.inputs)]
         if sum(values) != 1:
             raise ValueError("provide exactly one of text, texts, or inputs")
+        if self.expected_artifact_checksum is not None and not self.model_version:
+            raise ValueError("expected_artifact_checksum requires model_version")
         if self.text is not None and not self.text.strip():
             raise ValueError("text must not be empty")
         if self.texts is not None and any(not item.strip() for item in self.texts):

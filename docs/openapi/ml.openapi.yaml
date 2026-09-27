@@ -621,6 +621,12 @@ components:
           - type: string
           - type: 'null'
           title: Model Version
+        expected_artifact_checksum:
+          anyOf:
+          - type: string
+            pattern: '^sha256:[a-f0-9]{64}$'
+          - type: 'null'
+          title: Expected Artifact Checksum
         request_id:
           anyOf:
           - type: string

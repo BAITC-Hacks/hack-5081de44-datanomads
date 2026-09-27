@@ -17,7 +17,12 @@ COLLECT → TRAINING → EVALUATE → DECISION
   builder, затем checksum-verified dataset обучается отдельным candidate
   trainer; production остаётся serving.
 - `EVALUATE`: candidate работает shadow рядом с production на свежих данных;
-  production остаётся serving.
+  production остаётся serving. Временные границы окна сохраняются в
+  `evaluation_started_at` и `evaluation_ends_at`; новый ticket получает
+  независимые production/candidate predictions с версиями и timestamp в
+  `learning_cycle_shadow_predictions`. Ошибка candidate inference фиксируется
+  безопасным кодом и не меняет production рекомендацию. Длительность evaluation
+  окна равна фактической длительности COLLECT.
 - `DECISION`: KPI и critical regressions доступны reviewer.
 - `PROMOTED`: human reviewer утвердил candidate; указатель production обновлён
   атомарно.
@@ -57,8 +62,17 @@ cycle_id, offline_metrics, shadow_metrics,
 critical_regressions, sample_size, decision, created_at
 ```
 
-Каждая запись также имеет model/dataset/evaluation version и audit actor там,
-где действие совершает человек.
+`learning_cycle_shadow_predictions` хранит evidence по cycle/ticket, обе версии
+моделей, обе classification структуры, время inference и ссылку на
+`operator_decisions.id`, если решение появилось позже. Запись не дублирует
+ticket text и свободную заметку оператора. Получение evaluation не закрывает
+окно: переход в `DECISION` происходит по истечении `evaluation_ends_at` или
+через ручное закрытие тем же endpoint цикла. Promotion/rejection остаётся
+отдельным человеческим решением. Blind A/B выключен
+(`blind_ab_enabled = false`); preference signal не собирается.
+
+Цикл связывает feedback, dataset и evaluation version; действие reviewer
+сохраняет audit actor.
 
 ## Гейты
 
@@ -68,18 +82,22 @@ critical_regressions, sample_size, decision, created_at
    завершается `INSUFFICIENT_FEEDBACK`; candidate не создаётся.
 3. **Dataset freeze**: candidate dataset получает version и checksum. Frozen
    test/evaluation set исключается из train.
-4. **Training**: ML worker создаёт immutable candidate artifact и manifest.
-5. **Evaluation**: сохраняются offline macro-F1/per-class F1, shadow agreement,
-   correction-rate delta, sample size и critical regressions.
+4. **Training**: ML worker создаёт immutable candidate artifact и manifest;
+   модель регистрируется как `SHADOW`, production pointer не меняется.
+5. **Evaluation**: Core сохраняет отдельные production/candidate predictions
+   для fresh tickets и связывает появившиеся operator decisions; offline и
+   shadow evidence доступны reviewer.
 6. **Promotion policy**: thresholds фиксируются в `promotion_policy_version`
    до просмотра candidate metrics.
 7. **Human decision**: только `ML_REVIEWER`/`ADMIN` переводит candidate в
    `PROMOTED` или `REJECTED`.
 
-Пока реальный trainer не подключён, обычный ML runtime возвращает
-`TRAINER_NOT_CONFIGURED` и не создаёт candidate. Тестовый fake trainer включается
-только через `PULSE_TEST_FAKE_TRAINER=true` для проверки state machine; его
-результат не является обученной моделью или валидной ML-метрикой.
+Постоянный `TRAIN_CLASSIFIER` job обучает отдельный candidate из immutable
+dataset artifact. Inline-sample training endpoint остаётся
+`TRAINER_NOT_CONFIGURED`, если включён только deterministic baseline. Тестовый
+fake trainer допускается лишь в demo/development/test runtime через
+`PULSE_TEST_FAKE_TRAINER=true`; его результат не является обученной моделью или
+валидной production-метрикой.
 
 Операторское исправление никогда не вызывает serving replacement или
 автоматический retraining.
