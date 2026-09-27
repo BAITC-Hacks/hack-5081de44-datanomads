@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
@@ -22,7 +24,13 @@ SELECT lf.id AS feedback_id, lf.ticket_id AS db_ticket_id,
        lf.production_model_version, lf.production_prediction::text,
        lf.operator_confirmed_decision::text, lf.accepted_or_corrected,
        lf.validation_status, lf.feedback_created_at,
-       t.original_text, t.language,
+       t.original_text, t.language, t.created_at AS ticket_created_at,
+       t.created_in_pulse_at, t.source_system, t.external_ticket_id,
+       (SELECT COUNT(*)::int FROM audit_log al
+        WHERE al.action = 'CREATE_TICKET' AND al.entity_type = 'ticket'
+          AND al.entity_id = t.id::text AND al.metadata->>'source' = t.source_system
+          AND al.actor_id IS NOT NULL AND al.request_id IS NOT NULL
+          AND al.created_at >= t.created_in_pulse_at) AS api_create_audit_count,
        od.id AS operator_decision_id, od.decision AS operator_decision_kind,
        od.confirmed_topic_id,
        tp.model_version AS prediction_model_version, tp.topic_id AS prediction_topic_id,
@@ -82,15 +90,58 @@ class ReviewedFeedbackLink(BaseModel):
         return _checksum(value)
 
 
-def load_review_links(path: Path) -> dict[int, ReviewedFeedbackLink]:
+class RuntimeFeedbackLink(BaseModel):
+    """Human-reviewed origin and exact text of a ticket created through Core API."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    contract_version: Literal["feedback-review-link.v2"]
+    db_ticket_id: int = Field(gt=0)
+    ticket_id: str
+    split_group: str
+    source_kind: Literal["RUNTIME_API"]
+    source_system: str
+    external_ticket_id: str
+    is_synthetic: bool
+    text_review_sha256: str
+    review_status: Literal["APPROVED"]
+    reviewer_id: str
+    reviewed_at: AwareDatetime
+
+    @field_validator("ticket_id", "split_group", "source_system", "reviewer_id")
+    @classmethod
+    def safe_id(cls, value: str) -> str:
+        if not ID_RE.fullmatch(value) or scan_pii(value).detected:
+            raise ValueError("review identifier is invalid")
+        return value
+
+    @field_validator("external_ticket_id")
+    @classmethod
+    def api_identity(cls, value: str) -> str:
+        if not re.fullmatch(r"api-[0-9]{16,20}", value):
+            raise ValueError("runtime ticket ID is invalid")
+        return value
+
+    @field_validator("text_review_sha256")
+    @classmethod
+    def valid_checksum(cls, value: str) -> str:
+        return _checksum(value)
+
+
+ReviewLink = ReviewedFeedbackLink | RuntimeFeedbackLink
+
+
+def load_review_links(path: Path) -> dict[int, ReviewLink]:
     links = {}
     export_ids = set()
     with path.open(encoding="utf-8") as stream:
         for line in stream:
             if not line.strip():
                 continue
-            json.loads(line, object_pairs_hook=_unique_object)
-            link = ReviewedFeedbackLink.model_validate_json(line)
+            data = json.loads(line, object_pairs_hook=_unique_object)
+            version = data.get("contract_version") if isinstance(data, dict) else None
+            model = ReviewedFeedbackLink if version == "feedback-review-link.v1" else RuntimeFeedbackLink
+            link = model.model_validate_json(line)
             if link.db_ticket_id in links or link.ticket_id in export_ids:
                 raise ValueError("duplicate reviewed ticket link")
             links[link.db_ticket_id] = link
@@ -98,6 +149,33 @@ def load_review_links(path: Path) -> dict[int, ReviewedFeedbackLink]:
     if not links:
         raise ValueError("review link file is empty")
     return links
+
+
+def runtime_origin_valid(row: dict, link: RuntimeFeedbackLink, lineage: object) -> bool:
+    """Bind a reviewed runtime ticket to its Core-created PostgreSQL identity."""
+    created_at = row.get("ticket_created_at")
+    created_in_pulse_at = row.get("created_in_pulse_at")
+    text = row.get("original_text")
+    try:
+        seconds, nanoseconds = divmod(int(link.external_ticket_id.removeprefix("api-")), 1_000_000_000)
+        issued_at = datetime.fromtimestamp(seconds, timezone.utc) + timedelta(microseconds=nanoseconds // 1000)
+    except (OverflowError, OSError, ValueError):
+        return False
+    return (
+        lineage == [] and
+        type(row.get("api_create_audit_count")) is int and row["api_create_audit_count"] == 1 and
+        row.get("db_ticket_id") == link.db_ticket_id and
+        row.get("source_system") == link.source_system == "api" and
+        row.get("external_ticket_id") == link.external_ticket_id and
+        isinstance(created_at, datetime) and created_at.tzinfo is not None and
+        isinstance(created_in_pulse_at, datetime) and created_in_pulse_at.tzinfo is not None and
+        abs(created_at - issued_at) <= timedelta(minutes=5) and
+        abs(created_in_pulse_at - created_at) <= timedelta(minutes=5) and
+        created_at <= link.reviewed_at <= datetime.now(timezone.utc) and
+        created_in_pulse_at <= link.reviewed_at and
+        isinstance(text, str) and bool(text.strip()) and not scan_pii(text).detected and
+        "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest() == link.text_review_sha256
+    )
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -113,7 +191,7 @@ def _json_value(value: str | dict | list) -> object:
     return json.loads(value, object_pairs_hook=_unique_object) if isinstance(value, str) else value
 
 
-def _export_row(row: dict, link: ReviewedFeedbackLink, cycle_id: str, production_model_version: str) -> tuple[dict | None, str | None]:
+def _export_row(row: dict, link: ReviewLink, cycle_id: str, production_model_version: str) -> tuple[dict | None, str | None]:
     text = row["original_text"]
     if not isinstance(text, str) or not text.strip() or scan_pii(text).detected:
         return None, "TEXT_MISSING_OR_PII"
@@ -123,17 +201,27 @@ def _export_row(row: dict, link: ReviewedFeedbackLink, cycle_id: str, production
         lineage = _json_value(row["source_lineage"])
     except ValueError:
         return None, "DATASET_LINEAGE_UNVERIFIED"
-    if not isinstance(lineage, list) or len(lineage) != 1:
-        return None, "DATASET_LINEAGE_UNVERIFIED"
-    source = lineage[0]
-    if (not isinstance(source, dict) or source.get("dataset_version") != link.source_dataset_version or
-            not isinstance(source.get("is_synthetic"), bool)):
-        return None, "DATASET_LINEAGE_UNVERIFIED"
-    try:
-        _checksum(source["content_sha256"])
-        _checksum(source["manifest_sha256"])
-    except (KeyError, TypeError, ValueError):
-        return None, "DATASET_LINEAGE_UNVERIFIED"
+    if isinstance(link, RuntimeFeedbackLink):
+        if not runtime_origin_valid(row, link, lineage):
+            return None, "RUNTIME_ORIGIN_UNVERIFIED"
+        source_dataset_version = None
+        source_origin_kind = "RUNTIME_API"
+        is_synthetic = link.is_synthetic
+    else:
+        if not isinstance(lineage, list) or len(lineage) != 1:
+            return None, "DATASET_LINEAGE_UNVERIFIED"
+        source = lineage[0]
+        if (not isinstance(source, dict) or source.get("dataset_version") != link.source_dataset_version or
+                not isinstance(source.get("is_synthetic"), bool)):
+            return None, "DATASET_LINEAGE_UNVERIFIED"
+        try:
+            _checksum(source["content_sha256"])
+            _checksum(source["manifest_sha256"])
+        except (KeyError, TypeError, ValueError):
+            return None, "DATASET_LINEAGE_UNVERIFIED"
+        source_dataset_version = link.source_dataset_version
+        source_origin_kind = "IMPORTED_DATASET"
+        is_synthetic = source["is_synthetic"]
     if row["validation_status"] != "VALID":
         return None, "INVALID_FEEDBACK_STATUS"
     if row["production_model_version"] != production_model_version:
@@ -166,14 +254,13 @@ def _export_row(row: dict, link: ReviewedFeedbackLink, cycle_id: str, production
     except (KeyError, TypeError, ValueError):
         return None, "MISSING_PREDICTION_EVIDENCE"
     try:
-        record = FeedbackRecord.model_validate({
-            "contract_version": "learning-feedback-export.v1",
+        record_data = {
+            "contract_version": "learning-feedback-export.v2" if isinstance(link, RuntimeFeedbackLink) else "learning-feedback-export.v1",
             "feedback_id": f"feedback_{row['feedback_id']}",
             "cycle_id": cycle_id,
             "ticket_id": link.ticket_id,
             "split_group": link.split_group,
-            "source_dataset_version": link.source_dataset_version,
-            "is_synthetic": source["is_synthetic"],
+            "is_synthetic": is_synthetic,
             "original_text": text,
             "language": row["language"],
             "production_model_version": production_model_version,
@@ -182,13 +269,18 @@ def _export_row(row: dict, link: ReviewedFeedbackLink, cycle_id: str, production
             "accepted_or_corrected": row["accepted_or_corrected"],
             "feedback_created_at": row["feedback_created_at"],
             "validation_status": row["validation_status"],
-        })
+        }
+        if source_origin_kind == "RUNTIME_API":
+            record_data["source_origin_kind"] = source_origin_kind
+        else:
+            record_data["source_dataset_version"] = source_dataset_version
+        record = FeedbackRecord.model_validate(record_data)
     except (ValueError, TypeError):
         return None, "INVALID_EXPORT_SCHEMA"
-    return record.model_dump(mode="json"), None
+    return record.model_dump(mode="json", exclude_unset=True), None
 
 
-def export_feedback(rows: list[dict], links: dict[int, ReviewedFeedbackLink], output: Path,
+def export_feedback(rows: list[dict], links: dict[int, ReviewLink], output: Path,
                     *, cycle_id: str, production_model_version: str) -> dict:
     if (not ID_RE.fullmatch(cycle_id) or not ID_RE.fullmatch(production_model_version) or
             scan_pii(cycle_id).detected or scan_pii(production_model_version).detected):

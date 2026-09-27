@@ -18,11 +18,12 @@ from training.feedback_dataset import ID_RE, TOPICS, OperatorDecision, Predictio
 class ShadowRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    contract_version: Literal["classifier-shadow-input.v1"]
+    contract_version: Literal["classifier-shadow-input.v1", "classifier-shadow-input.v2"]
     feedback_id: str
     cycle_id: str
     ticket_id: str
-    source_dataset_version: str
+    source_dataset_version: str | None = None
+    source_origin_kind: Literal["IMPORTED_DATASET", "RUNTIME_API"] = "IMPORTED_DATASET"
     is_synthetic: bool
     production_model_version: str
     candidate_model_version: str
@@ -36,8 +37,13 @@ class ShadowRecord(BaseModel):
     @model_validator(mode="after")
     def valid_decision(self):
         if (any(not ID_RE.fullmatch(value) for value in (
-                self.feedback_id, self.cycle_id, self.ticket_id, self.source_dataset_version,
+                self.feedback_id, self.cycle_id, self.ticket_id,
                 self.production_model_version, self.candidate_model_version)) or
+                (self.contract_version == "classifier-shadow-input.v1") !=
+                (self.source_origin_kind == "IMPORTED_DATASET") or
+                (self.source_origin_kind == "IMPORTED_DATASET") !=
+                (self.source_dataset_version is not None) or
+                (self.source_dataset_version is not None and not ID_RE.fullmatch(self.source_dataset_version)) or
                 self.operator_confirmed_decision.topic_id not in TOPICS or
                 self.production_prediction.topic_id not in TOPICS | {"unknown"} or
                 self.candidate_shadow_prediction.topic_id not in TOPICS | {"unknown"} or
@@ -154,6 +160,8 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
             "feedback_id": row.feedback_id,
             "ticket_id": row.ticket_id,
             "source_dataset_version": row.source_dataset_version,
+            **({"source_origin_kind": row.source_origin_kind}
+               if row.source_origin_kind == "RUNTIME_API" else {}),
             "is_synthetic": row.is_synthetic,
             "production_prediction": row.production_prediction.model_dump(mode="json"),
             "operator_confirmed_decision": row.operator_confirmed_decision.model_dump(mode="json"),
@@ -178,7 +186,10 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
         "sample_count": len(rows),
         "sample_ids_sha256": f"sha256:{ids_digest}",
         "champion_reference_sha256": f"sha256:{reference_digest}",
-        "source_dataset_versions": sorted({row.source_dataset_version for row in rows}),
+        "source_dataset_versions": sorted({row.source_dataset_version for row in rows
+                                           if row.source_dataset_version is not None}),
+        "runtime_ticket_ids": sorted(row.ticket_id for row in rows
+                                     if row.source_origin_kind == "RUNTIME_API"),
         "origin_counts": origin_counts,
         "gate_population": "real_only.v1",
         "production_agreement": production_agreement,

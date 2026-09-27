@@ -258,10 +258,11 @@ and a configured offline worker.
 ## Fresh shadow evaluation
 
 `scripts/evaluate_classifier_shadow.py` accepts a PII-free
-`classifier-shadow-input.v1` JSONL. Each row has one ticket/feedback ID, one
+`classifier-shadow-input.v1`/`.v2` JSONL. Each row has one ticket/feedback ID, one
 operator-confirmed topic and **both** production and candidate predictions for
-that ticket. It also carries cycle/model versions, source dataset version,
-synthetic origin, decision time and `validation_status=VALID`. Ticket text is
+that ticket. It also carries cycle/model versions, an imported source dataset
+version (v1) or `source_origin_kind=RUNTIME_API` (v2), synthetic origin,
+decision time and `validation_status=VALID`. Ticket text is
 not part of the contract. Duplicate tickets, mixed model versions, malformed
 decisions and rows outside the policy window fail validation.
 
@@ -305,9 +306,15 @@ DATABASE_URL="$DATABASE_URL" .venv/bin/python scripts/export_classifier_shadow.p
   --output data/processed/reports/cycle_1-shadow-input.jsonl
 ```
 
-The export requires one dataset link, valid source checksums, a production
-prediction before the candidate prediction, and exactly one later operator
-decision inside the same window. Real-origin rows also require an approved
+The import path requires one dataset link and valid source checksums. The
+runtime API path requires no dataset links, an approved `feedback-review-link.v2`
+with the exact ticket/source/external ID/text hash and reviewed synthetic/real
+origin, a matching Core `CREATE_TICKET` audit event, `source_system=api`, and
+creation timestamps within five minutes of the server-generated API ID. API
+tickets with a custom `source` are excluded pending a platform origin marker.
+Both paths require a production prediction before the candidate prediction,
+and exactly one later operator decision inside the same window. Real-origin
+rows also require an approved
 text checksum matching the ticket text; without review links they are excluded.
 The output contains no ticket text. Missing or ambiguous rows appear only in
 the rejected-count summary. An empty export reports `INSUFFICIENT_EVIDENCE`.

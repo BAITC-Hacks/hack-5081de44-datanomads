@@ -11,7 +11,7 @@ from pathlib import Path
 
 from training.contracts import _checksum
 from training.feedback_dataset import ID_RE, _unique_object
-from training.feedback_export import ReviewedFeedbackLink
+from training.feedback_export import ReviewLink, ReviewedFeedbackLink, RuntimeFeedbackLink, runtime_origin_valid
 from training.shadow_eval import ShadowPolicy, ShadowRecord
 
 
@@ -27,7 +27,13 @@ WHERE lc.cycle_id = $1
 
 SHADOW_ROWS_QUERY = """
 SELECT sp.id AS shadow_id, sp.ticket_id AS db_ticket_id,
-       t.created_at AS ticket_created_at, t.original_text,
+       t.created_at AS ticket_created_at, t.created_in_pulse_at,
+       t.source_system, t.external_ticket_id, t.original_text,
+       (SELECT COUNT(*)::int FROM audit_log al
+        WHERE al.action = 'CREATE_TICKET' AND al.entity_type = 'ticket'
+          AND al.entity_id = t.id::text AND al.metadata->>'source' = t.source_system
+          AND al.actor_id IS NOT NULL AND al.request_id IS NOT NULL
+          AND al.created_at >= t.created_in_pulse_at) AS api_create_audit_count,
        tp.model_version AS production_model_version,
        tp.topic_id AS production_topic_id,
        tp.confidence AS production_confidence,
@@ -82,26 +88,42 @@ def validate_context(context: dict, policy: ShadowPolicy) -> None:
 
 
 def _export_row(row: dict, context: dict, policy: ShadowPolicy,
-                review_links: dict[int, ReviewedFeedbackLink]) -> tuple[dict | None, str | None]:
+                review_links: dict[int, ReviewLink]) -> tuple[dict | None, str | None]:
     try:
         lineage = json.loads(row["source_lineage"], object_pairs_hook=_unique_object)
-        if not isinstance(lineage, list) or len(lineage) != 1:
+    except (KeyError, TypeError, ValueError):
+        return None, "DATASET_LINEAGE_UNVERIFIED"
+    review = review_links.get(row["db_ticket_id"])
+    if lineage == []:
+        if not isinstance(review, RuntimeFeedbackLink):
+            return None, "DATASET_LINEAGE_UNVERIFIED"
+        if not runtime_origin_valid(row, review, lineage):
+            return None, "RUNTIME_ORIGIN_UNVERIFIED"
+        source_dataset_version = None
+        source_origin_kind = "RUNTIME_API"
+        is_synthetic = review.is_synthetic
+    else:
+        if not isinstance(lineage, list) or len(lineage) != 1 or isinstance(review, RuntimeFeedbackLink):
             return None, "DATASET_LINEAGE_UNVERIFIED"
         source = lineage[0]
         if (not isinstance(source, dict) or not isinstance(source.get("is_synthetic"), bool) or
                 not isinstance(source.get("dataset_version"), str)):
             return None, "DATASET_LINEAGE_UNVERIFIED"
-        _checksum(source["manifest_sha256"])
-        _checksum(source["content_sha256"])
-    except (KeyError, TypeError, ValueError):
-        return None, "DATASET_LINEAGE_UNVERIFIED"
-    if not source["is_synthetic"]:
-        review = review_links.get(row["db_ticket_id"])
-        text = row["original_text"]
-        if (review is None or review.source_dataset_version != source["dataset_version"] or
-                not isinstance(text, str) or not text.strip() or
-                "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest() != review.text_review_sha256):
-            return None, "REAL_TEXT_NOT_REVIEWED"
+        try:
+            _checksum(source["manifest_sha256"])
+            _checksum(source["content_sha256"])
+        except (KeyError, TypeError, ValueError):
+            return None, "DATASET_LINEAGE_UNVERIFIED"
+        source_dataset_version = source["dataset_version"]
+        source_origin_kind = "IMPORTED_DATASET"
+        is_synthetic = source["is_synthetic"]
+        if not is_synthetic:
+            text = row["original_text"]
+            if (not isinstance(review, ReviewedFeedbackLink) or
+                    review.source_dataset_version != source_dataset_version or
+                    not isinstance(text, str) or not text.strip() or
+                    "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest() != review.text_review_sha256):
+                return None, "REAL_TEXT_NOT_REVIEWED"
     if (row["prior_decisions"] != 0 or row["later_decisions"] != 1 or
             row["decision_id"] is None or row["confirmed_topic_id"] is None or
             row["decision_kind"] not in {"CONFIRMED", "CORRECTED"} or
@@ -118,13 +140,12 @@ def _export_row(row: dict, context: dict, policy: ShadowPolicy,
         return None, "OUTSIDE_PAIRED_WINDOW"
     action = "confirm" if row["decision_kind"] == "CONFIRMED" else "correct"
     try:
-        record = ShadowRecord.model_validate({
-            "contract_version": "classifier-shadow-input.v1",
+        record_data = {
+            "contract_version": "classifier-shadow-input.v2" if source_origin_kind == "RUNTIME_API" else "classifier-shadow-input.v1",
             "feedback_id": f"decision_{row['decision_id']}",
             "cycle_id": context["cycle_id"],
             "ticket_id": f"ticket_{row['db_ticket_id']}",
-            "source_dataset_version": source["dataset_version"],
-            "is_synthetic": source["is_synthetic"],
+            "is_synthetic": is_synthetic,
             "production_model_version": context["production_model_version"],
             "candidate_model_version": context["candidate_model_version"],
             "production_prediction": {"topic_id": row["production_topic_id"],
@@ -137,14 +158,19 @@ def _export_row(row: dict, context: dict, policy: ShadowPolicy,
             "accepted_or_corrected": "ACCEPTED" if action == "confirm" else "CORRECTED",
             "feedback_created_at": row["decision_created_at"],
             "validation_status": "VALID",
-        })
+        }
+        if source_origin_kind == "RUNTIME_API":
+            record_data["source_origin_kind"] = source_origin_kind
+        else:
+            record_data["source_dataset_version"] = source_dataset_version
+        record = ShadowRecord.model_validate(record_data)
     except (KeyError, TypeError, ValueError):
         return None, "INVALID_PAIRED_PREDICTION"
-    return record.model_dump(mode="json"), None
+    return record.model_dump(mode="json", exclude_unset=True), None
 
 
 def export_shadow(rows: list[dict], context: dict, policy: ShadowPolicy, output: Path,
-                  *, review_links: dict[int, ReviewedFeedbackLink] | None = None) -> dict:
+                  *, review_links: dict[int, ReviewLink] | None = None) -> dict:
     validate_context(context, policy)
     if output.exists() or output.is_symlink():
         raise FileExistsError("shadow export already exists")

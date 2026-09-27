@@ -18,11 +18,19 @@ operator_confirmed_decision: {decision_id, action, topic_id},
 accepted_or_corrected, feedback_created_at, validation_status
 ```
 
+Для обращений, созданных через Core API, используется
+`learning-feedback-export.v2`: вместо `source_dataset_version` он содержит
+`source_origin_kind="RUNTIME_API"`. Это не импортный dataset. В candidate
+manifest такие строки перечислены отдельно в `runtime_ticket_ids`;
+`source_dataset_versions` содержит только настоящие импортные версии. Пакет
+может содержать v1 и v2 одновременно и фиксирует это в
+`source_contract_version="learning-feedback-export.mixed.v1"`.
+
 `split_group` должен обозначать проверенную группу одного инцидента;
 экспортёр обязан получать её из подтверждённой связи, а не из похожести
-текстов. `source_dataset_version` и `is_synthetic` должны происходить из
-проверенной dataset lineage. Свободные комментарии, имена, адреса, контакты
-и вложения в этот контракт не входят. `production_prediction` и
+текстов. Для импортного v1 `source_dataset_version` и `is_synthetic` должны
+происходить из проверенной dataset lineage. Свободные комментарии, имена,
+адреса, контакты и вложения в этот контракт не входят. `production_prediction` и
 `operator_confirmed_decision` хранятся отдельно. Обучающая метка берётся
 **только** из `operator_confirmed_decision.topic_id`.
 
@@ -36,6 +44,21 @@ accepted_or_corrected, feedback_created_at, validation_status
 не экспортируются. `ticket_id` следует согласовать с идентификаторами
 замороженного evaluation package, чтобы проверка пересечений работала.
 
+Для API-created ticket без `dataset_ticket_links` нужен отдельный
+`feedback-review-link.v2`. Обязательные поля: `db_ticket_id`, `ticket_id`,
+`split_group`, `source_kind="RUNTIME_API"`, `source_system="api"`,
+`external_ticket_id` (точный server-generated `api-<nanoseconds>`),
+`is_synthetic` (подтверждённое рецензентом происхождение),
+`text_review_sha256`, `review_status="APPROVED"`, `reviewer_id` и
+`reviewed_at`. Рецензент утверждает и текст, и `is_synthetic`: созданный через
+API текст не считается реальным автоматически. Экспортёр сверяет эти поля с
+PostgreSQL, точный SHA-256 текста, отсутствие dataset links, близость времени
+ID/создания (не более 5 минут) и запись `CREATE_TICKET` в `audit_log`. Запись
+без audit event или review исключается. API tickets с заданным пользователем
+`source` вместо стандартного `api` пока исключаются, поскольку их
+происхождение не подтверждает этот узкий контракт. Импортный v1 путь и его
+checksum-проверки сохраняются.
+
 ```bash
 DATABASE_URL='postgresql://...' PYTHONPATH=.:ml-service \
   .venv/bin/python scripts/export_learning_feedback.py \
@@ -45,9 +68,10 @@ DATABASE_URL='postgresql://...' PYTHONPATH=.:ml-service \
 ```
 
 Скрипт читает PostgreSQL в read-only transaction. Он сверяет review hash
-текста, ровно одну dataset lineage с checksums, `is_synthetic`, связанное
-решение оператора и сохранённую production prediction. Generic feedback без
-topic ID, API tickets без dataset lineage и строки с PII отклоняются с
+текста, импортную dataset lineage с checksums либо подтверждённое API
+происхождение, `is_synthetic`, связанное решение оператора и сохранённую
+production prediction. Generic feedback без
+topic ID, API tickets без утверждённого v2 review и строки с PII отклоняются с
 агрегатным кодом причины. Выходной JSONL создаётся эксклюзивно с правами
 `0600`; при нуле допустимых строк файл не создаётся. В stdout выводятся
 только счётчики. Review links и экспорт содержат чувствительные данные

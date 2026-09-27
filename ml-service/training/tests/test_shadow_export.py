@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from training.feedback_export import ReviewedFeedbackLink
+from training.feedback_export import RuntimeFeedbackLink, ReviewedFeedbackLink
 from training.shadow_eval import ShadowPolicy, evaluate_shadow
 from training.shadow_export import export_shadow
 from scripts.record_classifier_shadow_report import evaluation_decision
@@ -17,6 +17,7 @@ from scripts.record_classifier_shadow_report import evaluation_decision
 START = datetime(2026, 9, 26, 10, tzinfo=timezone.utc)
 TEXT = "На дороге появилась яма рядом с остановкой."
 CHECKSUM = "sha256:" + "a" * 64
+API_ID = "api-1790416860000000000"
 
 
 def context() -> dict:
@@ -75,7 +76,67 @@ def review_link() -> ReviewedFeedbackLink:
     })
 
 
+def runtime_review_link(*, synthetic: bool = False) -> RuntimeFeedbackLink:
+    return RuntimeFeedbackLink.model_validate({
+        "contract_version": "feedback-review-link.v2", "db_ticket_id": 7,
+        "ticket_id": "runtime_ticket_7", "split_group": "incident_7",
+        "source_kind": "RUNTIME_API", "source_system": "api",
+        "external_ticket_id": API_ID, "is_synthetic": synthetic,
+        "text_review_sha256": "sha256:" + hashlib.sha256(TEXT.encode()).hexdigest(),
+        "review_status": "APPROVED", "reviewer_id": "reviewer_1",
+        "reviewed_at": START + timedelta(hours=2),
+    })
+
+
+def runtime_row() -> dict:
+    return {**row(synthetic=False), "source_lineage": "[]",
+            "created_in_pulse_at": START + timedelta(minutes=1, seconds=1),
+            "source_system": "api", "external_ticket_id": API_ID,
+            "api_create_audit_count": 1}
+
+
 class ShadowExportTests(unittest.TestCase):
+    def test_runtime_real_and_synthetic_reviewed_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for synthetic in (False, True):
+                path = root / f"runtime-{synthetic}.jsonl"
+                result = export_shadow([runtime_row()], context(), policy(), path,
+                                       review_links={7: runtime_review_link(synthetic=synthetic)})
+                self.assertEqual(result["accepted_count"], 1)
+                exported = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(exported["contract_version"], "classifier-shadow-input.v2")
+                self.assertEqual(exported["source_origin_kind"], "RUNTIME_API")
+                self.assertNotIn("source_dataset_version", exported)
+                self.assertEqual(exported["is_synthetic"], synthetic)
+                policy_path = root / f"policy-{synthetic}.json"
+                policy_path.write_text(policy().model_dump_json(), encoding="utf-8")
+                report = evaluate_shadow(path, policy_path, cycle_id="cycle_1",
+                                         production_model_version="production_v1",
+                                         candidate_model_version="candidate_v1")
+                self.assertEqual(report["origin_counts"],
+                                 {"synthetic" if synthetic else "real": 1})
+                self.assertEqual(report["status"], "INSUFFICIENT_EVIDENCE" if synthetic else "VALID")
+
+    def test_runtime_origin_fails_closed_on_changed_identity_text_and_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = runtime_row()
+            invalid = [
+                {**base, "source_system": "other"},
+                {**base, "external_ticket_id": "api-1790416860000000001"},
+                {**base, "source_lineage": row()["source_lineage"]},
+                {**base, "original_text": "ИИН 000000000000"},
+                {**base, "created_in_pulse_at": START + timedelta(hours=3)},
+                {**base, "api_create_audit_count": 0},
+            ]
+            for index, candidate in enumerate(invalid):
+                result = export_shadow([candidate], context(), policy(), root / f"bad-{index}.jsonl",
+                                       review_links={7: runtime_review_link()})
+                self.assertEqual(result["accepted_count"], 0)
+            result = export_shadow([base], context(), policy(), root / "unreviewed.jsonl")
+            self.assertEqual(result["accepted_count"], 0)
+
     def test_export_can_be_evaluated_without_ticket_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

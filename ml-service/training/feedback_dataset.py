@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
@@ -48,12 +48,13 @@ class OperatorDecision(BaseModel):
 class FeedbackRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    contract_version: Literal["learning-feedback-export.v1"]
+    contract_version: Literal["learning-feedback-export.v1", "learning-feedback-export.v2"]
     feedback_id: str
     cycle_id: str
     ticket_id: str
     split_group: str
-    source_dataset_version: str
+    source_dataset_version: str | None = None
+    source_origin_kind: Literal["IMPORTED_DATASET", "RUNTIME_API"] = "IMPORTED_DATASET"
     is_synthetic: bool
     original_text: str = Field(min_length=1, max_length=10000)
     language: Literal["RU", "KZ", "MIXED"]
@@ -64,12 +65,23 @@ class FeedbackRecord(BaseModel):
     feedback_created_at: AwareDatetime
     validation_status: str = Field(min_length=1)
 
-    @field_validator("feedback_id", "cycle_id", "ticket_id", "split_group", "source_dataset_version")
+    @field_validator("feedback_id", "cycle_id", "ticket_id", "split_group")
     @classmethod
     def valid_id(cls, value: str) -> str:
         if not ID_RE.fullmatch(value):
             raise ValueError("identifier must be stable")
         return value
+
+    @model_validator(mode="after")
+    def valid_source(self):
+        imported = self.contract_version == "learning-feedback-export.v1"
+        if imported != (self.source_origin_kind == "IMPORTED_DATASET"):
+            raise ValueError("feedback origin and contract version differ")
+        if imported != (self.source_dataset_version is not None):
+            raise ValueError("feedback dataset lineage is invalid")
+        if self.source_dataset_version is not None and not ID_RE.fullmatch(self.source_dataset_version):
+            raise ValueError("source dataset version must be stable")
+        return self
 
 
 class CandidateSample(BaseModel):
@@ -78,7 +90,8 @@ class CandidateSample(BaseModel):
     feedback_id: str
     ticket_id: str
     split_group: str
-    source_dataset_version: str
+    source_dataset_version: str | None = None
+    source_origin_kind: Literal["IMPORTED_DATASET", "RUNTIME_API"] = "IMPORTED_DATASET"
     is_synthetic: bool
     text: str = Field(min_length=1, max_length=10000)
     language: Literal["RU", "KZ", "MIXED"]
@@ -89,19 +102,28 @@ class CandidateSample(BaseModel):
     accepted_or_corrected: Literal["ACCEPTED", "CORRECTED"]
     feedback_created_at: AwareDatetime
 
-    @field_validator("feedback_id", "ticket_id", "split_group", "source_dataset_version")
+    @field_validator("feedback_id", "ticket_id", "split_group")
     @classmethod
     def valid_id(cls, value: str) -> str:
         if not ID_RE.fullmatch(value):
             raise ValueError("identifier must be stable")
         return value
 
+    @model_validator(mode="after")
+    def valid_source(self):
+        imported = self.source_origin_kind == "IMPORTED_DATASET"
+        if imported != (self.source_dataset_version is not None):
+            raise ValueError("candidate source lineage is invalid")
+        if self.source_dataset_version is not None and not ID_RE.fullmatch(self.source_dataset_version):
+            raise ValueError("source dataset version must be stable")
+        return self
+
 
 class FeedbackCandidateManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     manifest_version: Literal["feedback-candidate.v1"]
-    source_contract_version: Literal["learning-feedback-export.v1"]
+    source_contract_version: Literal["learning-feedback-export.v1", "learning-feedback-export.v2", "learning-feedback-export.mixed.v1"]
     candidate_dataset_version: str
     cycle_id: str
     production_model_version: str
@@ -109,7 +131,8 @@ class FeedbackCandidateManifest(BaseModel):
     minimum_feedback_count: int = Field(ge=1)
     source_feedback_sha256: str
     source_feedback_ids: list[str] = Field(min_length=1)
-    source_dataset_versions: list[str] = Field(min_length=1)
+    source_dataset_versions: list[str]
+    runtime_ticket_ids: list[str] = Field(default_factory=list)
     origin_counts: dict[str, int]
     rejected_counts: dict[str, int]
     frozen_package: dict[str, str]
@@ -173,7 +196,12 @@ def load_verified_candidate(package: Path, frozen_package: Path) -> tuple[Feedba
             samples.append(sample)
     if (len(samples) != manifest.record_count or
             sorted(seen_feedback) != manifest.source_feedback_ids or
-            sorted({sample.source_dataset_version for sample in samples}) != manifest.source_dataset_versions or
+            sorted({sample.source_dataset_version for sample in samples if sample.source_dataset_version is not None}) != manifest.source_dataset_versions or
+            sorted(sample.ticket_id for sample in samples if sample.source_origin_kind == "RUNTIME_API") != manifest.runtime_ticket_ids or
+            manifest.source_contract_version != (
+                "learning-feedback-export.mixed.v1" if len({sample.source_origin_kind for sample in samples}) == 2
+                else "learning-feedback-export.v2" if samples[0].source_origin_kind == "RUNTIME_API"
+                else "learning-feedback-export.v1") or
             dict(sorted(Counter("synthetic" if sample.is_synthetic else "real" for sample in samples).items())) != manifest.origin_counts or
             any(count < 0 for count in manifest.rejected_counts.values())):
         raise ValueError("feedback candidate sample counts or lineage mismatch")
@@ -261,11 +289,10 @@ def _deduplicate(records: list[FeedbackRecord], rejected: Counter) -> list[Feedb
 
 
 def _sample(record: FeedbackRecord) -> dict:
-    return {
+    sample = {
         "feedback_id": record.feedback_id,
         "ticket_id": record.ticket_id,
         "split_group": record.split_group,
-        "source_dataset_version": record.source_dataset_version,
         "is_synthetic": record.is_synthetic,
         "text": record.original_text.strip(),
         "language": record.language,
@@ -276,6 +303,11 @@ def _sample(record: FeedbackRecord) -> dict:
         "accepted_or_corrected": record.accepted_or_corrected,
         "feedback_created_at": record.feedback_created_at.isoformat(),
     }
+    if record.source_origin_kind == "RUNTIME_API":
+        sample["source_origin_kind"] = "RUNTIME_API"
+    else:
+        sample["source_dataset_version"] = record.source_dataset_version
+    return sample
 
 
 def build_candidate(
@@ -339,9 +371,12 @@ def build_candidate(
     with train_path.open("x", encoding="utf-8", newline="\n") as stream:
         for sample in accepted:
             stream.write(json.dumps(sample, ensure_ascii=False, sort_keys=True) + "\n")
+    accepted_feedback_ids = {row["feedback_id"] for row in accepted}
+    contract_versions = {record.contract_version for record in latest if record.feedback_id in accepted_feedback_ids}
     manifest = {
         "manifest_version": "feedback-candidate.v1",
-        "source_contract_version": "learning-feedback-export.v1",
+        "source_contract_version": (next(iter(contract_versions)) if len(contract_versions) == 1
+                                    else "learning-feedback-export.mixed.v1"),
         "candidate_dataset_version": dataset_version,
         "cycle_id": cycle_id,
         "production_model_version": production_model_version,
@@ -349,13 +384,18 @@ def build_candidate(
         "minimum_feedback_count": min_feedback_count,
         "source_feedback_sha256": report["source_feedback_sha256"],
         "source_feedback_ids": sorted(row["feedback_id"] for row in accepted),
-        "source_dataset_versions": sorted({row["source_dataset_version"] for row in accepted}),
+        "source_dataset_versions": sorted({row["source_dataset_version"] for row in accepted
+                                           if row.get("source_dataset_version") is not None}),
         "origin_counts": dict(sorted(Counter("synthetic" if row["is_synthetic"] else "real" for row in accepted).items())),
         "rejected_counts": report["rejected_counts"],
         "frozen_package": frozen,
         "split_policy": "exported_split_group_frozen_id_text_exclusion.v1",
         "train_sha256": checksum(train_path),
     }
+    runtime_ticket_ids = sorted(row["ticket_id"] for row in accepted
+                                if row.get("source_origin_kind") == "RUNTIME_API")
+    if runtime_ticket_ids:
+        manifest["runtime_ticket_ids"] = runtime_ticket_ids
     canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     manifest["content_sha256"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     with (destination / "manifest.json").open("x", encoding="utf-8") as stream:

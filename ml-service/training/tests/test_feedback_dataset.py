@@ -40,6 +40,14 @@ def feedback(index: int, *, confirmed_topic: str = "roads") -> dict:
     }
 
 
+def runtime_feedback(index: int) -> dict:
+    row = feedback(index)
+    row["contract_version"] = "learning-feedback-export.v2"
+    row["source_origin_kind"] = "RUNTIME_API"
+    del row["source_dataset_version"]
+    return row
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text(
         "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
@@ -85,6 +93,24 @@ class FeedbackCandidateTests(unittest.TestCase):
         self.assertEqual(manifest["train_sha256"], checksum(first_package / "train.jsonl"))
         with self.assertRaises(FileExistsError):
             self.build(self.root / "one", minimum=2)
+
+    def test_runtime_origin_is_versioned_without_claiming_an_imported_dataset(self) -> None:
+        write_jsonl(self.input, [feedback(1), runtime_feedback(2)])
+        report = self.build(self.root / "out", minimum=2)
+        self.assertEqual(report["status"], "COMPLETED")
+        package = self.root / "out/candidate_v1"
+        manifest, samples = load_verified_candidate(package, self.frozen)
+        self.assertEqual(manifest.source_contract_version, "learning-feedback-export.mixed.v1")
+        self.assertEqual(manifest.source_dataset_versions, ["source_demo_v1"])
+        self.assertEqual(manifest.runtime_ticket_ids, ["ticket_2"])
+        self.assertEqual(samples[1].source_origin_kind, "RUNTIME_API")
+        self.assertIsNone(samples[1].source_dataset_version)
+        frozen = json.loads((self.frozen / "frozen_evaluation.json").read_text(encoding="utf-8"))
+        blocked = runtime_feedback(3)
+        blocked["split_group"] = frozen["classifier_groups"][0]
+        write_jsonl(self.input, [blocked])
+        rejected = self.build(self.root / "rejected")
+        self.assertEqual(rejected["rejected_counts"], {"FROZEN_ID_OR_GROUP": 1})
 
     def test_rejects_invalid_labels_pii_model_and_frozen_overlap(self) -> None:
         rows = [feedback(index) for index in range(1, 6)]
