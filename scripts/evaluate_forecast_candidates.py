@@ -28,6 +28,8 @@ PROPHET_CONFIG = {
     "uncertainty_samples": 0,
     "changepoint_prior_scale": 0.05,
 }
+HIGH_LOAD_QUANTILE = 0.9
+HIGH_LOAD_POLICY = "strictly_above_pre_origin_observed_history_p90_nearest_rank.v1"
 
 
 def _prophet_predict(history: list[int], first_day: date, horizon: int) -> list[float]:
@@ -62,8 +64,22 @@ def _metrics(actual: list[int], predicted: list[float], window_count: int) -> di
     }
 
 
+def _high_load_metrics(counts: dict[str, int]) -> dict:
+    tp, fp, fn = counts["tp"], counts["fp"], counts["fn"]
+    return {
+        **counts,
+        "precision": round(tp / (tp + fp), 4) if tp + fp else None,
+        "recall": round(tp / (tp + fn), 4) if tp + fn else None,
+        "f1": round(2 * tp / (2 * tp + fp + fn), 4) if 2 * tp + fp + fn else None,
+    }
+
+
 def evaluate_series(series: list[int | None], first_day: date) -> list[dict]:
-    results = {horizon: {"actual": [], "seasonal_naive": [], "prophet": [], "window_count": 0}
+    results = {horizon: {
+        "actual": [], "seasonal_naive": [], "prophet": [], "window_count": 0,
+        "high_load_counts": {model: {key: 0 for key in ("tp", "fp", "fn", "tn")}
+                             for model in ("seasonal_naive", "prophet")},
+    }
                for horizon in HORIZONS}
     segments = observed_segments(series)
     longest_run = max((len(observed) for _, observed in segments), default=0)
@@ -76,11 +92,26 @@ def evaluate_series(series: list[int | None], first_day: date) -> list[dict]:
         history = series[history_start:origin]
         prophet = _prophet_predict(history, first_day + timedelta(days=history_start), max_horizon)
         weekly_pattern = history[-SEASON_LENGTH:]
+        high_load_threshold = sorted(history)[math.ceil(HIGH_LOAD_QUANTILE * len(history)) - 1]
         for horizon in available_horizons:
             result = results[horizon]
-            result["actual"].extend(series[origin:origin + horizon])
-            result["seasonal_naive"].extend(weekly_pattern[offset % SEASON_LENGTH] for offset in range(horizon))
-            result["prophet"].extend(prophet[:horizon])
+            actual = series[origin:origin + horizon]
+            predictions = {
+                "seasonal_naive": [weekly_pattern[offset % SEASON_LENGTH] for offset in range(horizon)],
+                "prophet": prophet[:horizon],
+            }
+            result["actual"].extend(actual)
+            for model, predicted in predictions.items():
+                result[model].extend(predicted)
+                counts = result["high_load_counts"][model]
+                for observed, estimate in zip(actual, predicted):
+                    is_high_load = observed > high_load_threshold
+                    predicts_high_load = estimate > high_load_threshold
+                    if is_high_load:
+                        key = "tp" if predicts_high_load else "fn"
+                    else:
+                        key = "fp" if predicts_high_load else "tn"
+                    counts[key] += 1
             result["window_count"] += 1
     reports = []
     for horizon in HORIZONS:
@@ -108,6 +139,11 @@ def evaluate_series(series: list[int | None], first_day: date) -> list[dict]:
             "horizon_days": horizon,
             "status": "EVALUATED",
             "models": {"seasonal_naive": baseline, "prophet": candidate},
+            "high_load_day_proxy": {
+                "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS",
+                "models": {model: _high_load_metrics(counts)
+                           for model, counts in result["high_load_counts"].items()},
+            },
             "selection_status": selection_status,
             "best_on_backtest": best,
         })
@@ -125,7 +161,7 @@ def build_report(path: Path) -> dict:
     else:
         status = results[0]["status"]
     return {
-        "report_version": "forecast-candidates.v2",
+        "report_version": "forecast-candidates.v3",
         "source_sha256": digest,
         "status": status,
         "scope": "total_daily_appeals_in_one_export",
@@ -145,6 +181,7 @@ def build_report(path: Path) -> dict:
         "count_prediction_policy": "clip_negative_to_zero",
         "interval_status": "NOT_EVALUATED",
         "peak_detection_status": "NO_REVIEWED_PEAK_LABELS",
+        "high_load_day_proxy_policy": HIGH_LOAD_POLICY,
         "runtime_eligible": False,
         "results": results,
     }

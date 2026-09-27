@@ -444,6 +444,15 @@ seasonality, no yearly or daily seasonality, and no uncertainty sampling; the
 report contains no interval coverage. A single regional backtest does not
 qualify a model for runtime use.
 
+New `forecast-candidates.v3` reports also include a high-load-day proxy for
+each model on the same windows. For each origin, the threshold is the nearest-rank
+90th percentile of observed training-day counts before that origin; a target day
+is high load only when its count strictly exceeds the threshold. The report
+aggregates TP/FP/FN/TN and precision/recall/F1 for predicted versus observed
+high-load days. Undefined ratios are `null`. This is an aggregate-count proxy,
+not reviewed peak labels or evidence of staffing capacity; model selection
+still uses WAPE only. The checked-in regional reports use the earlier v2 schema.
+
 ## Spike exploration on regional counts
 
 The CSV spike runner compares count/ratio and weekday median/MAD rules on
