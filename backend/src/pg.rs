@@ -2992,20 +2992,20 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
         })
         .collect();
     let confidence = row.confidence.unwrap_or(0.0) as f32;
+    let confidence_state = core_confidence_state(
+        row.prediction
+            .get("confidence_state")
+            .and_then(Value::as_str),
+        confidence,
+        row.needs_review,
+    );
     Prediction {
         ticket_id: row.ticket_id.to_string(),
         model_version: row.model_version,
         topic_id: row.topic_id.unwrap_or_else(|| "unknown".to_owned()),
         topic_label: row.topic_label,
         confidence,
-        confidence_state: if row.needs_review {
-            "low"
-        } else if confidence >= 0.85 {
-            "high"
-        } else {
-            "medium"
-        }
-        .to_owned(),
+        confidence_state: confidence_state.to_owned(),
         recommended_service: row.service_name,
         predicted_priority: row.priority,
         routing_reason: row
@@ -3016,6 +3016,22 @@ fn prediction_from_db(row: DbPrediction) -> Prediction {
             .to_owned(),
         alternatives,
         created_at: row.created_at.to_rfc3339(),
+    }
+}
+
+fn core_confidence_state(
+    source: Option<&str>,
+    confidence: f32,
+    needs_review: bool,
+) -> &'static str {
+    match source {
+        Some("CONFIDENT" | "confident" | "high") => "high",
+        Some("UNCERTAIN" | "uncertain" | "medium") => "medium",
+        Some("LOW_CONFIDENCE" | "low_confidence" | "low") => "low",
+        Some(_) => "low",
+        None if needs_review => "low",
+        None if confidence >= 0.85 => "high",
+        None => "medium",
     }
 }
 
@@ -3034,10 +3050,12 @@ fn prediction_for_db(
         topic_id,
         topic_label: classification.prediction.topic.clone(),
         confidence,
-        confidence_state: classification
-            .prediction
-            .confidence_state
-            .to_ascii_lowercase(),
+        confidence_state: core_confidence_state(
+            Some(&classification.prediction.confidence_state),
+            confidence,
+            classification.prediction.needs_review,
+        )
+        .to_owned(),
         recommended_service: service_name.to_owned(),
         predicted_priority: priority.to_owned(),
         routing_reason: routing_reason.to_owned(),
@@ -3388,3 +3406,65 @@ impl From<DbTicket> for Ticket {
 
 #[allow(dead_code)]
 fn _topic_contract_is_kept_for_docs(_topic: &Topic) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored_prediction(state: Option<&str>) -> DbPrediction {
+        DbPrediction {
+            ticket_id: 1,
+            model_version: "classifier-test".to_owned(),
+            topic_id: Some("roads".to_owned()),
+            topic_label: "Дороги".to_owned(),
+            service_name: "Дорожная служба".to_owned(),
+            priority: "normal".to_owned(),
+            confidence: Some(0.94),
+            alternatives: json!([]),
+            prediction: state.map_or_else(|| json!({}), |value| json!({"confidence_state": value})),
+            needs_review: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn persisted_prediction_preserves_model_confidence_state() {
+        assert_eq!(
+            prediction_from_db(stored_prediction(Some("CONFIDENT"))).confidence_state,
+            "high"
+        );
+        assert_eq!(
+            prediction_from_db(stored_prediction(Some("UNCERTAIN"))).confidence_state,
+            "medium"
+        );
+        assert_eq!(
+            prediction_from_db(stored_prediction(Some("LOW_CONFIDENCE"))).confidence_state,
+            "low"
+        );
+        assert_eq!(
+            prediction_from_db(stored_prediction(None)).confidence_state,
+            "low"
+        );
+    }
+
+    #[test]
+    fn fresh_prediction_uses_the_same_core_confidence_state() {
+        let classification = MlClassificationWithModel {
+            model_version: "classifier-test".to_owned(),
+            prediction: MlClassification {
+                language: "RU".to_owned(),
+                topic_id: "roads".to_owned(),
+                topic: "Дороги".to_owned(),
+                confidence: 0.94,
+                confidence_state: "UNCERTAIN".to_owned(),
+                needs_review: true,
+                alternatives: vec![],
+            },
+        };
+        assert_eq!(
+            prediction_for_db(1, &classification, "normal", "Дорожная служба", "test")
+                .confidence_state,
+            "medium"
+        );
+    }
+}
