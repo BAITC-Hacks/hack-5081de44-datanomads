@@ -515,29 +515,29 @@ paths:
           description: Learning cycle state
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/LearningCycle' }
+              schema: { $ref: '#/components/schemas/LearningOverview' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/learning/cycle/close:
     post:
       tags: [learning]
-      summary: Close COLLECT and queue candidate training
+      summary: Close an eligible COLLECT cycle
       security: [{ pulseRole: [] }, {}]
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
-            schema:
-              type: object
-              properties:
-                cycle_id: { type: string }
+            schema: { $ref: '#/components/schemas/CloseLearningCycleRequest' }
       responses:
         '202':
-          description: Training job queued
+          description: Cycle closed, insufficient, or training queued
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/StoredResponse' }
+              schema: { $ref: '#/components/schemas/CloseLearningCycleResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /api/v1/learning/candidate/evaluation:
     get:
       tags: [learning]
@@ -850,17 +850,31 @@ paths:
       summary: List learning cycles
       security: [{ pulseRole: [] }, {}]
       responses:
-        '200': { description: Request completed }
+        '200':
+          description: Learning cycles and the current active cycle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LearningOverview' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [learning]
-      summary: Create a controlled learning cycle
+      summary: Create a configured classifier COLLECT cycle
       security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLearningCycleRequest' }
       responses:
-        '200': { description: Request completed }
+        '201':
+          description: COLLECT cycle created with a frozen production baseline
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LearningCycle' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/learning/{cycle_id}:
     get:
       tags: [learning]
@@ -885,10 +899,21 @@ paths:
           required: true
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LearningFeedbackRequest' }
       responses:
-        '200': { description: Request completed }
+        '201':
+          description: Feedback added to the active COLLECT cycle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LearningFeedback' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/learning/{cycle_id}/promote:
     post:
       tags: [learning]
@@ -1209,11 +1234,13 @@ components:
             - $ref: '#/components/schemas/OperatorDecision'
     DecisionResponse:
       type: object
-      required: [ticket, prediction, decision]
+      required: [ticket, prediction, decision, learning_feedback_status, learning_feedback_cycle_id]
       properties:
         ticket: { $ref: '#/components/schemas/Ticket' }
         prediction: { $ref: '#/components/schemas/Prediction' }
         decision: { $ref: '#/components/schemas/OperatorDecision' }
+        learning_feedback_status: { type: string, enum: [COLLECTED, NO_ACTIVE_COLLECT_CYCLE] }
+        learning_feedback_cycle_id: { type: string, nullable: true }
     SimilarTicket:
       type: object
       required: [ticket_id, score, relation, topic_id, region_id, matched_factors, suggestion]
@@ -1411,14 +1438,58 @@ components:
         resolved: { type: integer }
     LearningCycle:
       type: object
-      required: [cycle_id, state, production_model_version]
+      required: [id, cycle_id, state, dataset_version, candidate_model_version, collect_started_at, collect_ends_at, min_feedback_count, promotion_policy_version, manual_close_enabled, feedback_count, created_at, updated_at]
       properties:
+        id: { type: string }
         cycle_id: { type: string }
-        state: { type: string, enum: [COLLECT, TRAINING, EVALUATE, DECISION, PROMOTED, REJECTED] }
-        production_model_version: { type: string }
-        candidate_dataset_version: { type: string }
+        state: { type: string, enum: [COLLECT, TRAINING, EVALUATE, DECISION, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK] }
+        dataset_version: { type: string }
         candidate_model_version: { type: string }
+        collect_started_at: { type: string, format: date-time }
+        collect_ends_at: { type: string, format: date-time }
+        production_model_version: { type: string, nullable: true }
         min_feedback_count: { type: integer }
+        promotion_policy_version: { type: string }
+        manual_close_enabled: { type: boolean }
+        feedback_count: { type: integer }
+        decision_note: { type: string, nullable: true }
+        metrics: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    LearningOverview:
+      type: object
+      required: [items, active_cycle, production_model, controlled_loop]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/LearningCycle' } }
+        active_cycle: { allOf: [{ $ref: '#/components/schemas/LearningCycle' }], nullable: true }
+        production_model: { allOf: [{ $ref: '#/components/schemas/ModelVersion' }], nullable: true }
+        controlled_loop: { type: object, additionalProperties: true }
+    CreateLearningCycleRequest:
+      type: object
+      properties:
+        dataset_version: { type: string }
+        candidate_model_version: { type: string }
+    LearningFeedbackRequest:
+      type: object
+      required: [ticket_id]
+      properties:
+        ticket_id: { type: string }
+        feedback_type: { type: string }
+        decision: { type: string }
+        source: { type: string }
+        comment: { type: string }
+    CloseLearningCycleRequest:
+      type: object
+      properties:
+        cycle_id: { type: string, description: Defaults to an eligible COLLECT cycle when omitted. }
+    CloseLearningCycleResponse:
+      type: object
+      required: [job_id, state, cycle, production_model_unchanged]
+      properties:
+        job_id: { type: string, nullable: true }
+        state: { type: string, enum: [TRAINING, INSUFFICIENT_FEEDBACK] }
+        cycle: { $ref: '#/components/schemas/LearningCycle' }
+        production_model_unchanged: { type: boolean }
     CandidateEvaluation:
       type: object
       properties:

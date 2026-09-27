@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
@@ -361,7 +361,10 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
         }
       })
       onDataChange(updated)
-      onToast(result.source === 'demo' ? `Решение по ${ticketId} изменено только на этом экране` : ('warning' in result && result.warning) || `Решение по ${ticketId} сохранено`)
+      const feedbackNotice = result.source === 'api' && result.learningFeedbackStatus === 'NO_ACTIVE_COLLECT_CYCLE'
+        ? '; обратная связь не включена в цикл: сейчас нет активного COLLECT'
+        : ''
+      onToast(result.source === 'demo' ? `Решение по ${ticketId} изменено только на этом экране` : `${('warning' in result && result.warning) || `Решение по ${ticketId} сохранено`}${feedbackNotice}`)
     } catch (error) {
       onToast(`Не удалось сохранить решение: ${error instanceof Error ? error.message : 'ошибка API'}`)
     }
@@ -766,7 +769,7 @@ function CleanReportsPage({ filters }: { filters: DashboardFilters }) {
 function CleanLearningPage({ learning, onRefresh, onToast }: { learning: LearningCycle; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
   const [evaluation, setEvaluation] = useState<Awaited<ReturnType<typeof loadCandidateEvaluation>> | null>(null)
   const [evaluationError, setEvaluationError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<'close' | 'evaluation' | 'promote' | 'reject' | null>(null)
+  const [busy, setBusy] = useState<'create' | 'close' | 'evaluation' | 'promote' | 'reject' | null>(null)
   const [note, setNote] = useState('')
 
   useEffect(() => {
@@ -782,14 +785,17 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
     return () => { active = false }
   }, [learning.id, learning.stage, learning.updatedAt])
 
-  if (learning.id === 'нет данных') return <div className="analytics-page"><NoData message="Цикл обучения не предоставлен API." /></div>
-
-  const runAction = async (action: 'close' | 'evaluation' | 'promote' | 'reject') => {
+  const runAction = async (action: 'create' | 'close' | 'evaluation' | 'promote' | 'reject') => {
     setBusy(action)
     try {
-      if (action === 'close') {
-        await closeLearningCycle(learning.id)
-        onToast('Сбор обратной связи закрыт; background job поставлена в очередь')
+      if (action === 'create') {
+        await createLearningCycle()
+        onToast('Открыт новый цикл COLLECT с настроенным окном сбора')
+      } else if (action === 'close') {
+        const result = await closeLearningCycle(learning.id)
+        onToast(result.state === 'INSUFFICIENT_FEEDBACK'
+          ? `Сбор закрыт: ${result.cycle.feedback_count}/${result.cycle.min_feedback_count} валидных записей, кандидат не создан`
+          : 'Сбор обратной связи закрыт; обучение поставлено в очередь')
       } else if (action === 'evaluation') {
         setEvaluation(await loadCandidateEvaluation())
         onToast('Оценка candidate перечитана из backend')
@@ -807,18 +813,31 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
     }
   }
 
+  if (learning.id === 'нет данных') return <div className="analytics-page"><section className="panel"><NoData message="Активного цикла обучения нет." /><button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button></section></div>
+
   const offlineStatus = evaluation?.offline_metrics?.status
   const readyToReview = evaluation?.decision === 'READY_TO_REVIEW'
+  const collectEndTimestamp = Date.parse(learning.collectEndsAt)
+  const collectEndReached = Number.isFinite(collectEndTimestamp) && collectEndTimestamp <= Date.now()
+  const canCloseCollect = learning.manualCloseEnabled || collectEndReached
+  const collectWindowLabel = learning.collectStartedAt && learning.collectEndsAt
+    ? `${new Date(learning.collectStartedAt).toLocaleString('ru-RU')} — ${new Date(learning.collectEndsAt).toLocaleString('ru-RU')}`
+    : 'не задано'
   return <div className="analytics-page">
     <section className="panel">
       <PanelHeading title={'Цикл ' + learning.id} />
       <div className="dataset-stat"><span>Состояние</span><strong>{learning.stage}</strong></div>
       <div className="dataset-stat"><span>Обратная связь</span><strong>{learning.feedbackCount}</strong></div>
+      <div className="dataset-stat"><span>Порог обратной связи</span><strong>{learning.minFeedbackCount}</strong></div>
+      <div className="dataset-stat"><span>Окно COLLECT</span><strong>{collectWindowLabel}</strong></div>
+      <div className="dataset-stat"><span>Production baseline</span><strong>{learning.productionModelVersion ?? 'не зафиксирована'}</strong></div>
       <div className="dataset-stat"><span>Датасет</span><strong>{learning.dataset}</strong></div>
       <div className="dataset-stat"><span>Кандидат</span><strong>{learning.candidate}</strong></div>
       {learning.decisionNote && <p className="panel-note learning-decision-note">Решение: {learning.decisionNote}</p>}
       <div className="learning-actions" aria-label="Действия reviewer">
-        {learning.stage === 'COLLECT' && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть цикл'}</button>}
+        {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && <button className="button button-primary" disabled={busy !== null || !canCloseCollect} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть цикл'}</button>}
+        {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && !canCloseCollect && <p className="panel-note">Сбор завершится автоматически по окончании окна COLLECT.</p>}
+        {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <button className="button button-secondary" disabled={busy !== null} onClick={() => void runAction('evaluation')}>{busy === 'evaluation' ? 'Читаем…' : 'Показать evaluation'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <>
           <input className="learning-note" aria-label="Комментарий reviewer" placeholder="Комментарий к решению (необязательно)" value={note} onChange={(event) => setNote(event.target.value)} disabled={busy !== null} />

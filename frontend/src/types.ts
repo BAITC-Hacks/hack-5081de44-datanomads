@@ -153,6 +153,12 @@ export interface LearningCycle {
   dataset: string
   feedbackCount: number
   candidate: string
+  collectStartedAt: string
+  collectEndsAt: string
+  productionModelVersion?: string
+  minFeedbackCount: number
+  promotionPolicyVersion: string
+  manualCloseEnabled: boolean
   updatedAt: string
   decisionNote?: string
 }

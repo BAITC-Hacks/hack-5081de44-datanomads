@@ -69,6 +69,70 @@ async def claim_job(pool: Any) -> Any | None:
             )
 
 
+async def advance_expired_learning_cycle(pool: Any) -> bool:
+    """Close one expired COLLECT cycle and enqueue training only above its gate."""
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            cycle = await connection.fetchrow(
+                """
+                SELECT lc.id, lc.cycle_id, lc.min_feedback_count,
+                       lc.candidate_dataset_version, lc.candidate_model_version,
+                       (SELECT COUNT(*)::int FROM learning_feedback lf
+                        WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_count
+                FROM learning_cycles lc
+                WHERE lc.state = 'COLLECT' AND lc.collect_ends_at <= now()
+                ORDER BY lc.collect_ends_at, lc.id
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """
+            )
+            if cycle is None:
+                return False
+
+            cycle_id = str(cycle["cycle_id"])
+            feedback_count = int(cycle["feedback_count"])
+            minimum = int(cycle["min_feedback_count"])
+            if feedback_count < minimum:
+                await connection.execute(
+                    """
+                    UPDATE learning_cycles
+                    SET state = 'INSUFFICIENT_FEEDBACK',
+                        decision_note = 'INSUFFICIENT_FEEDBACK',
+                        updated_at = now()
+                    WHERE id = $1 AND state = 'COLLECT'
+                    """,
+                    int(cycle["id"]),
+                )
+                return True
+
+            await connection.execute(
+                """
+                UPDATE learning_cycles
+                SET state = 'TRAINING', updated_at = now()
+                WHERE id = $1 AND state = 'COLLECT'
+                """,
+                int(cycle["id"]),
+            )
+            payload = {
+                "kind": "training",
+                "cycle_id": cycle_id,
+                "candidate_model_version": cycle["candidate_model_version"] or "pending",
+                "model_type": "classifier",
+                "dataset_version": cycle["candidate_dataset_version"] or "pending",
+                "samples": [],
+                "min_samples": 0,
+            }
+            await connection.execute(
+                """
+                INSERT INTO background_jobs (job_type, payload, state)
+                VALUES ('TRAIN_CLASSIFIER', $1::jsonb, 'QUEUED')
+                """,
+                json.dumps(payload),
+            )
+            return True
+
+
 async def complete_job(pool: Any, job_id: int, result: Any) -> None:
     async with pool.acquire() as connection:
         await connection.execute(
@@ -431,6 +495,7 @@ async def run_worker() -> None:
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=4)
     try:
         while True:
+            await advance_expired_learning_cycle(pool)
             job = await claim_job(pool)
             if job is None:
                 await asyncio.sleep(poll_interval)

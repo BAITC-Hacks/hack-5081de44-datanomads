@@ -50,6 +50,46 @@ async fn demo_api_supports_preview_and_manager_analytics() {
 }
 
 #[tokio::test]
+async fn learning_feedback_rejects_a_cycle_outside_collect() {
+    let application = app(AppState::demo());
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/learning/cycle-001/feedback")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::from(
+                    r#"{"ticket_id":"ticket-001","decision":"confirm"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 409);
+}
+
+#[tokio::test]
+async fn operator_decision_reports_when_no_collect_cycle_is_open() {
+    let application = app(AppState::demo());
+    let response = application
+        .oneshot(
+            Request::post("/api/v1/assist/ticket-001/confirm")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["learning_feedback_status"], "NO_ACTIVE_COLLECT_CYCLE");
+    assert!(body["learning_feedback_cycle_id"].is_null());
+}
+
+#[tokio::test]
 async fn assist_preview_preserves_language_states_and_correlated_context() {
     let application = app(AppState::demo());
     for (language, request_id, trace_id, partial, template_source, ticket_language) in [

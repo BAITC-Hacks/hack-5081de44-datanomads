@@ -8,7 +8,7 @@
 use crate::{
     manual_response_template, metric_rate, related_ticket_candidate, render_template_body, Alert,
     AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse,
-    AssistOrchestration, AssistPreviewResponse, AssistStage, CloseLearningCycleRequest,
+    AssistOrchestration, AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
     CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
     ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
     LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
@@ -29,6 +29,12 @@ const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
+
+fn test_fake_trainer_enabled() -> bool {
+    env::var("PULSE_TEST_FAKE_TRAINER")
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
 
 #[derive(Debug)]
 pub enum ImportError {
@@ -2964,7 +2970,12 @@ impl PgRepository {
         }
         let active_cycle = items
             .iter()
-            .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+            .find(|cycle| {
+                matches!(
+                    cycle.state.as_str(),
+                    "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION"
+                )
+            })
             .cloned();
         let production_model = self
             .list_models(&ModelQuery {
@@ -2978,7 +2989,7 @@ impl PgRepository {
             active_cycle,
             production_model,
             controlled_loop: json!({
-                "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTE", "REJECT"],
+                "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTED", "REJECTED"],
                 "production_auto_update": false,
                 "trainer": "TRAINER_NOT_CONFIGURED unless PULSE_TEST_FAKE_TRAINER=true",
             }),
@@ -2988,29 +2999,53 @@ impl PgRepository {
     pub async fn create_learning_cycle(
         &self,
         request: &CreateLearningCycleRequest,
+        config: &Config,
     ) -> Result<LearningCycle, String> {
-        let dataset_version = request
-            .dataset_version
-            .clone()
-            .unwrap_or_else(|| format!("operator-feedback-{}", Utc::now().date_naive()));
-        sqlx::query("INSERT INTO dataset_versions (dataset_version, schema_version, manifest_uri, manifest_sha256, record_count) VALUES ($1, 'unified-ticket.v1', 'postgres://operator-feedback', 'pending', 0) ON CONFLICT (dataset_version) DO NOTHING")
-            .bind(&dataset_version)
-            .execute(&self.pool)
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|error| format!("ensure learning dataset: {error}"))?;
+            .map_err(|error| format!("begin learning cycle: {error}"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pulse109:classifier-learning-cycle'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("lock classifier learning cycle: {error}"))?;
+        let active_cycle_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE state IN ('COLLECT', 'TRAINING', 'EVALUATE', 'DECISION'))",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("check active learning cycle: {error}"))?;
+        if active_cycle_exists {
+            return Err("an active classifier learning cycle already exists".to_owned());
+        }
         let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         let cycle_id = format!("cycle-{suffix}");
         let candidate_model_version = request
             .candidate_model_version
             .clone()
             .unwrap_or_else(|| format!("classifier-candidate-{suffix}"));
-        let id: i64 = sqlx::query_scalar("INSERT INTO learning_cycles (cycle_id, state, candidate_dataset_version, candidate_model_version, min_feedback_count) VALUES ($1, 'COLLECT', $2, $3, 1) RETURNING id")
+        let production_model_version: Option<String> = sqlx::query_scalar(
+            "SELECT model_version FROM model_versions WHERE status = 'PRODUCTION' ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("read production model for learning cycle: {error}"))?;
+        let id: i64 = sqlx::query_scalar("INSERT INTO learning_cycles (cycle_id, state, collect_started_at, collect_ends_at, production_model_version, candidate_dataset_version, candidate_model_version, min_feedback_count, promotion_policy_version, manual_close_enabled) VALUES ($1, 'COLLECT', now(), now() + make_interval(hours => $2), $3, $4, $5, $6, $7, $8) RETURNING id")
             .bind(&cycle_id)
-            .bind(&dataset_version)
+            .bind(config.learning_cycle_duration_hours)
+            .bind(&production_model_version)
+            .bind(&request.dataset_version)
             .bind(&candidate_model_version)
-            .fetch_one(&self.pool)
+            .bind(config.learning_min_feedback_count)
+            .bind(&config.learning_promotion_policy_version)
+            .bind(config.learning_manual_close_enabled)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|error| format!("create learning cycle: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit learning cycle: {error}"))?;
         self.learning_cycle_from_id(id).await
     }
 
@@ -3024,7 +3059,45 @@ impl PgRepository {
         request: &LearningFeedbackRequest,
         user_id: &str,
     ) -> Result<LearningFeedback, String> {
-        let cycle = self.learning_cycle_from_id_lookup(cycle_id).await?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin learning feedback: {error}"))?;
+        let cycle = sqlx::query("SELECT id, cycle_id, state, collect_ends_at, production_model_version FROM learning_cycles WHERE cycle_id = $1 OR id::text = $1 LIMIT 1 FOR UPDATE")
+            .bind(cycle_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("lock learning cycle for feedback: {error}"))?
+            .ok_or_else(|| format!("learning cycle {cycle_id} not found"))?;
+        let cycle_db_id: i64 = cycle
+            .try_get("id")
+            .map_err(|error| format!("learning cycle id: {error}"))?;
+        let canonical_cycle_id: String = cycle
+            .try_get("cycle_id")
+            .map_err(|error| format!("learning cycle key: {error}"))?;
+        let cycle_state: String = cycle
+            .try_get("state")
+            .map_err(|error| format!("learning cycle state: {error}"))?;
+        if cycle_state != "COLLECT" {
+            return Err(format!(
+                "learning cycle {canonical_cycle_id} cannot accept feedback in state {cycle_state}"
+            ));
+        }
+        let collect_ends_at: Option<DateTime<Utc>> = cycle
+            .try_get("collect_ends_at")
+            .map_err(|error| format!("learning collection end: {error}"))?;
+        if collect_ends_at
+            .map(|ends_at| ends_at <= Utc::now())
+            .unwrap_or(true)
+        {
+            return Err(format!(
+                "learning cycle {canonical_cycle_id} collection period has ended"
+            ));
+        }
+        let production_model_version: Option<String> = cycle
+            .try_get("production_model_version")
+            .map_err(|error| format!("learning production model: {error}"))?;
         let ticket_id = request
             .ticket_id
             .parse::<i64>()
@@ -3032,7 +3105,7 @@ impl PgRepository {
         let ticket_exists: bool =
             sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM tickets WHERE id = $1)")
                 .bind(ticket_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| format!("check feedback ticket: {error}"))?;
         if !ticket_exists {
@@ -3052,80 +3125,133 @@ impl PgRepository {
             } else {
                 "ACCEPTED"
             };
-        let id: i64 = sqlx::query_scalar("INSERT INTO learning_feedback (cycle_id, ticket_id, production_model_version, production_prediction, operator_confirmed_decision, accepted_or_corrected) VALUES ((SELECT id FROM learning_cycles WHERE cycle_id = $1 OR id::text = $1), $2, 'baseline', '{}'::jsonb, $3, $4) RETURNING id")
-            .bind(cycle.id.clone())
+        let id: i64 = sqlx::query_scalar("INSERT INTO learning_feedback (cycle_id, ticket_id, production_model_version, production_prediction, operator_confirmed_decision, accepted_or_corrected) VALUES ($1, $2, $3, '{}'::jsonb, $4, $5) RETURNING id")
+            .bind(cycle_db_id)
             .bind(ticket_id)
+            .bind(production_model_version)
             .bind(json!({"feedback_type": feedback_type, "comment": request.comment, "user_id": user_id}))
             .bind(accepted_or_corrected)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|error| format!("insert learning feedback: {error}"))?;
-        self.learning_feedback_from_id(id, &cycle.id).await
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit learning feedback: {error}"))?;
+        self.learning_feedback_from_id(id, &canonical_cycle_id)
+            .await
     }
 
     pub async fn close_learning_cycle(
         &self,
         request: &CloseLearningCycleRequest,
     ) -> Result<Value, String> {
-        let cycle = if let Some(cycle_id) = request.cycle_id.as_deref() {
-            self.learning_cycle_from_id_lookup(cycle_id).await?
-        } else {
-            let row = sqlx::query("SELECT id FROM learning_cycles WHERE state = 'COLLECT' ORDER BY created_at LIMIT 1")
-                .fetch_optional(&self.pool)
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin learning cycle close: {error}"))?;
+        let row = if let Some(cycle_id) = request.cycle_id.as_deref() {
+            sqlx::query("SELECT id, cycle_id, state, collect_ends_at, manual_close_enabled, min_feedback_count, candidate_dataset_version, candidate_model_version FROM learning_cycles WHERE cycle_id = $1 OR id::text = $1 LIMIT 1 FOR UPDATE")
+                .bind(cycle_id)
+                .fetch_optional(&mut *tx)
                 .await
-                .map_err(|error| format!("find collect cycle: {error}"))?
-                .ok_or_else(|| "no COLLECT cycle is available".to_owned())?;
-            self.learning_cycle_from_id(
-                row.try_get("id")
-                    .map_err(|error| format!("cycle id: {error}"))?,
-            )
-            .await?
+                .map_err(|error| format!("find learning cycle to close: {error}"))?
+                .ok_or_else(|| format!("learning cycle {cycle_id} not found"))?
+        } else {
+            sqlx::query("SELECT id, cycle_id, state, collect_ends_at, manual_close_enabled, min_feedback_count, candidate_dataset_version, candidate_model_version FROM learning_cycles WHERE state = 'COLLECT' AND (manual_close_enabled OR collect_ends_at <= now()) ORDER BY collect_ends_at, id LIMIT 1 FOR UPDATE SKIP LOCKED")
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("find eligible COLLECT cycle: {error}"))?
+                .ok_or_else(|| "no eligible COLLECT cycle is available".to_owned())?
         };
-        if cycle.state != "COLLECT" {
+        let cycle_db_id: i64 = row
+            .try_get("id")
+            .map_err(|error| format!("learning cycle id: {error}"))?;
+        let cycle_id: String = row
+            .try_get("cycle_id")
+            .map_err(|error| format!("learning cycle key: {error}"))?;
+        let cycle_state: String = row
+            .try_get("state")
+            .map_err(|error| format!("learning cycle state: {error}"))?;
+        if cycle_state != "COLLECT" {
             return Err(format!(
-                "cycle {} cannot close from state {}",
-                cycle.id, cycle.state
+                "cycle {cycle_id} cannot close from state {cycle_state}"
             ));
         }
-        if cycle.feedback_count == 0 {
-            sqlx::query("UPDATE learning_cycles SET state = 'INSUFFICIENT_FEEDBACK', updated_at = now(), decision_note = 'INSUFFICIENT_FEEDBACK' WHERE id = $1")
-                .bind(cycle.id.parse::<i64>().unwrap_or_default())
-                .execute(&self.pool)
+        let collect_ends_at: Option<DateTime<Utc>> = row
+            .try_get("collect_ends_at")
+            .map_err(|error| format!("learning collection end: {error}"))?;
+        let manual_close_enabled: bool = row
+            .try_get("manual_close_enabled")
+            .map_err(|error| format!("learning manual close policy: {error}"))?;
+        if !manual_close_enabled
+            && collect_ends_at
+                .map(|ends_at| ends_at > Utc::now())
+                .unwrap_or(true)
+        {
+            return Err(format!(
+                "learning cycle {cycle_id} is not eligible for manual close before collect_ends_at"
+            ));
+        }
+        let min_feedback_count: i32 = row
+            .try_get("min_feedback_count")
+            .map_err(|error| format!("learning minimum feedback count: {error}"))?;
+        let feedback_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM learning_feedback WHERE cycle_id = $1 AND validation_status = 'VALID'",
+        )
+        .bind(cycle_db_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("count valid learning feedback: {error}"))?;
+        if feedback_count < i64::from(min_feedback_count) {
+            sqlx::query("UPDATE learning_cycles SET state = 'INSUFFICIENT_FEEDBACK', updated_at = now(), decision_note = 'INSUFFICIENT_FEEDBACK' WHERE id = $1 AND state = 'COLLECT'")
+                .bind(cycle_db_id)
+                .execute(&mut *tx)
                 .await
-                .map_err(|error| format!("close learning cycle: {error}"))?;
+                .map_err(|error| format!("close insufficient learning cycle: {error}"))?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit insufficient learning cycle: {error}"))?;
             return Ok(json!({
                 "job_id": Value::Null,
                 "state": "INSUFFICIENT_FEEDBACK",
-                "cycle": self.learning_cycle_from_id_lookup(&cycle.id).await?,
+                "cycle": self.learning_cycle_from_id_lookup(&cycle_id).await?,
                 "production_model_unchanged": true,
             }));
         }
-        let cycle_db_id = cycle.id.parse::<i64>().unwrap_or_default();
-        sqlx::query(
-            "UPDATE learning_cycles SET state = 'TRAINING', updated_at = now() WHERE id = $1",
-        )
-        .bind(cycle_db_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| format!("start learning cycle: {error}"))?;
+        let candidate_model_version: String = row
+            .try_get::<Option<String>, _>("candidate_model_version")
+            .map_err(|error| format!("candidate model version: {error}"))?
+            .unwrap_or_else(|| "pending".to_owned());
+        let dataset_version: Option<String> = row
+            .try_get("candidate_dataset_version")
+            .map_err(|error| format!("candidate dataset version: {error}"))?;
+        sqlx::query("UPDATE learning_cycles SET state = 'TRAINING', updated_at = now() WHERE id = $1 AND state = 'COLLECT'")
+            .bind(cycle_db_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("start learning cycle: {error}"))?;
         let payload = json!({
             "kind": "training",
-            "cycle_id": cycle.id,
-            "candidate_model_version": cycle.candidate_model_version,
+            "cycle_id": cycle_id,
+            "candidate_model_version": candidate_model_version,
             "model_type": "classifier",
-            "dataset_version": cycle.dataset_version,
+            "dataset_version": dataset_version.unwrap_or_else(|| "pending".to_owned()),
             "samples": [],
             "min_samples": 0,
         });
         let job_id: i64 = sqlx::query_scalar("INSERT INTO background_jobs (job_type, payload, state) VALUES ('TRAIN_CLASSIFIER', $1, 'QUEUED') RETURNING id")
             .bind(payload)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|error| format!("queue training job: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit learning cycle training job: {error}"))?;
         Ok(json!({
             "job_id": job_id.to_string(),
             "state": "TRAINING",
-            "cycle": self.learning_cycle_from_id_lookup(&cycle.id).await?,
+            "cycle": self.learning_cycle_from_id_lookup(&cycle_id).await?,
             "production_model_unchanged": true,
         }))
     }
@@ -3141,13 +3267,14 @@ impl PgRepository {
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| format!("fetch candidate evaluation: {error}"))?;
+        let mut candidate_exists = false;
         if evaluation.is_none() {
-            let candidate_exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW'))")
+            candidate_exists = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW'))")
                 .bind(&cycle.candidate_model_version)
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|error| format!("check candidate evaluation: {error}"))?;
-            if candidate_exists {
+            if candidate_exists && test_fake_trainer_enabled() {
                 let evaluation_id = format!(
                     "evaluation-{}-{}",
                     cycle.id,
@@ -3165,17 +3292,16 @@ impl PgRepository {
                 sqlx::query("UPDATE learning_cycles SET state = 'DECISION', decision_note = 'READY_TO_REVIEW', updated_at = now() WHERE id = $1 AND state = 'EVALUATE'")
                     .bind(cycle.id.parse::<i64>().unwrap_or_default())
                     .execute(&self.pool)
-                    .await
-                    .map_err(|error| format!("advance learning decision: {error}"))?;
+                .await
+                .map_err(|error| format!("advance learning decision: {error}"))?;
             }
         }
-        let cycle = self.learning_cycle_from_id_lookup(&cycle.id).await?;
         let evaluation = sqlx::query("SELECT evaluation_id, model_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1")
             .bind(&cycle.candidate_model_version)
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| format!("fetch candidate evaluation: {error}"))?;
-        let (offline_metrics, shadow_metrics, regressions, sample_size, decision) =
+        let (offline_metrics, shadow_metrics, regressions, sample_size, mut decision) =
             if let Some(row) = evaluation {
                 (
                     row.try_get::<Value, _>("metrics_json")
@@ -3195,9 +3321,27 @@ impl PgRepository {
                     json!({}),
                     json!([]),
                     0,
-                    "NOT_READY".to_owned(),
+                    if candidate_exists {
+                        "EVALUATION_NOT_AVAILABLE".to_owned()
+                    } else {
+                        "NOT_READY".to_owned()
+                    },
                 )
             };
+        let test_only_fake_evidence = offline_metrics.get("status").and_then(Value::as_str)
+            == Some("FAKE_TRAINER_NO_METRICS");
+        if test_only_fake_evidence && !test_fake_trainer_enabled() {
+            decision = "TEST_ONLY_FAKE_EVIDENCE".to_owned();
+        }
+        if matches!(decision.as_str(), "READY_TO_REVIEW" | "READY_TO_PROMOTE") {
+            sqlx::query("UPDATE learning_cycles SET state = 'DECISION', decision_note = $2, updated_at = now() WHERE id = $1 AND state = 'EVALUATE'")
+                .bind(cycle.id.parse::<i64>().unwrap_or_default())
+                .bind(&decision)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| format!("advance evaluated cycle to decision: {error}"))?;
+        }
+        let cycle = self.learning_cycle_from_id_lookup(&cycle.id).await?;
         Ok(json!({
             "cycle_id": cycle.id,
             "state": cycle.state,
@@ -3205,7 +3349,7 @@ impl PgRepository {
             "shadow_metrics": shadow_metrics,
             "critical_regressions": regressions,
             "sample_size": sample_size,
-            "promotion_policy_version": "policy-v1",
+            "promotion_policy_version": cycle.promotion_policy_version,
             "decision": decision,
         }))
     }
@@ -3217,32 +3361,97 @@ impl PgRepository {
         user_id: &str,
     ) -> Result<LearningCycle, String> {
         let cycle = self.learning_cycle_from_id_lookup(cycle_id).await?;
-        if !matches!(cycle.state.as_str(), "EVALUATE" | "DECISION") {
-            return Err(format!(
-                "cycle {} cannot be promoted from state {}",
-                cycle.id, cycle.state
-            ));
-        }
-        let candidate_exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW'))")
-            .bind(&cycle.candidate_model_version)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|error| format!("check candidate model: {error}"))?;
-        if !candidate_exists {
-            return Err("candidate model artifact is not available".to_owned());
-        }
+        let cycle_db_id = cycle
+            .id
+            .parse::<i64>()
+            .map_err(|_| "invalid database learning cycle id".to_owned())?;
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|error| format!("begin promotion: {error}"))?;
+        let locked_cycle = sqlx::query(
+            "SELECT state, candidate_model_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
+        )
+        .bind(cycle_db_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("lock cycle for promotion: {error}"))?;
+        let state: String = locked_cycle
+            .try_get("state")
+            .map_err(|error| format!("learning cycle state: {error}"))?;
+        if state != "DECISION" {
+            return Err(format!(
+                "cycle {} cannot be promoted from state {}",
+                cycle.id, state
+            ));
+        }
+        let candidate_model_version: String = locked_cycle
+            .try_get::<Option<String>, _>("candidate_model_version")
+            .map_err(|error| format!("candidate model version: {error}"))?
+            .ok_or_else(|| "candidate model artifact is not available".to_owned())?;
+        let evaluation = sqlx::query(
+            "SELECT decision, metrics_json->>'status' AS evidence_status FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&candidate_model_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("check candidate evaluation decision: {error}"))?;
+        let evaluation_decision = evaluation
+            .as_ref()
+            .and_then(|row| row.try_get::<Option<String>, _>("decision").ok().flatten());
+        let evidence_status = evaluation.as_ref().and_then(|row| {
+            row.try_get::<Option<String>, _>("evidence_status")
+                .ok()
+                .flatten()
+        });
+        if evidence_status.as_deref() == Some("FAKE_TRAINER_NO_METRICS")
+            && !test_fake_trainer_enabled()
+        {
+            return Err(
+                "test-only fake trainer evidence cannot be promoted in normal runtime".to_owned(),
+            );
+        }
+        if !evaluation_decision
+            .as_deref()
+            .is_some_and(|decision| matches!(decision, "READY_TO_REVIEW" | "READY_TO_PROMOTE"))
+        {
+            return Err("candidate evaluation is not ready for human promotion".to_owned());
+        }
+        let candidate_exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW'))")
+            .bind(&candidate_model_version)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("check candidate model: {error}"))?;
+        if !candidate_exists {
+            return Err("candidate model artifact is not available".to_owned());
+        }
         sqlx::query("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'PRODUCTION'")
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("archive production model: {error}"))?;
-        sqlx::query("UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1").bind(&cycle.candidate_model_version).execute(&mut *tx).await.map_err(|error| format!("promote candidate: {error}"))?;
-        sqlx::query("UPDATE learning_cycles SET state = 'PROMOTED', decision_note = $2, updated_at = now() WHERE id = $1").bind(cycle.id.parse::<i64>().unwrap_or_default()).bind(note.or(Some("promoted"))).execute(&mut *tx).await.map_err(|error| format!("promote learning cycle: {error}"))?;
-        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason, metadata) VALUES ($1, 'PROMOTE_MODEL', 'learning_cycle', $2, $3, $4)").bind(user_id).bind(cycle.id.clone()).bind(note).bind(json!({"candidate_model_version": cycle.candidate_model_version})).execute(&mut *tx).await.map_err(|error| format!("audit promotion: {error}"))?;
+        sqlx::query("UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1")
+            .bind(&candidate_model_version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("promote candidate: {error}"))?;
+        let transition = sqlx::query("UPDATE learning_cycles SET state = 'PROMOTED', decision_note = $2, updated_at = now() WHERE id = $1 AND state = 'DECISION'")
+            .bind(cycle_db_id)
+            .bind(note.or(Some("promoted")))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("promote learning cycle: {error}"))?;
+        if transition.rows_affected() != 1 {
+            return Err("learning cycle changed before promotion".to_owned());
+        }
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason, metadata) VALUES ($1, 'PROMOTE_MODEL', 'learning_cycle', $2, $3, $4)")
+            .bind(user_id)
+            .bind(cycle.id.clone())
+            .bind(note)
+            .bind(json!({"candidate_model_version": candidate_model_version}))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit promotion: {error}"))?;
         tx.commit()
             .await
             .map_err(|error| format!("commit promotion: {error}"))?;
@@ -3256,22 +3465,43 @@ impl PgRepository {
         user_id: &str,
     ) -> Result<LearningCycle, String> {
         let cycle = self.learning_cycle_from_id_lookup(cycle_id).await?;
-        if cycle.state == "PROMOTED" {
-            return Err("a promoted cycle cannot be rejected".to_owned());
+        let cycle_db_id = cycle
+            .id
+            .parse::<i64>()
+            .map_err(|_| "invalid database learning cycle id".to_owned())?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin rejection: {error}"))?;
+        let locked_state: String =
+            sqlx::query_scalar("SELECT state FROM learning_cycles WHERE id = $1 FOR UPDATE")
+                .bind(cycle_db_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| format!("lock cycle for rejection: {error}"))?;
+        if !matches!(locked_state.as_str(), "EVALUATE" | "DECISION") {
+            return Err(format!(
+                "cycle {} cannot be rejected from state {}",
+                cycle.id, locked_state
+            ));
         }
         sqlx::query("UPDATE learning_cycles SET state = 'REJECTED', decision_note = $2, updated_at = now() WHERE id = $1")
-            .bind(cycle.id.parse::<i64>().unwrap_or_default())
+            .bind(cycle_db_id)
             .bind(note.or(Some("rejected")))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| format!("reject learning cycle: {error}"))?;
         sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason) VALUES ($1, 'REJECT_MODEL', 'learning_cycle', $2, $3)")
             .bind(user_id)
             .bind(cycle.id.clone())
             .bind(note)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| format!("audit rejection: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit rejection: {error}"))?;
         self.learning_cycle_from_id_lookup(cycle_id).await
     }
 
@@ -3349,7 +3579,7 @@ impl PgRepository {
     }
 
     async fn learning_cycle_from_id(&self, id: i64) -> Result<LearningCycle, String> {
-        let row = sqlx::query("SELECT lc.id, lc.cycle_id, lc.state, COALESCE(lc.candidate_dataset_version, 'unknown') AS dataset_version, COALESCE(lc.candidate_model_version, 'pending') AS candidate_model_version, lc.created_at, lc.updated_at, COALESCE(lc.decision_note, NULL) AS decision_note, (SELECT COUNT(*)::int FROM learning_feedback lf WHERE lf.cycle_id = lc.id) AS feedback_count, COALESCE((SELECT me.metrics_json FROM model_evaluations me WHERE me.model_version = lc.candidate_model_version ORDER BY me.created_at DESC LIMIT 1), '{}'::jsonb) AS metrics_json FROM learning_cycles lc WHERE lc.id = $1")
+        let row = sqlx::query("SELECT lc.id, lc.cycle_id, lc.state, COALESCE(lc.candidate_dataset_version, 'unknown') AS dataset_version, COALESCE(lc.candidate_model_version, 'pending') AS candidate_model_version, lc.collect_started_at, lc.collect_ends_at, lc.production_model_version, lc.min_feedback_count, lc.promotion_policy_version, lc.manual_close_enabled, lc.created_at, lc.updated_at, lc.decision_note, (SELECT COUNT(*)::int FROM learning_feedback lf WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_count, COALESCE((SELECT me.metrics_json FROM model_evaluations me WHERE me.model_version = lc.candidate_model_version ORDER BY me.created_at DESC LIMIT 1), '{}'::jsonb) AS metrics_json FROM learning_cycles lc WHERE lc.id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -3361,8 +3591,15 @@ impl PgRepository {
         let updated_at: DateTime<Utc> = row
             .try_get("updated_at")
             .map_err(|error| format!("cycle updated_at: {error}"))?;
+        let collect_started_at: Option<DateTime<Utc>> = row
+            .try_get("collect_started_at")
+            .map_err(|error| format!("cycle collect_started_at: {error}"))?;
+        let collect_ends_at: Option<DateTime<Utc>> = row
+            .try_get("collect_ends_at")
+            .map_err(|error| format!("cycle collect_ends_at: {error}"))?;
         Ok(LearningCycle {
             id: row.try_get::<i64, _>("id").unwrap_or(id).to_string(),
+            cycle_id: row.try_get("cycle_id").unwrap_or_default(),
             state: row.try_get("state").unwrap_or_default(),
             dataset_version: row
                 .try_get("dataset_version")
@@ -3370,6 +3607,17 @@ impl PgRepository {
             candidate_model_version: row
                 .try_get("candidate_model_version")
                 .unwrap_or_else(|_| "pending".to_owned()),
+            collect_started_at: collect_started_at.unwrap_or(created_at).to_rfc3339(),
+            collect_ends_at: collect_ends_at.unwrap_or(created_at).to_rfc3339(),
+            production_model_version: row.try_get("production_model_version").unwrap_or(None),
+            min_feedback_count: row
+                .try_get::<i32, _>("min_feedback_count")
+                .unwrap_or(1)
+                .max(1) as u32,
+            promotion_policy_version: row
+                .try_get("promotion_policy_version")
+                .unwrap_or_else(|_| "policy-v1".to_owned()),
+            manual_close_enabled: row.try_get("manual_close_enabled").unwrap_or(false),
             metrics: learning_metrics_from_value(
                 row.try_get("metrics_json").unwrap_or_else(|_| json!({})),
             ),
@@ -4124,29 +4372,38 @@ impl PgRepository {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("update ticket decision: {error}"))?;
-        let cycle_id: i64 = sqlx::query_scalar(
-            "INSERT INTO learning_cycles (cycle_id, state, candidate_dataset_version, candidate_model_version, min_feedback_count) VALUES ('vertical-slice', 'COLLECT', 'operator-feedback', 'pending', 1) ON CONFLICT (cycle_id) DO UPDATE SET updated_at = now() RETURNING id",
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| format!("ensure learning cycle: {error}"))?;
-        sqlx::query("INSERT INTO learning_feedback (cycle_id, ticket_id, production_model_version, production_prediction, operator_confirmed_decision, accepted_or_corrected) VALUES ($1, $2, $3, $4, $5, $6)")
-            .bind(cycle_id)
-            .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
-            .bind(&prediction.model_version)
-            .bind(json!({
-                "topic_id": prediction.topic_id,
-                "confidence": prediction.confidence,
-                "service": prediction.recommended_service,
-                "priority": prediction.predicted_priority,
-                "model_version": prediction.model_version,
-                "alternatives": prediction.alternatives,
-            }))
-            .bind(&confirmed_payload)
-            .bind(if action == "correct" { "CORRECTED" } else { "ACCEPTED" })
-            .execute(&mut *tx)
+        let active_collect_cycle = sqlx::query("SELECT id, cycle_id FROM learning_cycles WHERE state = 'COLLECT' AND collect_ends_at > now() ORDER BY collect_started_at DESC, id DESC LIMIT 1 FOR UPDATE")
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(|error| format!("insert learning feedback: {error}"))?;
+            .map_err(|error| format!("find active learning cycle for feedback: {error}"))?;
+        let learning_feedback_cycle_id = if let Some(cycle) = active_collect_cycle {
+            let cycle_db_id: i64 = cycle
+                .try_get("id")
+                .map_err(|error| format!("learning cycle id: {error}"))?;
+            let cycle_id: String = cycle
+                .try_get("cycle_id")
+                .map_err(|error| format!("learning cycle key: {error}"))?;
+            sqlx::query("INSERT INTO learning_feedback (cycle_id, ticket_id, production_model_version, production_prediction, operator_confirmed_decision, accepted_or_corrected) VALUES ($1, $2, $3, $4, $5, $6)")
+                .bind(cycle_db_id)
+                .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
+                .bind(&prediction.model_version)
+                .bind(json!({
+                    "topic_id": prediction.topic_id,
+                    "confidence": prediction.confidence,
+                    "service": prediction.recommended_service,
+                    "priority": prediction.predicted_priority,
+                    "model_version": prediction.model_version,
+                    "alternatives": prediction.alternatives,
+                }))
+                .bind(&confirmed_payload)
+                .bind(if action == "correct" { "CORRECTED" } else { "ACCEPTED" })
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("insert learning feedback: {error}"))?;
+            Some(cycle_id)
+        } else {
+            None
+        };
         tx.commit()
             .await
             .map_err(|error| format!("commit decision transaction: {error}"))?;
@@ -4194,6 +4451,12 @@ impl PgRepository {
             ticket,
             prediction,
             decision,
+            learning_feedback_status: if learning_feedback_cycle_id.is_some() {
+                "COLLECTED".to_owned()
+            } else {
+                "NO_ACTIVE_COLLECT_CYCLE".to_owned()
+            },
+            learning_feedback_cycle_id,
         })
     }
 

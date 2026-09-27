@@ -45,6 +45,20 @@ pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
 const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
 const MAX_RESPONSE_TEMPLATE_BODY_CHARS: usize = 4_000;
 const MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS: usize = 200;
+const DEFAULT_LEARNING_CYCLE_DURATION_HOURS: i32 = 168;
+const DEFAULT_LEARNING_MIN_FEEDBACK_COUNT: i32 = 1;
+const DEFAULT_LEARNING_PROMOTION_POLICY_VERSION: &str = "policy-v1";
+const MAX_LEARNING_CYCLE_DURATION_HOURS: i32 = 87_600;
+
+fn is_active_learning_cycle_state(state: &str) -> bool {
+    matches!(state, "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION")
+}
+
+fn learning_collect_end_is_due(collect_ends_at: &str, now: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(collect_ends_at)
+        .map(|ends_at| ends_at.with_timezone(&Utc) <= now)
+        .unwrap_or(true)
+}
 
 /// Runtime configuration.  `dev_auth` is enabled by default for the local
 /// deterministic demo: a request without `x-pulse-role` acts as ADMIN, while
@@ -55,6 +69,10 @@ pub struct Config {
     pub port: u16,
     pub dev_auth: bool,
     pub storage: String,
+    pub learning_cycle_duration_hours: i32,
+    pub learning_min_feedback_count: i32,
+    pub learning_manual_close_enabled: bool,
+    pub learning_promotion_policy_version: String,
 }
 
 impl Default for Config {
@@ -64,6 +82,10 @@ impl Default for Config {
             port: 8080,
             dev_auth: true,
             storage: "memory".to_owned(),
+            learning_cycle_duration_hours: DEFAULT_LEARNING_CYCLE_DURATION_HOURS,
+            learning_min_feedback_count: DEFAULT_LEARNING_MIN_FEEDBACK_COUNT,
+            learning_manual_close_enabled: true,
+            learning_promotion_policy_version: DEFAULT_LEARNING_PROMOTION_POLICY_VERSION.to_owned(),
         }
     }
 }
@@ -87,6 +109,15 @@ impl Config {
                 )
             })
             .unwrap_or_else(|| !storage.eq_ignore_ascii_case("postgres"));
+        let is_demo_environment = pulse_env
+            .as_deref()
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "demo" | "test" | "unit"
+                )
+            })
+            .unwrap_or_else(|| !storage.eq_ignore_ascii_case("postgres"));
         Self {
             host: env::var("PULSE_HOST").unwrap_or(defaults.host),
             port: env::var("PULSE_PORT")
@@ -99,7 +130,55 @@ impl Config {
                 .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
                 .unwrap_or(default_dev_auth && defaults.dev_auth),
             storage,
+            learning_cycle_duration_hours: parse_learning_cycle_duration_hours(
+                defaults.learning_cycle_duration_hours,
+            ),
+            learning_min_feedback_count: parse_positive_env(
+                "PULSE_LEARNING_MIN_FEEDBACK_COUNT",
+                defaults.learning_min_feedback_count,
+            ),
+            learning_manual_close_enabled: parse_optional_bool_env("PULSE_LEARNING_MANUAL_CLOSE")
+                .unwrap_or(is_demo_environment),
+            learning_promotion_policy_version: env::var("PULSE_LEARNING_PROMOTION_POLICY_VERSION")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(defaults.learning_promotion_policy_version),
         }
+    }
+}
+
+fn parse_positive_env<T>(name: &str, default: T) -> T
+where
+    T: std::str::FromStr + PartialOrd + Default,
+    T::Err: std::fmt::Debug,
+{
+    let Ok(value) = env::var(name) else {
+        return default;
+    };
+    let parsed = value
+        .parse::<T>()
+        .unwrap_or_else(|_| panic!("{name} must be a positive integer"));
+    assert!(parsed > T::default(), "{name} must be a positive integer");
+    parsed
+}
+
+fn parse_learning_cycle_duration_hours(default: i32) -> i32 {
+    let value = parse_positive_env("PULSE_LEARNING_CYCLE_DURATION_HOURS", default);
+    assert!(
+        value <= MAX_LEARNING_CYCLE_DURATION_HOURS,
+        "PULSE_LEARNING_CYCLE_DURATION_HOURS must not exceed {MAX_LEARNING_CYCLE_DURATION_HOURS}"
+    );
+    value
+}
+
+fn parse_optional_bool_env(name: &str) -> Option<bool> {
+    let value = env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Some(true),
+        "0" | "false" | "no" => Some(false),
+        _ => panic!("{name} must be true or false"),
     }
 }
 
@@ -449,9 +528,16 @@ pub struct LearningMetrics {
 #[derive(Clone, Debug, Serialize)]
 pub struct LearningCycle {
     pub id: String,
+    pub cycle_id: String,
     pub state: String,
     pub dataset_version: String,
     pub candidate_model_version: String,
+    pub collect_started_at: String,
+    pub collect_ends_at: String,
+    pub production_model_version: Option<String>,
+    pub min_feedback_count: u32,
+    pub promotion_policy_version: String,
+    pub manual_close_enabled: bool,
     pub metrics: LearningMetrics,
     pub feedback_count: u32,
     pub decision_note: Option<String>,
@@ -1288,9 +1374,16 @@ impl Store {
         };
         let learning_cycle = LearningCycle {
             id: "cycle-001".to_owned(),
+            cycle_id: "cycle-001".to_owned(),
             state: "EVALUATE".to_owned(),
             dataset_version: "dataset-demo-2026-09-001".to_owned(),
             candidate_model_version: "classifier-candidate-2026-09-001".to_owned(),
+            collect_started_at: "2026-09-18T10:00:00Z".to_owned(),
+            collect_ends_at: "2026-09-25T10:00:00Z".to_owned(),
+            production_model_version: Some("classifier-demo-2026-09-001".to_owned()),
+            min_feedback_count: DEFAULT_LEARNING_MIN_FEEDBACK_COUNT as u32,
+            promotion_policy_version: DEFAULT_LEARNING_PROMOTION_POLICY_VERSION.to_owned(),
+            manual_close_enabled: true,
             metrics: metrics.clone(),
             feedback_count: 3,
             decision_note: None,
@@ -2917,6 +3010,8 @@ pub struct DecisionResponse {
     pub ticket: Ticket,
     pub prediction: Prediction,
     pub decision: OperatorDecision,
+    pub learning_feedback_cycle_id: Option<String>,
+    pub learning_feedback_status: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -3156,16 +3251,19 @@ async fn apply_decision(
         created_at: decision_at.clone(),
     };
     store.decisions.push(decision.clone());
-    if let Some(cycle_id) = store
+    let learning_feedback_cycle_id = store
         .learning_cycles
         .values()
-        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
-        .map(|cycle| cycle.id.clone())
-    {
+        .find(|cycle| {
+            cycle.state == "COLLECT"
+                && !learning_collect_end_is_due(&cycle.collect_ends_at, Utc::now())
+        })
+        .map(|cycle| cycle.id.clone());
+    if let Some(cycle_id) = learning_feedback_cycle_id.as_deref() {
         let feedback = LearningFeedback {
             id: format!("feedback-{:03}", store.next_feedback_number),
             ticket_id: ticket_id.clone(),
-            cycle_id: Some(cycle_id.clone()),
+            cycle_id: Some(cycle_id.to_owned()),
             feedback_type: if action == "confirm" {
                 "accepted".to_owned()
             } else {
@@ -3178,7 +3276,7 @@ async fn apply_decision(
         };
         store.next_feedback_number += 1;
         store.learning_feedback.push(feedback);
-        if let Some(cycle) = store.learning_cycles.get_mut(&cycle_id) {
+        if let Some(cycle) = store.learning_cycles.get_mut(cycle_id) {
             cycle.feedback_count += 1;
             cycle.updated_at = decision_at;
         }
@@ -3207,6 +3305,12 @@ async fn apply_decision(
         ticket,
         prediction,
         decision,
+        learning_feedback_cycle_id: learning_feedback_cycle_id.clone(),
+        learning_feedback_status: if learning_feedback_cycle_id.is_some() {
+            "COLLECTED".to_owned()
+        } else {
+            "NO_ACTIVE_COLLECT_CYCLE".to_owned()
+        },
     }))
 }
 
@@ -4782,7 +4886,7 @@ async fn learning_overview(
     let items = store.learning_cycles.values().cloned().collect::<Vec<_>>();
     let active_cycle = items
         .iter()
-        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .find(|cycle| is_active_learning_cycle_state(&cycle.state))
         .cloned();
     let production_model = store
         .models
@@ -4794,7 +4898,7 @@ async fn learning_overview(
         active_cycle,
         production_model,
         controlled_loop: json!({
-            "stages": ["COLLECT", "TRAIN", "EVALUATE", "SHADOW", "PROMOTE", "REJECT"],
+            "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTED", "REJECTED"],
             "production_auto_update": false,
             "operator_correction_triggers_training": false,
         }),
@@ -4815,14 +4919,38 @@ async fn create_learning_cycle(
     require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let cycle = repository
-            .create_learning_cycle(&request)
+            .create_learning_cycle(&request, &state.config)
             .await
-            .map_err(ApiError::Internal)?;
+            .map_err(|error| {
+                if error.contains("active learning cycle") {
+                    ApiError::Conflict(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
         return Ok((StatusCode::CREATED, Json(cycle)));
     }
     let mut store = state.write_store()?;
+    if store
+        .learning_cycles
+        .values()
+        .any(|cycle| is_active_learning_cycle_state(&cycle.state))
+    {
+        return Err(ApiError::Conflict(
+            "an active classifier learning cycle already exists".to_owned(),
+        ));
+    }
+    let started_at = Utc::now();
+    let ends_at =
+        started_at + Duration::hours(i64::from(state.config.learning_cycle_duration_hours));
+    let production_model_version = store
+        .models
+        .values()
+        .find(|model| model.status.eq_ignore_ascii_case("production"))
+        .map(|model| model.id.clone());
     let cycle = LearningCycle {
         id: format!("cycle-{:03}", store.next_cycle_number),
+        cycle_id: format!("cycle-{:03}", store.next_cycle_number),
         state: "COLLECT".to_owned(),
         dataset_version: request
             .dataset_version
@@ -4833,6 +4961,12 @@ async fn create_learning_cycle(
                 store.next_cycle_number
             )
         }),
+        collect_started_at: started_at.to_rfc3339(),
+        collect_ends_at: ends_at.to_rfc3339(),
+        production_model_version,
+        min_feedback_count: state.config.learning_min_feedback_count as u32,
+        promotion_policy_version: state.config.learning_promotion_policy_version.clone(),
+        manual_close_enabled: state.config.learning_manual_close_enabled,
         metrics: LearningMetrics {
             macro_f1: 0.0,
             accuracy: 0.0,
@@ -4840,8 +4974,8 @@ async fn create_learning_cycle(
         },
         feedback_count: 0,
         decision_note: None,
-        created_at: DEMO_TIMESTAMP.to_owned(),
-        updated_at: DEMO_TIMESTAMP.to_owned(),
+        created_at: started_at.to_rfc3339(),
+        updated_at: started_at.to_rfc3339(),
     };
     store.next_cycle_number += 1;
     store
@@ -4906,6 +5040,10 @@ async fn add_learning_feedback(
             .map_err(|error| {
                 if error.contains("not found") {
                     ApiError::NotFound(error)
+                } else if error.contains("cannot accept feedback")
+                    || error.contains("collection period has ended")
+                {
+                    ApiError::Conflict(error)
                 } else {
                     ApiError::Internal(error)
                 }
@@ -4913,9 +5051,19 @@ async fn add_learning_feedback(
         return Ok((StatusCode::CREATED, Json(feedback)));
     }
     let mut store = state.write_store()?;
-    if !store.learning_cycles.contains_key(&cycle_id) {
-        return Err(ApiError::NotFound(format!(
-            "learning cycle {cycle_id} not found"
+    let cycle = store
+        .learning_cycles
+        .get(&cycle_id)
+        .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
+    if cycle.state != "COLLECT" {
+        return Err(ApiError::Conflict(format!(
+            "learning cycle {cycle_id} cannot accept feedback in state {}",
+            cycle.state
+        )));
+    }
+    if learning_collect_end_is_due(&cycle.collect_ends_at, Utc::now()) {
+        return Err(ApiError::Conflict(format!(
+            "learning cycle {cycle_id} collection period has ended"
         )));
     }
     if !store.tickets.contains_key(&request.ticket_id) {
@@ -4937,13 +5085,13 @@ async fn add_learning_feedback(
         comment: request.comment,
         suggestion: None,
         user_id: actor.user_id,
-        created_at: DEMO_TIMESTAMP.to_owned(),
+        created_at: Utc::now().to_rfc3339(),
     };
     store.next_feedback_number += 1;
     store.learning_feedback.push(feedback.clone());
     if let Some(cycle) = store.learning_cycles.get_mut(&cycle_id) {
         cycle.feedback_count += 1;
-        cycle.updated_at = DEMO_TIMESTAMP.to_owned();
+        cycle.updated_at = feedback.created_at.clone();
     }
     Ok((StatusCode::CREATED, Json(feedback)))
 }
@@ -5110,7 +5258,18 @@ async fn close_learning_cycle(
         let result = repository
             .close_learning_cycle(&request)
             .await
-            .map_err(ApiError::Internal)?;
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("COLLECT cycle")
+                    || error.contains("cannot close")
+                    || error.contains("not eligible")
+                {
+                    ApiError::Conflict(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
         let _ = repository
             .audit(
                 &actor.user_id,
@@ -5144,17 +5303,31 @@ async fn close_learning_cycle(
             cycle.id, cycle.state
         )));
     }
-    cycle.state = "EVALUATE".to_owned();
-    cycle.updated_at = DEMO_TIMESTAMP.to_owned();
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "job_id": format!("train-{}", cycle.id),
-            "state": cycle.state,
-            "cycle": cycle,
-            "production_model_unchanged": true,
-        })),
-    ))
+    if !cycle.manual_close_enabled
+        && !learning_collect_end_is_due(&cycle.collect_ends_at, Utc::now())
+    {
+        return Err(ApiError::Conflict(format!(
+            "learning cycle {} is not eligible to close before collect_ends_at",
+            cycle.id
+        )));
+    }
+    if cycle.feedback_count < cycle.min_feedback_count {
+        cycle.state = "INSUFFICIENT_FEEDBACK".to_owned();
+        cycle.decision_note = Some("INSUFFICIENT_FEEDBACK".to_owned());
+        cycle.updated_at = Utc::now().to_rfc3339();
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "job_id": Value::Null,
+                "state": "INSUFFICIENT_FEEDBACK",
+                "cycle": cycle,
+                "production_model_unchanged": true,
+            })),
+        ));
+    }
+    return Err(ApiError::Unavailable(
+        "persistent background training requires PostgreSQL storage".to_owned(),
+    ));
 }
 
 async fn candidate_evaluation(
@@ -5175,21 +5348,33 @@ async fn candidate_evaluation(
                 }
             });
     }
-    let store = state.read_store()?;
+    let mut store = state.write_store()?;
+    let cycle_id = active_cycle_id(&store)
+        .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?;
     let cycle = store
         .learning_cycles
-        .values()
-        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
-        .cloned()
+        .get_mut(&cycle_id)
         .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?;
+    if !matches!(cycle.state.as_str(), "EVALUATE" | "DECISION") {
+        return Err(ApiError::Conflict(format!(
+            "cycle {} has no evaluation to review from state {}",
+            cycle.id, cycle.state
+        )));
+    }
+    if cycle.state == "EVALUATE" {
+        cycle.state = "DECISION".to_owned();
+        cycle.decision_note = Some("DEMO_EVALUATION_REVIEW".to_owned());
+        cycle.updated_at = Utc::now().to_rfc3339();
+    }
+    let cycle = cycle.clone();
     Ok(Json(json!({
         "cycle_id": cycle.id,
         "state": cycle.state,
         "offline_metrics": cycle.metrics,
         "shadow_metrics": {"agreement": 0.88, "correction_rate_delta": -0.04, "sample_size": cycle.feedback_count},
         "critical_regressions": [],
-        "promotion_policy_version": "policy-demo-v1",
-        "decision": "READY_TO_PROMOTE"
+        "promotion_policy_version": cycle.promotion_policy_version,
+        "decision": "READY_TO_REVIEW"
     })))
 }
 
@@ -5197,7 +5382,7 @@ fn active_cycle_id(store: &Store) -> Option<String> {
     store
         .learning_cycles
         .values()
-        .find(|cycle| !matches!(cycle.state.as_str(), "PROMOTED" | "REJECTED"))
+        .find(|cycle| is_active_learning_cycle_state(&cycle.state))
         .map(|cycle| cycle.id.clone())
 }
 
@@ -5277,7 +5462,7 @@ async fn promote_learning_cycle(
             .learning_cycles
             .get(&cycle_id)
             .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
-        if cycle.state != "EVALUATE" && cycle.state != "SHADOW" {
+        if cycle.state != "DECISION" {
             return Err(ApiError::Conflict(format!(
                 "cycle {} cannot be promoted from state {}",
                 cycle.id, cycle.state
@@ -5342,10 +5527,11 @@ async fn reject_learning_cycle(
         .learning_cycles
         .get_mut(&cycle_id)
         .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
-    if cycle.state == "PROMOTED" {
-        return Err(ApiError::Conflict(
-            "a promoted cycle cannot be rejected".to_owned(),
-        ));
+    if !matches!(cycle.state.as_str(), "EVALUATE" | "DECISION") {
+        return Err(ApiError::Conflict(format!(
+            "cycle {} cannot be rejected from state {}",
+            cycle.id, cycle.state
+        )));
     }
     cycle.state = "REJECTED".to_owned();
     cycle.decision_note = request
@@ -5691,6 +5877,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let decision = body_json(response).await;
         assert_eq!(decision["decision"]["action"], "confirm");
+        assert_eq!(
+            decision["learning_feedback_status"],
+            "NO_ACTIVE_COLLECT_CYCLE"
+        );
 
         let cycle = app
             .clone()
@@ -5703,7 +5893,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cycle.status(), StatusCode::OK);
-        assert_eq!(body_json(cycle).await["active_cycle"]["feedback_count"], 4);
+        assert_eq!(body_json(cycle).await["active_cycle"]["feedback_count"], 3);
 
         let relation = app
             .oneshot(

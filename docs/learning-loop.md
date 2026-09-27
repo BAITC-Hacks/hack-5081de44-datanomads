@@ -97,6 +97,32 @@ created_at, started_at, finished_at, error
 в транзакции через `FOR UPDATE SKIP LOCKED`, ставит lease/attempt и явно
 сохраняет terminal error. Redis/Kafka не требуются.
 
+## COLLECT window and configuration
+
+Core creates one classifier cycle at a time and snapshots its start, end,
+production model version, minimum feedback count, promotion policy version, and
+demo manual-close setting. The PostgreSQL advisory lock serializes cycle
+creation; a second active cycle is rejected. `PROMOTED`, `REJECTED`, and
+`INSUFFICIENT_FEEDBACK` are terminal for this policy.
+
+The Core API reads these environment variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PULSE_LEARNING_CYCLE_DURATION_HOURS` | `168` | COLLECT window, from 1 hour to 10 years |
+| `PULSE_LEARNING_MIN_FEEDBACK_COUNT` | `1` | Valid feedback rows required before training is queued |
+| `PULSE_LEARNING_MANUAL_CLOSE` | enabled for `demo`/`test`/`unit`, disabled otherwise | Allows a reviewer to close before the end time |
+| `PULSE_LEARNING_PROMOTION_POLICY_VERSION` | `policy-v1` | Policy version frozen on cycle creation |
+
+The existing PostgreSQL worker checks expired COLLECT cycles on each poll. It
+marks cycles below the threshold `INSUFFICIENT_FEEDBACK` without creating a
+candidate or job; otherwise it atomically moves the cycle to `TRAINING` and
+queues the existing classifier job. A feedback request tied to a closed,
+expired, or non-COLLECT cycle receives `409`. Operator decisions remain saved
+outside the learning dataset when there is no active COLLECT cycle; the Core
+response reports `NO_ACTIVE_COLLECT_CYCLE` in that case. No retraining job is
+created per operator click.
+
 ## Invariants
 
 - `AI prediction` и `operator_confirmed_decision` хранятся раздельно.

@@ -227,7 +227,12 @@ paths:
     post:
       tags:
       - training
-      summary: Train
+      summary: Train a candidate from a supplied dataset
+      description: >-
+        In the controlled learning loop, the Core worker queues this operation
+        only after a COLLECT cycle has reached its end time and minimum valid
+        feedback count. PULSE_TEST_FAKE_TRAINER is reserved for integration
+        tests and does not represent production training evidence.
       operationId: train_internal_v1_training_post
       requestBody:
         content:
