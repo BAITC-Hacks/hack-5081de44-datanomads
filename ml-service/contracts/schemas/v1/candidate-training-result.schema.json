@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/candidate-training-result.v1.json",
+  "title": "Pulse 109 CandidateTrainingResult v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "cycle_id",
+    "candidate_model_version",
+    "candidate_dataset_version",
+    "production_model_version",
+    "training_config_version",
+    "artifact_uri",
+    "artifact_checksum",
+    "manifest_uri",
+    "manifest_checksum",
+    "sample_count",
+    "synthetic",
+    "metrics",
+    "manifest"
+  ],
+  "properties": {
+    "schema_version": {"const": "candidate-training-result.v1"},
+    "status": {"const": "COMPLETED"},
+    "cycle_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "candidate_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "candidate_dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "production_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "training_config_version": {"const": "classifier-training.v1"},
+    "artifact_uri": {"type": "string", "minLength": 1},
+    "artifact_checksum": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "manifest_uri": {"type": "string", "minLength": 1},
+    "manifest_checksum": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "sample_count": {"type": "integer", "minimum": 1},
+    "synthetic": {"type": "boolean"},
+    "metrics": {
+      "type": "object",
+      "required": ["sample_count", "class_count", "vocabulary_size"],
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "manifest": {"$ref": "https://pulse109.local/schema/classifier-manifest.v1.json"}
+  }
+}

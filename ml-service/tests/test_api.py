@@ -194,6 +194,7 @@ def test_training_evaluation_and_manifest(monkeypatch) -> None:
     job_id = training.json()["job_id"]
     assert client.get(f"/internal/v1/training/jobs/{job_id}").status_code == 200
 
+    monkeypatch.setenv("PULSE_ENV", "test")
     monkeypatch.setenv("PULSE_TEST_FAKE_TRAINER", "true")
     fake_training = client.post(
         "/internal/v1/training/classifier",

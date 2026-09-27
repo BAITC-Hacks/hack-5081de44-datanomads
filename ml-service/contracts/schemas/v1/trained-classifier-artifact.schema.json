@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/trained-classifier-artifact.v1.json",
+  "title": "Pulse 109 TrainedClassifierArtifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_version",
+    "candidate_dataset_version",
+    "production_model_version",
+    "training_config_version",
+    "algorithm",
+    "feature_encoding",
+    "alpha",
+    "labels",
+    "vocabulary",
+    "class_log_prior",
+    "token_log_probability"
+  ],
+  "properties": {
+    "schema_version": {"const": "trained-classifier-artifact.v1"},
+    "model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "candidate_dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "production_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "training_config_version": {"const": "classifier-training.v1"},
+    "algorithm": {"const": "multinomial_naive_bayes"},
+    "feature_encoding": {"const": "sha256"},
+    "alpha": {"type": "number", "exclusiveMinimum": 0},
+    "labels": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "vocabulary": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    },
+    "class_log_prior": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "number"}
+    },
+    "token_log_probability": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {"type": "number"}
+      }
+    }
+  }
+}

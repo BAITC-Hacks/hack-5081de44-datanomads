@@ -39,6 +39,8 @@ class SharedContractTests(unittest.TestCase):
                 "LearningFeedbackExport",
                 "CandidateDatasetBuildRequest",
                 "CandidateDatasetManifest",
+                "CandidateTrainingJob",
+                "CandidateTrainingResult",
                 "CandidateEvaluation",
             },
         )

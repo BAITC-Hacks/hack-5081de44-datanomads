@@ -31,9 +31,49 @@ const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
 
 fn test_fake_trainer_enabled() -> bool {
-    env::var("PULSE_TEST_FAKE_TRAINER")
+    let enabled = env::var("PULSE_TEST_FAKE_TRAINER")
         .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
+    let runtime_mode = env::var("PULSE_ENV").unwrap_or_else(|_| "demo".to_owned());
+    enabled && test_runtime_mode(&runtime_mode)
+}
+
+fn test_runtime_mode(runtime_mode: &str) -> bool {
+    matches!(
+        runtime_mode.trim().to_ascii_lowercase().as_str(),
+        "demo" | "development" | "test" | "unit"
+    )
+}
+
+fn production_runtime_mode(runtime_mode: &str) -> bool {
+    matches!(
+        runtime_mode.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+fn synthetic_candidate_can_be_promoted(is_synthetic: bool, runtime_mode: &str) -> bool {
+    !is_synthetic || !production_runtime_mode(runtime_mode)
+}
+
+#[cfg(test)]
+mod promotion_safety_tests {
+    use super::{synthetic_candidate_can_be_promoted, test_runtime_mode};
+
+    #[test]
+    fn fake_training_modes_are_non_production_only() {
+        assert!(test_runtime_mode("demo"));
+        assert!(test_runtime_mode("unit"));
+        assert!(!test_runtime_mode("production"));
+    }
+
+    #[test]
+    fn synthetic_candidates_cannot_be_promoted_in_production() {
+        assert!(!synthetic_candidate_can_be_promoted(true, "production"));
+        assert!(!synthetic_candidate_can_be_promoted(true, "PROD"));
+        assert!(synthetic_candidate_can_be_promoted(true, "demo"));
+        assert!(synthetic_candidate_can_be_promoted(false, "production"));
+    }
 }
 
 #[derive(Debug)]
@@ -2991,7 +3031,7 @@ impl PgRepository {
             controlled_loop: json!({
                 "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTED", "REJECTED"],
                 "production_auto_update": false,
-                "trainer": "TRAINER_NOT_CONFIGURED unless PULSE_TEST_FAKE_TRAINER=true",
+                "trainer": "versioned Data/ML trainer; test fake is demo/test only",
             }),
         })
     }
@@ -3371,7 +3411,13 @@ impl PgRepository {
                 )
             } else {
                 (
-                    json!({"status": "TRAINER_NOT_CONFIGURED"}),
+                    json!({
+                        "status": if candidate_exists {
+                            "EVALUATION_NOT_AVAILABLE"
+                        } else {
+                            cycle.decision_note.as_deref().unwrap_or("NOT_READY")
+                        }
+                    }),
                     json!({}),
                     json!([]),
                     0,
@@ -3425,7 +3471,7 @@ impl PgRepository {
             .await
             .map_err(|error| format!("begin promotion: {error}"))?;
         let locked_cycle = sqlx::query(
-            "SELECT state, candidate_model_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
+            "SELECT state, candidate_model_version, candidate_dataset_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
         )
         .bind(cycle_db_id)
         .fetch_one(&mut *tx)
@@ -3444,6 +3490,24 @@ impl PgRepository {
             .try_get::<Option<String>, _>("candidate_model_version")
             .map_err(|error| format!("candidate model version: {error}"))?
             .ok_or_else(|| "candidate model artifact is not available".to_owned())?;
+        let candidate_dataset_version: String = locked_cycle
+            .try_get::<Option<String>, _>("candidate_dataset_version")
+            .map_err(|error| format!("candidate dataset version: {error}"))?
+            .ok_or_else(|| "candidate dataset lineage is not available".to_owned())?;
+        let candidate_dataset_is_synthetic: bool = sqlx::query_scalar(
+            "SELECT is_synthetic FROM dataset_versions WHERE dataset_version = $1",
+        )
+        .bind(&candidate_dataset_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("read candidate dataset provenance: {error}"))?
+        .ok_or_else(|| "candidate dataset lineage is not available".to_owned())?;
+        let runtime_mode = env::var("PULSE_ENV").unwrap_or_else(|_| "demo".to_owned());
+        if !synthetic_candidate_can_be_promoted(candidate_dataset_is_synthetic, &runtime_mode) {
+            return Err(
+                "synthetic candidate data cannot be promoted in production runtime".to_owned(),
+            );
+        }
         let evaluation = sqlx::query(
             "SELECT decision, metrics_json->>'status' AS evidence_status FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1",
         )

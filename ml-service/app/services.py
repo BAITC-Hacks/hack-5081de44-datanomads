@@ -30,6 +30,8 @@ from .schemas import (
     Alternative,
     AnomalyPoint,
     AnomalyResponse,
+    CandidateTrainingJob,
+    CandidateTrainingResult,
     Classification,
     EvaluationRequest,
     EvaluationResponse,
@@ -41,6 +43,7 @@ from .schemas import (
     TrainingRequest,
     TrainingResponse,
 )
+from .training.classifier import train_candidate_classifier
 
 
 logger = logging.getLogger("pulse109.ml.registry")
@@ -49,6 +52,20 @@ logger = logging.getLogger("pulse109.ml.registry")
 _TOKEN_RE = re.compile(r"[\wа-яёәғқңөұүһі]+", flags=re.IGNORECASE | re.UNICODE)
 _KZ_SPECIFIC = set("әғқңөұүһіӘҒҚҢӨҰҮҺІ")
 _RU_SPECIFIC = set("ёэъЁЭЪ")
+_TEST_RUNTIME_MODES = frozenset({"demo", "development", "test", "unit"})
+
+
+def test_fake_trainer_requested() -> bool:
+    return os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def test_fake_trainer_enabled() -> bool:
+    runtime_mode = os.environ.get("PULSE_ENV", "demo").strip().lower()
+    return test_fake_trainer_requested() and runtime_mode in _TEST_RUNTIME_MODES
 
 
 def _digest(value: str) -> bytes:
@@ -454,7 +471,7 @@ class TrainingService:
                 sample_count=sample_count,
                 metrics={"required_samples": request.min_samples, "reason": "insufficient_feedback"},
             )
-        elif os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() not in {"1", "true", "yes"}:
+        elif not test_fake_trainer_enabled():
             response = TrainingResponse(
                 job_id=job_id,
                 state="TRAINER_NOT_CONFIGURED",
@@ -485,6 +502,9 @@ class TrainingService:
             )
         self.jobs[job_id] = response
         return response
+
+    def train_candidate(self, request: CandidateTrainingJob) -> CandidateTrainingResult:
+        return train_candidate_classifier(request)
 
     def get(self, job_id: str) -> TrainingResponse | None:
         return self.jobs.get(job_id)

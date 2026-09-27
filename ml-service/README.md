@@ -16,9 +16,10 @@
   история короче сезона помечается `INSUFFICIENT_HISTORY`;
   горизонты до 366 точек (30/60/90 поддерживаются параметром `horizon`);
 - `POST /internal/v1/anomaly` — rolling median/MAD anomaly detector;
-- `POST /internal/v1/training[/<model_type>]` — возвращает
-  `TRAINER_NOT_CONFIGURED` до подключения реального offline trainer; тестовый
-  адаптер доступен только при `PULSE_TEST_FAKE_TRAINER=true`;
+- `POST /internal/v1/training[/<model_type>]` — inline-sample helper; без
+  test-only fake отвечает `TRAINER_NOT_CONFIGURED`. Постоянный `TRAIN_CLASSIFIER`
+  job проверяет immutable candidate dataset и вызывает версионированный
+  Multinomial Naive Bayes trainer из `app.training`;
 - `POST /internal/v1/evaluation[/<model_type>]` — classifier/forecast/anomaly
   baseline metrics;
 - `GET /internal/v1/models` и `/internal/v1/models/<model_type>` — immutable

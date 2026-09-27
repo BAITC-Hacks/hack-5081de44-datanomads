@@ -256,6 +256,39 @@ class TrainingResponse(APIModel):
     manifest: dict[str, Any] = Field(default_factory=dict)
 
 
+class CandidateTrainingJob(APIModel):
+    schema_version: Literal["candidate-training-job.v1"]
+    cycle_id: str = Field(min_length=1, max_length=200)
+    candidate_model_version: str = Field(min_length=1, max_length=200)
+    candidate_dataset_version: str = Field(min_length=1, max_length=200)
+    production_model_version: str = Field(min_length=1, max_length=200)
+    training_config_version: Literal["classifier-training.v1"]
+    dataset_uri: str = Field(min_length=1)
+    dataset_checksum: str = Field(pattern=r"^[a-f0-9]{64}$")
+    dataset_manifest_uri: str = Field(min_length=1)
+    dataset_manifest_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    output_artifact_uri: str = Field(min_length=1)
+    min_samples: int = Field(ge=1)
+
+
+class CandidateTrainingResult(APIModel):
+    schema_version: Literal["candidate-training-result.v1"]
+    status: Literal["COMPLETED"]
+    cycle_id: str
+    candidate_model_version: str
+    candidate_dataset_version: str
+    production_model_version: str
+    training_config_version: Literal["classifier-training.v1"]
+    artifact_uri: str
+    artifact_checksum: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    manifest_uri: str
+    manifest_checksum: str = Field(pattern=r"^[a-f0-9]{64}$")
+    sample_count: int = Field(ge=1)
+    synthetic: bool
+    metrics: dict[str, int]
+    manifest: dict[str, Any]
+
+
 class EvaluationRequest(APIModel):
     model_type: str = "classifier"
     dataset_version: str = "demo-eval-v1"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -18,9 +19,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.schemas import EvaluationRequest, TrainingRequest
+from app.schemas import CandidateTrainingJob, EvaluationRequest, TrainingRequest
 from app.candidate_dataset import build_candidate_dataset, export_validated_feedback
-from app.services import make_services
+from app.services import make_services, test_fake_trainer_enabled, test_fake_trainer_requested
+from contracts import ContractValidationError, validate_document
 
 _CANDIDATE_DATASET_SCHEMA_VERSION = "candidate-training-dataset.v1"
 _CLASSIFIER_TRAINING_CONFIG_VERSION = "classifier-training.v1"
@@ -188,19 +190,32 @@ def safe_job_error(error: Exception) -> str:
         "VALIDATED_FEEDBACK_CHANGED",
         "FEEDBACK_LABELS_UNAVAILABLE",
         "PRODUCTION_BASELINE_MISMATCH",
+        "TEST_FAKE_TRAINER_NOT_ALLOWED",
         "SOURCE_TICKET_UNAVAILABLE",
         "SOURCE_TICKET_TEXT_UNAVAILABLE",
         "INSUFFICIENT_CANDIDATE_DATASET",
         "FEEDBACK_EXPORT_CHECKSUM_MISMATCH",
         "FEEDBACK_EXPORT_LINEAGE_MISMATCH",
         "CANDIDATE_DATASET_VERSION_CONFLICT",
+        "CANDIDATE_MODEL_VERSION_CONFLICT",
+        "CANDIDATE_TRAINING_FAILED",
+        "TRAINING_ARTIFACT_URI_NOT_LOCAL",
+        "CANDIDATE_ARTIFACT_URI_NOT_ALLOWED",
+        "CANDIDATE_DATASET_ARTIFACT_UNAVAILABLE",
+        "CANDIDATE_DATASET_MANIFEST_CHECKSUM_MISMATCH",
+        "CANDIDATE_DATASET_CHECKSUM_MISMATCH",
+        "CANDIDATE_DATASET_ARTIFACT_INVALID",
+        "CANDIDATE_DATASET_LINEAGE_MISMATCH",
+        "CANDIDATE_TRAINING_CONFIG_UNSUPPORTED",
+        "CANDIDATE_DATASET_TEXT_HAS_NO_TOKENS",
+        "CANDIDATE_ARTIFACT_WRITE_FAILED",
         "LEARNING_CYCLE_NOT_FOUND",
         "INVALID_CYCLE_ID",
         "INVALID_FEEDBACK_TIMESTAMP",
     }
     if isinstance(error, RuntimeError) and str(error) in safe_runtime_errors:
         return str(error)
-    if isinstance(error, (ValidationError, json.JSONDecodeError)):
+    if isinstance(error, (ValidationError, ContractValidationError, json.JSONDecodeError)):
         return "INVALID_JOB_PAYLOAD"
     return "JOB_FAILED"
 
@@ -220,18 +235,42 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
     candidate = result.get("candidate_model_version")
     manifest = result.get("manifest") or {}
     if candidate:
+        candidate_dataset_version = (
+            result.get("candidate_dataset_version")
+            or result.get("dataset_version")
+            or payload.get("candidate_dataset_version")
+            or payload.get("dataset_version")
+            or "unknown"
+        )
+        manifest_uri = result.get("manifest_uri")
+        if manifest_uri is None:
+            manifest_uri = manifest.get("artifact_uri")
         await pool.execute(
-            "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, 'classifier-baseline-candidate', $2, 'CANDIDATE', $3, $4) ON CONFLICT (model_version) DO UPDATE SET status = 'CANDIDATE', manifest_uri = EXCLUDED.manifest_uri, artifact_checksum = EXCLUDED.artifact_checksum",
+            "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, $2, $3, 'CANDIDATE', $4, $5) ON CONFLICT (model_version) DO UPDATE SET status = 'CANDIDATE', manifest_uri = EXCLUDED.manifest_uri, artifact_checksum = EXCLUDED.artifact_checksum",
             str(candidate),
-            str(result.get("dataset_version") or payload.get("dataset_version") or "unknown"),
-            json.dumps(manifest.get("artifact_uri")) if manifest.get("artifact_uri") else None,
+            str(manifest.get("model_family") or "classifier-baseline-candidate"),
+            str(candidate_dataset_version),
+            str(manifest_uri) if manifest_uri else None,
             manifest.get("artifact_checksum"),
         )
+    fake_trainer_used = manifest.get("implementation") == "test-fake-trainer"
     await pool.execute(
         "UPDATE learning_cycles SET state = 'EVALUATE', updated_at = now(), decision_note = $2 WHERE cycle_id = $1 OR id::text = $1",
         str(cycle_id),
-        "FAKE_TRAINER_COMPLETED" if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"} else "TRAINER_NOT_CONFIGURED",
+        "FAKE_TRAINER_COMPLETED" if fake_trainer_used else "TRAINING_COMPLETED",
     )
+
+
+def candidate_output_artifact_uri(cycle_id: str, model_version: str) -> str:
+    artifact_identity = hashlib.sha256(f"{cycle_id}\0{model_version}".encode("utf-8")).hexdigest()[:24]
+    artifact_path = (
+        Path(os.environ.get("MODEL_DIR", "/app/trained-artifacts"))
+        .resolve()
+        / "candidates"
+        / artifact_identity
+        / "classifier.json"
+    )
+    return artifact_path.as_uri()
 
 
 async def persist_candidate_dataset_and_queue_training(
@@ -263,6 +302,7 @@ async def persist_candidate_dataset_and_queue_training(
             if (
                 cycle["production_model_version"] != result["production_model_version"]
                 or cycle["candidate_model_version"] != result["candidate_model_version"]
+                or cycle["candidate_model_version"] == cycle["production_model_version"]
                 or cycle["frozen_evaluation_dataset_version"]
                 != result["frozen_evaluation_dataset_version"]
                 or request_payload.get("frozen_evaluation_dataset_version")
@@ -341,19 +381,23 @@ async def persist_candidate_dataset_and_queue_training(
                 raise RuntimeError("CANDIDATE_DATASET_VERSION_CONFLICT")
 
             training_payload = {
-                "kind": "training",
+                "schema_version": "candidate-training-job.v1",
                 "cycle_id": str(request_payload["cycle_id"]),
                 "candidate_model_version": str(cycle["candidate_model_version"] or "pending"),
-                "model_type": "classifier",
-                "dataset_version": str(result["dataset_version"]),
+                "candidate_dataset_version": str(result["dataset_version"]),
+                "production_model_version": str(cycle["production_model_version"]),
+                "training_config_version": _CLASSIFIER_TRAINING_CONFIG_VERSION,
                 "dataset_uri": str(result["artifact_uri"]),
                 "dataset_checksum": str(result["content_sha256"]),
                 "dataset_manifest_uri": str(result["manifest_uri"]),
                 "dataset_manifest_sha256": str(result["manifest_sha256"]),
-                "production_model_version": str(cycle["production_model_version"]),
-                "training_config_version": _CLASSIFIER_TRAINING_CONFIG_VERSION,
+                "output_artifact_uri": candidate_output_artifact_uri(
+                    str(request_payload["cycle_id"]),
+                    str(cycle["candidate_model_version"] or "pending"),
+                ),
                 "min_samples": int(cycle["min_feedback_count"]),
             }
+            validate_document(training_payload, "CandidateTrainingJob")
             await connection.execute(
                 """
                 INSERT INTO background_jobs (job_type, payload, state)
@@ -677,16 +721,37 @@ async def process_job(pool: Any, job: Any) -> None:
 
         _, _, _, _, _, trainer, evaluator = make_services()
         if kind == "train_classifier":
-            if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() not in {"1", "true", "yes"}:
-                raise RuntimeError("TRAINER_NOT_CONFIGURED")
-            # The fake trainer is an integration-test adapter only.  It creates
-            # a deterministic candidate artifact from one synthetic sample and
-            # is never enabled by the normal Compose profile.
-            if not payload.get("samples"):
-                payload["samples"] = [{"text": "test-only fake sample", "label": "unknown", "topic_id": "unknown"}]
-            payload["min_samples"] = 1
+            if test_fake_trainer_requested():
+                if not test_fake_trainer_enabled():
+                    raise RuntimeError("TEST_FAKE_TRAINER_NOT_ALLOWED")
+                fake_payload = {
+                    "model_type": "classifier",
+                    "dataset_version": payload.get("candidate_dataset_version", "test-only"),
+                    "samples": [
+                        {"text": "test-only synthetic sample", "label": "unknown"}
+                    ],
+                    "min_samples": 1,
+                    "candidate_model_version": payload.get("candidate_model_version"),
+                }
+                result = trainer.train(
+                    TrainingRequest.model_validate(fake_payload)
+                ).model_dump(mode="json")
+                result["candidate_model_version"] = str(
+                    payload.get("candidate_model_version") or result.get("candidate_model_version")
+                )
+                result.setdefault("manifest", {})["model_version"] = result[
+                    "candidate_model_version"
+                ]
+                result["manifest"]["implementation"] = "test-fake-trainer"
+                result["manifest"]["synthetic"] = True
+            else:
+                validate_document(payload, "CandidateTrainingJob")
+                training_job = CandidateTrainingJob.model_validate(payload)
+                result = trainer.train_candidate(training_job).model_dump(mode="json")
+                if result["status"] != "COMPLETED":
+                    raise RuntimeError("CANDIDATE_TRAINING_FAILED")
             kind = "training"
-        if kind in {"training", "train"}:
+        elif kind in {"training", "train"}:
             result = trainer.train(TrainingRequest.model_validate(payload)).model_dump(mode="json")
             if result["state"] == "TRAINER_NOT_CONFIGURED":
                 raise RuntimeError(result["state"])

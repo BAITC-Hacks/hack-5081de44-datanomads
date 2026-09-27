@@ -1,0 +1,14 @@
+{
+  "schema_version": "candidate-training-job.v1",
+  "cycle_id": "demo-cycle-014",
+  "candidate_model_version": "classifier-candidate-demo-014",
+  "candidate_dataset_version": "candidate-dataset-demo-cycle-014-aaaaaaaaaaaaaaaa",
+  "production_model_version": "classifier-demo-2026-09-21-001",
+  "training_config_version": "classifier-training.v1",
+  "dataset_uri": "file:///artifacts/datasets/candidate-dataset-demo-cycle-014.jsonl",
+  "dataset_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "dataset_manifest_uri": "file:///artifacts/datasets/candidate-dataset-demo-cycle-014.manifest.json",
+  "dataset_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "output_artifact_uri": "file:///artifacts/candidates/demo-014/classifier.json",
+  "min_samples": 1
+}

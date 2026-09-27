@@ -111,6 +111,8 @@ fake trainer включается отдельно и не считается р
 - bad CSV/invalid date/missing field отправляются в quarantine с причиной;
 - frozen evaluation IDs/version передаются candidate builder-у и не попадают в candidate train;
 - payload `TRAIN_CLASSIFIER` содержит только version/artifact references и не содержит ticket text;
+- normal `TRAIN_CLASSIFIER` job builds a checksummed candidate artifact and never changes the production pointer;
+- fake trainer is rejected when `PULSE_ENV=production`, and synthetic candidates cannot be promoted there;
 - candidate builder failure виден как `DATASET_BUILD_FAILED` и `background_jobs.FAILED`;
 - полный ticket text, IIN, phone, name, address и attachments отсутствуют в
   default logs;

@@ -1,0 +1,42 @@
+{
+  "schema_version": "candidate-training-result.v1",
+  "status": "COMPLETED",
+  "cycle_id": "demo-cycle-014",
+  "candidate_model_version": "classifier-candidate-demo-014",
+  "candidate_dataset_version": "candidate-dataset-demo-cycle-014-aaaaaaaaaaaaaaaa",
+  "production_model_version": "classifier-demo-2026-09-21-001",
+  "training_config_version": "classifier-training.v1",
+  "artifact_uri": "file:///artifacts/candidates/demo-014/classifier.json",
+  "artifact_checksum": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "manifest_uri": "file:///artifacts/candidates/demo-014/manifest.json",
+  "manifest_checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "sample_count": 3,
+  "synthetic": true,
+  "metrics": {"sample_count": 3, "class_count": 2, "vocabulary_size": 12},
+  "manifest": {
+    "schema_version": "classifier-manifest.v1",
+    "model_version": "classifier-candidate-demo-014",
+    "model_family": "multinomial-naive-bayes",
+    "base_model": null,
+    "dataset_version": "candidate-dataset-demo-cycle-014-aaaaaaaaaaaaaaaa",
+    "created_at": "2026-09-27T00:00:00Z",
+    "status": "CANDIDATE",
+    "artifact_kind": "TRAINED_ARTIFACT",
+    "artifact_uri": "file:///artifacts/candidates/demo-014/classifier.json",
+    "metrics": {"sample_count": 3, "class_count": 2, "vocabulary_size": 12},
+    "languages": ["RU"],
+    "labels": ["street_lighting", "water_supply"],
+    "training_config": {"version": "classifier-training.v1", "algorithm": "multinomial_naive_bayes", "alpha": 1.0},
+    "artifact_checksum": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "demo_artifact_id": null,
+    "evaluation_version": null,
+    "synthetic": true,
+    "implementation": "pulse109.multinomial-naive-bayes.v1",
+    "provenance": {
+      "cycle_id": "demo-cycle-014",
+      "production_model_version": "classifier-demo-2026-09-21-001",
+      "candidate_dataset_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "candidate_dataset_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  }
+}

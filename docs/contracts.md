@@ -14,6 +14,9 @@ validation does not import Rust Core, React, `data/**`, or training code.
 | `LearningFeedbackExport` | `learning-feedback-export.v1` | Validated ticket references, predictions and operator decisions |
 | `CandidateDatasetBuildRequest` | `candidate-dataset-build-request.v1` | Cycle, feedback references and frozen evaluation identifiers passed to the builder |
 | `CandidateDatasetManifest` | `candidate-dataset-manifest.v1` | Immutable candidate artifact version, checksum and source lineage |
+| `CandidateTrainingJob` | `candidate-training-job.v1` | Checksummed dataset reference, candidate/baseline versions and output location for the ML trainer |
+| `CandidateTrainingResult` | `candidate-training-result.v1` | Candidate artifact/manifest locations, checksums and training status |
+| `TrainedClassifierArtifact` | `trained-classifier-artifact.v1` | Versioned Naive Bayes parameters without copied training rows |
 | `CandidateEvaluation` | `candidate-evaluation.v1` | Offline/shadow evidence and policy decision state |
 | `ModelManifest` | `model-manifest.v1` | ML service model manifest envelope |
 
@@ -30,6 +33,12 @@ versions, and export artifact locations. The Data/ML builder resolves the
 referenced normalized tickets, excludes the frozen evaluation IDs, and writes
 the checksummed candidate artifact. Its manifest records the evaluation
 version and the exact ticket IDs retained for training.
+
+The ML worker validates the dataset artifact and manifest checksums before
+calling the versioned Data/ML trainer. Training writes a separate candidate
+classifier artifact and manifest; it does not change the production model
+pointer. The worker job and result contain only IDs, versions, artifact
+locations, checksums, and aggregate counts.
 
 Trained manifests require a `sha256:` checksum with 64 lowercase hexadecimal
 characters and an artifact URI. A deterministic baseline must instead declare

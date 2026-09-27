@@ -2,11 +2,11 @@
 """End-to-end acceptance flow for the PostgreSQL-backed Pulse 109 stack.
 
 This intentionally exercises the public contract instead of importing service
-internals.  It is safe to run repeatedly: every run uses a unique source and
-the import is checked for idempotency.  The normal worker is expected to leave
-the learning candidate at ``TRAINER_NOT_CONFIGURED``; when
-``PULSE_TEST_FAKE_TRAINER=true`` is enabled for an integration run, the same
-flow also verifies candidate promotion.
+internals. It is safe to run repeatedly: every run uses a unique source and
+the import is checked for idempotency. The normal worker trains a candidate;
+evaluation remains pending until the evaluation-window flow is configured.
+When ``PULSE_TEST_FAKE_TRAINER=true`` is enabled in demo/test mode, the same
+flow also verifies candidate promotion using explicitly test-only evidence.
 """
 
 from __future__ import annotations
@@ -358,10 +358,10 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         expect(status == 200 and promoted.get("state") == "PROMOTED", f"candidate promotion failed: {promoted}")
         learning_result = "PROMOTED_TEST_CANDIDATE"
     else:
-        expect(evaluation.get("offline_metrics", {}).get("status") == "TRAINER_NOT_CONFIGURED", f"unexpected normal-mode trainer result: {evaluation}")
-        status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e normal mode"}, role="ML_REVIEWER", timeout=timeout)
+        expect(evaluation.get("offline_metrics", {}).get("status") == "EVALUATION_NOT_AVAILABLE", f"normal worker did not produce a candidate: {evaluation}")
+        status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e evaluation pending"}, role="ML_REVIEWER", timeout=timeout)
         expect(status == 200 and rejected.get("state") == "REJECTED", f"candidate rejection failed: {rejected}")
-        learning_result = "TRAINER_NOT_CONFIGURED_AND_REJECTED"
+        learning_result = "TRAINED_CANDIDATE_EVALUATION_PENDING_AND_REJECTED"
 
     return {
         "source_system": source,

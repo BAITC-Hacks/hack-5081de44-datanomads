@@ -14,7 +14,8 @@ COLLECT → TRAINING → EVALUATE → DECISION
 - `COLLECT`: production продолжает обслуживать обращения; feedback только
   накапливается.
 - `TRAINING`: validated feedback проходит через Data/ML candidate dataset
-  builder; после регистрации checksum ставится offline training job.
+  builder, затем checksum-verified dataset обучается отдельным candidate
+  trainer; production остаётся serving.
 - `EVALUATE`: candidate работает shadow рядом с production на свежих данных;
   production остаётся serving.
 - `DECISION`: KPI и critical regressions доступны reviewer.
@@ -127,9 +128,18 @@ feedback IDs and the frozen evaluation version/IDs. The Data/ML builder writes
 an ID-only feedback export, resolves normalized ticket text from PostgreSQL,
 excludes the frozen evaluation IDs, then returns a candidate dataset version,
 artifact URI, and checksums. The ML worker registers that lineage and queues
-`TRAIN_CLASSIFIER` in one transaction. The persisted training job contains no
-ticket text or feedback comments. Builder errors mark the job `FAILED` and the
-cycle `DATASET_BUILD_FAILED` with a sanitized error code.
+`TRAIN_CLASSIFIER` in one transaction. That job points to the candidate dataset,
+production baseline, training config version, and output artifact URI. The ML
+package verifies both dataset checksums and writes a candidate model artifact
+with a versioned manifest. Training completion stores the model as `CANDIDATE`
+and advances the cycle to `EVALUATE`; it does not update the production pointer.
+Jobs contain no ticket text or feedback comments. Builder failures mark the
+cycle `DATASET_BUILD_FAILED`; trainer failures are stored as sanitized job and
+cycle error codes.
+
+The `PULSE_TEST_FAKE_TRAINER` adapter only runs in `demo`, `development`, `test`,
+or `unit` runtime modes. Synthetic candidate datasets cannot be promoted in
+production runtime.
 
 If no frozen evaluation dataset is configured, the build job fails visibly with
 `FROZEN_EVALUATION_SET_NOT_CONFIGURED`; the worker does not invent a holdout.

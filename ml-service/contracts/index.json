@@ -9,6 +9,9 @@
     "LearningFeedbackExport": "schemas/v1/learning-feedback-export.schema.json",
     "CandidateDatasetBuildRequest": "schemas/v1/candidate-dataset-build-request.schema.json",
     "CandidateDatasetManifest": "schemas/v1/candidate-dataset-manifest.schema.json",
+    "CandidateTrainingJob": "schemas/v1/candidate-training-job.schema.json",
+    "CandidateTrainingResult": "schemas/v1/candidate-training-result.schema.json",
+    "TrainedClassifierArtifact": "schemas/v1/trained-classifier-artifact.schema.json",
     "CandidateEvaluation": "schemas/v1/candidate-evaluation.schema.json",
     "ModelManifest": "schemas/v1/model-manifest.schema.json",
     "ModelMetadata": "schemas/v1/model-metadata.schema.json"

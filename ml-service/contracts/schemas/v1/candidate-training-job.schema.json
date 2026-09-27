@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/candidate-training-job.v1.json",
+  "title": "Pulse 109 CandidateTrainingJob v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "cycle_id",
+    "candidate_model_version",
+    "candidate_dataset_version",
+    "production_model_version",
+    "training_config_version",
+    "dataset_uri",
+    "dataset_checksum",
+    "dataset_manifest_uri",
+    "dataset_manifest_sha256",
+    "output_artifact_uri",
+    "min_samples"
+  ],
+  "properties": {
+    "schema_version": {"const": "candidate-training-job.v1"},
+    "cycle_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "candidate_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "candidate_dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "production_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "training_config_version": {"const": "classifier-training.v1"},
+    "dataset_uri": {"type": "string", "minLength": 1},
+    "dataset_checksum": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "dataset_manifest_uri": {"type": "string", "minLength": 1},
+    "dataset_manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "output_artifact_uri": {"type": "string", "minLength": 1},
+    "min_samples": {"type": "integer", "minimum": 1}
+  }
+}
