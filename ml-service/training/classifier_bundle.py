@@ -14,6 +14,7 @@ import transformers
 
 from app.confidence import ConfidencePolicy
 from app.schemas import ModelMetadata
+from training.atomic_publish import publish_directory
 from training.classifier_baselines import load_verified_classifier_package
 from training.classifier_candidate_eval import evaluate_candidate
 from training.contracts import ClassifierManifest
@@ -177,5 +178,5 @@ def build_classifier_bundle(package: Path, model_dir: Path, baseline_path: Path,
         )
         manifest.write(bundle / "manifest.json")
         verify_classifier_bundle(bundle)
-        bundle.rename(output)
+        publish_directory(bundle, output)
     return manifest

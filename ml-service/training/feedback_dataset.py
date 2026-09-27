@@ -7,12 +7,14 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
+from training.atomic_publish import publish_directory
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum, normalized_text
 from training.contracts import _checksum
@@ -365,41 +367,46 @@ def build_candidate(
     if report["status"] != "COMPLETED":
         return report
     destination = output_root / dataset_version
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError("candidate dataset already exists")
     output_root.mkdir(parents=True, exist_ok=True)
-    destination.mkdir(parents=True, exist_ok=False)
-    train_path = destination / "train.jsonl"
-    with train_path.open("x", encoding="utf-8", newline="\n") as stream:
-        for sample in accepted:
-            stream.write(json.dumps(sample, ensure_ascii=False, sort_keys=True) + "\n")
-    accepted_feedback_ids = {row["feedback_id"] for row in accepted}
-    contract_versions = {record.contract_version for record in latest if record.feedback_id in accepted_feedback_ids}
-    manifest = {
-        "manifest_version": "feedback-candidate.v1",
-        "source_contract_version": (next(iter(contract_versions)) if len(contract_versions) == 1
-                                    else "learning-feedback-export.mixed.v1"),
-        "candidate_dataset_version": dataset_version,
-        "cycle_id": cycle_id,
-        "production_model_version": production_model_version,
-        "record_count": len(accepted),
-        "minimum_feedback_count": min_feedback_count,
-        "source_feedback_sha256": report["source_feedback_sha256"],
-        "source_feedback_ids": sorted(row["feedback_id"] for row in accepted),
-        "source_dataset_versions": sorted({row["source_dataset_version"] for row in accepted
-                                           if row.get("source_dataset_version") is not None}),
-        "origin_counts": dict(sorted(Counter("synthetic" if row["is_synthetic"] else "real" for row in accepted).items())),
-        "rejected_counts": report["rejected_counts"],
-        "frozen_package": frozen,
-        "split_policy": "exported_split_group_frozen_id_text_exclusion.v1",
-        "train_sha256": checksum(train_path),
-    }
-    runtime_ticket_ids = sorted(row["ticket_id"] for row in accepted
-                                if row.get("source_origin_kind") == "RUNTIME_API")
-    if runtime_ticket_ids:
-        manifest["runtime_ticket_ids"] = runtime_ticket_ids
-    canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    manifest["content_sha256"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    with (destination / "manifest.json").open("x", encoding="utf-8") as stream:
-        json.dump(manifest, stream, ensure_ascii=False, indent=2, sort_keys=True)
-        stream.write("\n")
-    report["content_sha256"] = manifest["content_sha256"]
-    return report
+    with TemporaryDirectory(prefix=f".{dataset_version}-", dir=output_root) as stage_root:
+        package = Path(stage_root) / dataset_version
+        package.mkdir()
+        train_path = package / "train.jsonl"
+        with train_path.open("x", encoding="utf-8", newline="\n") as stream:
+            for sample in accepted:
+                stream.write(json.dumps(sample, ensure_ascii=False, sort_keys=True) + "\n")
+        accepted_feedback_ids = {row["feedback_id"] for row in accepted}
+        contract_versions = {record.contract_version for record in latest if record.feedback_id in accepted_feedback_ids}
+        manifest = {
+            "manifest_version": "feedback-candidate.v1",
+            "source_contract_version": (next(iter(contract_versions)) if len(contract_versions) == 1
+                                        else "learning-feedback-export.mixed.v1"),
+            "candidate_dataset_version": dataset_version,
+            "cycle_id": cycle_id,
+            "production_model_version": production_model_version,
+            "record_count": len(accepted),
+            "minimum_feedback_count": min_feedback_count,
+            "source_feedback_sha256": report["source_feedback_sha256"],
+            "source_feedback_ids": sorted(row["feedback_id"] for row in accepted),
+            "source_dataset_versions": sorted({row["source_dataset_version"] for row in accepted
+                                               if row.get("source_dataset_version") is not None}),
+            "origin_counts": dict(sorted(Counter("synthetic" if row["is_synthetic"] else "real" for row in accepted).items())),
+            "rejected_counts": report["rejected_counts"],
+            "frozen_package": frozen,
+            "split_policy": "exported_split_group_frozen_id_text_exclusion.v1",
+            "train_sha256": checksum(train_path),
+        }
+        runtime_ticket_ids = sorted(row["ticket_id"] for row in accepted
+                                    if row.get("source_origin_kind") == "RUNTIME_API")
+        if runtime_ticket_ids:
+            manifest["runtime_ticket_ids"] = runtime_ticket_ids
+        canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        manifest["content_sha256"] = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        with (package / "manifest.json").open("x", encoding="utf-8") as stream:
+            json.dump(manifest, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+        report["content_sha256"] = manifest["content_sha256"]
+        publish_directory(package, destination)
+        return report

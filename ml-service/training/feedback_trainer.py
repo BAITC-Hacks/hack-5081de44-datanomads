@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from app.confidence import POLICY_VERSION
 from app.classifier_input import encode_classifier_texts
 from app.trained_classifier import TrainedClassifierService
+from training.atomic_publish import publish_directory
 from training.dataset_builder import checksum
 from training.feedback_dataset import ID_RE, load_verified_candidate
 
@@ -130,7 +131,7 @@ def train_feedback_candidate(
             raise CandidateTrainingError("CANDIDATE_SANITY_FAILED") from error
         if output.exists() or output.is_symlink():
             raise FileExistsError("candidate model artifact already exists")
-        artifact.rename(output)
+        publish_directory(artifact, output)
     return {"status": "COMPLETED", "candidate_model_version": candidate_model_version,
             "dataset_version": manifest.candidate_dataset_version,
             "dataset_content_sha256": manifest.content_sha256,

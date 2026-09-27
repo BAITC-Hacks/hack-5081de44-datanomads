@@ -6,7 +6,9 @@ from pathlib import Path
 import tempfile
 import unittest
 import unicodedata
+from unittest.mock import patch
 
+from training.atomic_publish import publish_directory
 from training.dataset_builder import checksum
 from training.feedback_dataset import build_candidate, load_verified_candidate
 from training.tests.test_dataset_builder import build_fixture_package, fixture_inputs
@@ -73,6 +75,33 @@ class FeedbackCandidateTests(unittest.TestCase):
             cycle_id="cycle_1", production_model_version="classifier_production_v1",
             dataset_version="candidate_v1", min_feedback_count=minimum,
         )
+
+    def test_manifest_write_failure_leaves_no_published_package_and_can_retry(self) -> None:
+        write_jsonl(self.input, [feedback(1)])
+        output_root = self.root / "out"
+        with patch("training.feedback_dataset.json.dump", side_effect=RuntimeError("manifest write failed")):
+            with self.assertRaisesRegex(RuntimeError, "manifest write failed"):
+                self.build(output_root)
+
+        self.assertEqual(list(output_root.iterdir()), [])
+        self.assertEqual(self.build(output_root)["status"], "COMPLETED")
+        self.assertTrue((output_root / "candidate_v1/manifest.json").is_file())
+
+    def test_concurrent_destination_is_not_replaced(self) -> None:
+        write_jsonl(self.input, [feedback(1)])
+        output_root = self.root / "out"
+
+        def occupy_destination(stage: Path, destination: Path) -> None:
+            destination.mkdir()
+            (destination / "existing.txt").write_text("keep", encoding="utf-8")
+            publish_directory(stage, destination)
+
+        with patch("training.feedback_dataset.publish_directory", side_effect=occupy_destination):
+            with self.assertRaises(FileExistsError):
+                self.build(output_root)
+
+        self.assertEqual(sorted(path.name for path in output_root.iterdir()), ["candidate_v1"])
+        self.assertEqual((output_root / "candidate_v1/existing.txt").read_text(encoding="utf-8"), "keep")
 
     def test_candidate_is_reproducible_and_uses_operator_label(self) -> None:
         write_jsonl(self.input, [feedback(2, confirmed_topic="electricity"), feedback(1)])

@@ -19,6 +19,7 @@ import torch.nn.functional as functional
 from transformers import AutoModel, AutoTokenizer
 
 from data.normalization.pii import scan_pii
+from training.atomic_publish import publish_directory
 from training.classifier_baselines import load_verified_classifier_package
 from training.contracts import EmbedderManifest
 from training.dataset_builder import checksum
@@ -293,7 +294,7 @@ def train_embedder_candidate(package: Path, base_model: Path, baseline_report: P
         verify_embedder_candidate(artifact, load_model=False)
         if output.exists() or output.is_symlink():
             raise FileExistsError("embedder candidate artifact already exists")
-        artifact.rename(output)
+        publish_directory(artifact, output)
     return {"status": "COMPLETED", "model_version": model_version, "dataset_version": manifest.dataset_version,
             "artifact_checksum": weight_checksum, "artifact_uri": str(output.resolve()),
             "embedding_dimension": dimension, "promotion_status": "PENDING_HUMAN_REVIEW"}
