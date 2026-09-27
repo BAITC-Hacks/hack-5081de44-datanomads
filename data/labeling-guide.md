@@ -72,3 +72,12 @@ unchanged candidate, source scenario facts and both input checksums. Approval
 requires explicit positive checks for facts, label, language and style. Keep
 the human review queue as evidence for its SHA-256 reference in the exported
 classifier rows. These synthetic texts are not original citizen appeals.
+
+## Review retrieval relations
+
+Retrieval relevance is a separate judgment from the classifier topic. Use the
+relation meanings and manual queue in `docs/retrieval-gold-pilot.md` for the
+synthetic pilot. Keep all candidates for one query in a single relation group;
+record a decision for every pair before export so metrics never treat an
+unreviewed candidate as irrelevant. The three-group pilot is `PENDING`, not a
+human-reviewed gold set.

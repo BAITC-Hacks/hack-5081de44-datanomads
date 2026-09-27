@@ -34,6 +34,12 @@ checksum and the same review provenance. Both inputs require
 `review_status=APPROVED`, reviewer ID, aware timestamp and a SHA-256 evidence
 reference. `PENDING` demo candidates are rejected.
 
+The synthetic retrieval pilot source and its manual review/export workflow are
+documented in [`docs/retrieval-gold-pilot.md`](../../docs/retrieval-gold-pilot.md).
+Use the unchanged source file as `--relation-source` when the human-approved
+export is eventually passed to the dataset builder. The pilot has no approved
+labels yet and is insufficient for quality claims.
+
 ```bash
 .venv/bin/python scripts/build_training_dataset.py \
   --classifier /path/to/reviewed_classifier.jsonl \
