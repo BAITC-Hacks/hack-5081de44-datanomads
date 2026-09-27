@@ -16,6 +16,7 @@ from scripts.review_retrieval_relations import prepare as prepare_retrieval
 from scripts.review_synthetic_classifier import CHECKS as CLASSIFIER_CHECKS
 from scripts.review_synthetic_classifier import export_approved as export_classifier
 from scripts.review_synthetic_classifier import prepare as prepare_classifier
+from training import dataset_builder
 from training.dataset_builder import build_package, checksum
 
 
@@ -145,6 +146,25 @@ def build_fixture_package(inputs: tuple, output_root: Path, dataset_version: str
 
 
 class DatasetBuilderTests(unittest.TestCase):
+    def test_failed_write_leaves_no_published_package_and_can_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = fixture_inputs(root, groups_per_topic=3, retrieval_groups=3, prefix="interrupted")
+            output_root = root / "output"
+            write_jsonl = dataset_builder._write_jsonl
+
+            def fail_after_write(path: Path, rows: list[dict]) -> None:
+                write_jsonl(path, rows)
+                raise RuntimeError("write failed")
+
+            with patch.object(dataset_builder, "_write_jsonl", side_effect=fail_after_write):
+                with self.assertRaisesRegex(RuntimeError, "write failed"):
+                    build_fixture_package(inputs, output_root, "dataset_v1", "eval_v1", 109)
+
+            self.assertEqual(list(output_root.iterdir()), [])
+            build_fixture_package(inputs, output_root, "dataset_v1", "eval_v1", 109)
+            self.assertTrue((output_root / "dataset_v1/manifest.json").is_file())
+
     def test_repeated_build_has_same_membership_and_frozen_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

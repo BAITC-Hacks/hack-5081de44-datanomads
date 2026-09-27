@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import random
 import re
+from tempfile import TemporaryDirectory
 import unicodedata
 from typing import Literal
 
@@ -18,6 +19,7 @@ from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
 from scripts.review_retrieval_relations import approved_records as approved_retrieval_records
 from scripts.review_synthetic_classifier import approved_records as approved_classifier_records
+from training.atomic_publish import publish_directory
 from training.contracts import DatasetManifest
 
 
@@ -312,8 +314,8 @@ def build_package(
                 any(normalized_text(value) in frozen_texts for row in retrieval for value in (row.query_text, row.candidate_text))):
             raise ValueError("candidate text duplicates frozen evaluation text")
 
-    output = output_root / dataset_version
-    if output.exists():
+    destination = output_root / dataset_version
+    if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"dataset package already exists: {dataset_version}")
     if output_root.exists():
         for existing_path in output_root.iterdir():
@@ -328,94 +330,98 @@ def build_package(
             if existing.frozen_evaluation_sha256 != previous_manifest.frozen_evaluation_sha256:
                 raise ValueError("frozen evaluation version has conflicting content")
 
-    output.mkdir(parents=True, exist_ok=False)
-    (output / "classifier").mkdir()
-    (output / "retrieval").mkdir()
-    file_rows = {
-        f"classifier/{split}.jsonl": classifier_splits[split] for split in SPLITS
-    } | {
-        f"retrieval/{split}_pairs.jsonl": retrieval_splits[split] for split in SPLITS
-    }
-    for name, rows in file_rows.items():
-        _write_jsonl(output / name, rows)
-    file_checksums = {name: checksum(output / name) for name in sorted(file_rows)}
-    if frozen is None:
-        frozen = {
-            "version": frozen_evaluation_version,
-            "classifier_ids": sorted(row["variant_id"] for row in classifier_splits["test"]),
-            "classifier_groups": sorted({row["scenario_id"] for row in classifier_splits["test"]}),
-            "retrieval_pair_ids": sorted(row["pair_id"] for row in retrieval_splits["test"]),
-            "retrieval_groups": sorted({row["relation_group"] for row in retrieval_splits["test"]}),
-            "retrieval_entity_ids": sorted({row[field] for row in retrieval_splits["test"] for field in ("query_id", "candidate_id")}),
-            "file_checksums": {name: file_checksums[name] for name in ("classifier/test.jsonl", "retrieval/test_pairs.jsonl")},
+    output_root.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=f".{dataset_version}-", dir=output_root) as stage_dir:
+        output = Path(stage_dir) / dataset_version
+        output.mkdir()
+        (output / "classifier").mkdir()
+        (output / "retrieval").mkdir()
+        file_rows = {
+            f"classifier/{split}.jsonl": classifier_splits[split] for split in SPLITS
+        } | {
+            f"retrieval/{split}_pairs.jsonl": retrieval_splits[split] for split in SPLITS
         }
-    frozen_path = output / "frozen_evaluation.json"
-    frozen_path.write_text(json.dumps(frozen, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    membership = {
-        "classifier": {split: sorted(row["variant_id"] for row in classifier_splits[split]) for split in SPLITS},
-        "retrieval": {split: sorted(row["pair_id"] for row in retrieval_splits[split]) for split in SPLITS},
-        "classifier_groups": {split: sorted({row["scenario_id"] for row in classifier_splits[split]}) for split in SPLITS},
-        "retrieval_groups": {split: sorted({row["relation_group"] for row in retrieval_splits[split]}) for split in SPLITS},
-    }
-    membership_path = output / "membership.json"
-    membership_path.write_text(json.dumps(membership, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    all_classifier = [row for split in SPLITS for row in classifier_splits[split]]
-    all_retrieval = [row for split in SPLITS for row in retrieval_splits[split]]
-    audit = {
-        "synthetic": True,
-        "review_status": "APPROVED",
-        "classifier_counts": {split: len(classifier_splits[split]) for split in SPLITS},
-        "retrieval_counts": {split: len(retrieval_splits[split]) for split in SPLITS},
-        "relation_labels": dict(sorted(Counter(row["relation_label"] for row in all_retrieval).items())),
-        "cross_split_classifier_groups": 0,
-        "cross_split_retrieval_groups": 0,
-        "cross_split_entity_ids": 0,
-        "frozen_exclusion_passed": frozen is not None,
-    }
-    audit_path = output / "audit.json"
-    audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    sources = {
-        "classifier_reviewed": checksum(classifier_path),
-        "classifier_candidates": checksum(classifier_candidates),
-        "classifier_review": checksum(classifier_review),
-        "retrieval_reviewed": checksum(retrieval_path),
-        "retrieval_review": checksum(retrieval_review),
-        "scenario_source": scenario_checksum,
-        "relation_source": relation_checksum,
-    }
-    lineage = {}
-    if previous_manifest is not None:
-        sources["frozen_package"] = checksum(frozen_from / "manifest.json")
-        lineage["parent_dataset_version"] = previous_manifest.dataset_version
-    content = hashlib.sha256()
-    for name, digest in sorted(file_checksums.items()):
-        content.update(f"{name}\0{digest}\n".encode("utf-8"))
-    for name, digest in (("membership.json", checksum(membership_path)), ("frozen_evaluation.json", checksum(frozen_path)), ("audit.json", checksum(audit_path))):
-        content.update(f"{name}\0{digest}\n".encode("utf-8"))
-    manifest = DatasetManifest(
-        dataset_version=dataset_version,
-        schema_version="unified-ticket.v1",
-        created_at=datetime.now(timezone.utc),
-        synthetic=True,
-        seed=seed,
-        sources=sorted(sources),
-        source_checksums=sources,
-        record_count=len(all_classifier),
-        quarantine_count=0,
-        languages=dict(Counter(row["language"] for row in all_classifier)),
-        topics=dict(Counter(row["topic_id"] for row in all_classifier)),
-        regions=dict(Counter(row["region_id"] or "UNSPECIFIED" for row in all_classifier)),
-        split_policy="synthetic_scenario_and_relation_group.v1",
-        split_group_key="scenario_id|relation_group",
-        frozen_evaluation_version=frozen_evaluation_version,
-        pii_policy_version="pii-minimization.v1",
-        content_sha256="sha256:" + content.hexdigest(),
-        retrieval_pair_count=len(all_retrieval),
-        split_file_checksums=file_checksums,
-        membership_sha256=checksum(membership_path),
-        frozen_evaluation_sha256=checksum(frozen_path),
-        audit_sha256=checksum(audit_path),
-        lineage=lineage,
-    )
-    manifest.write(output / "manifest.json")
-    return manifest
+        for name, rows in file_rows.items():
+            _write_jsonl(output / name, rows)
+        file_checksums = {name: checksum(output / name) for name in sorted(file_rows)}
+        if frozen is None:
+            frozen = {
+                "version": frozen_evaluation_version,
+                "classifier_ids": sorted(row["variant_id"] for row in classifier_splits["test"]),
+                "classifier_groups": sorted({row["scenario_id"] for row in classifier_splits["test"]}),
+                "retrieval_pair_ids": sorted(row["pair_id"] for row in retrieval_splits["test"]),
+                "retrieval_groups": sorted({row["relation_group"] for row in retrieval_splits["test"]}),
+                "retrieval_entity_ids": sorted({row[field] for row in retrieval_splits["test"] for field in ("query_id", "candidate_id")}),
+                "file_checksums": {name: file_checksums[name] for name in ("classifier/test.jsonl", "retrieval/test_pairs.jsonl")},
+            }
+        frozen_path = output / "frozen_evaluation.json"
+        frozen_path.write_text(json.dumps(frozen, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        membership = {
+            "classifier": {split: sorted(row["variant_id"] for row in classifier_splits[split]) for split in SPLITS},
+            "retrieval": {split: sorted(row["pair_id"] for row in retrieval_splits[split]) for split in SPLITS},
+            "classifier_groups": {split: sorted({row["scenario_id"] for row in classifier_splits[split]}) for split in SPLITS},
+            "retrieval_groups": {split: sorted({row["relation_group"] for row in retrieval_splits[split]}) for split in SPLITS},
+        }
+        membership_path = output / "membership.json"
+        membership_path.write_text(json.dumps(membership, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        all_classifier = [row for split in SPLITS for row in classifier_splits[split]]
+        all_retrieval = [row for split in SPLITS for row in retrieval_splits[split]]
+        audit = {
+            "synthetic": True,
+            "review_status": "APPROVED",
+            "classifier_counts": {split: len(classifier_splits[split]) for split in SPLITS},
+            "retrieval_counts": {split: len(retrieval_splits[split]) for split in SPLITS},
+            "relation_labels": dict(sorted(Counter(row["relation_label"] for row in all_retrieval).items())),
+            "cross_split_classifier_groups": 0,
+            "cross_split_retrieval_groups": 0,
+            "cross_split_entity_ids": 0,
+            "frozen_exclusion_passed": frozen is not None,
+        }
+        audit_path = output / "audit.json"
+        audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        sources = {
+            "classifier_reviewed": checksum(classifier_path),
+            "classifier_candidates": checksum(classifier_candidates),
+            "classifier_review": checksum(classifier_review),
+            "retrieval_reviewed": checksum(retrieval_path),
+            "retrieval_review": checksum(retrieval_review),
+            "scenario_source": scenario_checksum,
+            "relation_source": relation_checksum,
+        }
+        lineage = {}
+        if previous_manifest is not None:
+            sources["frozen_package"] = checksum(frozen_from / "manifest.json")
+            lineage["parent_dataset_version"] = previous_manifest.dataset_version
+        content = hashlib.sha256()
+        for name, digest in sorted(file_checksums.items()):
+            content.update(f"{name}\0{digest}\n".encode("utf-8"))
+        for name, digest in (("membership.json", checksum(membership_path)), ("frozen_evaluation.json", checksum(frozen_path)), ("audit.json", checksum(audit_path))):
+            content.update(f"{name}\0{digest}\n".encode("utf-8"))
+        manifest = DatasetManifest(
+            dataset_version=dataset_version,
+            schema_version="unified-ticket.v1",
+            created_at=datetime.now(timezone.utc),
+            synthetic=True,
+            seed=seed,
+            sources=sorted(sources),
+            source_checksums=sources,
+            record_count=len(all_classifier),
+            quarantine_count=0,
+            languages=dict(Counter(row["language"] for row in all_classifier)),
+            topics=dict(Counter(row["topic_id"] for row in all_classifier)),
+            regions=dict(Counter(row["region_id"] or "UNSPECIFIED" for row in all_classifier)),
+            split_policy="synthetic_scenario_and_relation_group.v1",
+            split_group_key="scenario_id|relation_group",
+            frozen_evaluation_version=frozen_evaluation_version,
+            pii_policy_version="pii-minimization.v1",
+            content_sha256="sha256:" + content.hexdigest(),
+            retrieval_pair_count=len(all_retrieval),
+            split_file_checksums=file_checksums,
+            membership_sha256=checksum(membership_path),
+            frozen_evaluation_sha256=checksum(frozen_path),
+            audit_sha256=checksum(audit_path),
+            lineage=lineage,
+        )
+        manifest.write(output / "manifest.json")
+        publish_directory(output, destination)
+        return manifest

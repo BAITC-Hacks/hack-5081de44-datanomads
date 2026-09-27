@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import ctypes
 import errno
 import fcntl
 import hashlib
@@ -16,6 +15,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Iterator
 
 from app.schemas import ModelMetadata
+from training.atomic_publish import publish_directory
 from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum
 from training.classifier_pair_eval import CriticalRegressionPolicy, compare_classifiers
@@ -134,21 +134,14 @@ def _cycle_lock(root: Path, cycle_id: str) -> Iterator[None]:
 
 
 def _publish_directory(stage: Path, destination: Path) -> None:
-    """Linux renameat2 makes publication atomic without replacing an existing cycle."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = getattr(libc, "renameat2", None)
-    if renameat2 is None:
-        raise FeedbackJobError("ATOMIC_PUBLISH_UNAVAILABLE")
-    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                          ctypes.c_char_p, ctypes.c_uint)
-    renameat2.restype = ctypes.c_int
-    if renameat2(-100, os.fsencode(stage), -100, os.fsencode(destination), 1) != 0:
-        code = ctypes.get_errno()
-        if code in (errno.ENOSYS, errno.EINVAL):
-            raise FeedbackJobError("ATOMIC_PUBLISH_UNAVAILABLE")
-        if code == errno.EEXIST:
-            raise FeedbackJobError("TRAINING_CYCLE_EXISTS")
-        raise OSError(code, os.strerror(code))
+    try:
+        publish_directory(stage, destination)
+    except OSError as error:
+        if error.errno in (errno.ENOSYS, errno.EINVAL):
+            raise FeedbackJobError("ATOMIC_PUBLISH_UNAVAILABLE") from None
+        if error.errno == errno.EEXIST:
+            raise FeedbackJobError("TRAINING_CYCLE_EXISTS") from None
+        raise
 
 
 def _result_for_cycle(artifact_dir: Path, published_dir: Path, training_result: dict, offline: dict,
