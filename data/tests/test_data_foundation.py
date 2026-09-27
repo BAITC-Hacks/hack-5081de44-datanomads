@@ -19,7 +19,7 @@ from data.normalization import minimize_text, scan_pii
 from data.normalization.pipeline import normalize_row
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS, canonical_topic_id
 from data.schemas.unified_ticket import UnifiedTicket
-from scripts.data_audit import build_report, build_source_report
+from scripts.data_audit import build_normalized_report, build_report, build_source_report
 from scripts.generate_synthetic_sources import SPECS, generate as generate_synthetic_sources
 from scripts import import_tickets
 
@@ -382,6 +382,18 @@ class DemoFixtureTests(unittest.TestCase):
 
 
 class DataAuditTests(unittest.TestCase):
+    def test_normalized_duplicate_ids_are_scoped_to_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tickets.jsonl"
+            rows = [
+                {"source_system": "aikey", "external_ticket_id": "shared", "created_at": "2026-01-01"},
+                {"source_system": "ikomek109", "external_ticket_id": "shared", "created_at": "2026-01-01"},
+                {"source_system": "aikey", "external_ticket_id": "shared", "created_at": "2026-01-02"},
+            ]
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            report = build_normalized_report(path)
+        self.assertEqual(report["duplicate_external_id_count"], 1)
+
     def test_source_report_is_aggregate_and_marks_unverified_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

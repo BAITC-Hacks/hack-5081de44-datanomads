@@ -65,7 +65,7 @@ def build_normalized_report(path: Path) -> Dict[str, Any]:
             created.append(datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00")))
         except (KeyError, TypeError, ValueError):
             invalid_dates += 1
-    ids = [str(row["external_ticket_id"]) for row in valid]
+    ids = [(str(row.get("source_system", "UNKNOWN")), str(row["external_ticket_id"])) for row in valid]
     report = {
         "path": str(path),
         "record_count": len(records),

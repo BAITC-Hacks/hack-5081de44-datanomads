@@ -142,6 +142,24 @@ is required so synthetic reports cannot silently look like real evidence.
 Alias and label semantics remain unverified until a real export is inspected
 and reviewed.
 
+Build the normalized package from all seven synthetic fixtures after the
+[synthetic quality report](reports/synthetic_source_quality_v1.json) has been
+reproduced. Choose a new output directory for each run:
+
+```bash
+python3 scripts/build_synthetic_source_corpus.py \
+  --output-dir /tmp/pulse109-synthetic-source-verify-v1
+```
+
+The current local package is under ignored `data/processed/synthetic_source_v1/` with
+`tickets.jsonl`, redacted `quarantine.jsonl`, `audit.json`, and `manifest.json`.
+Its [versioned manifest](manifests/synthetic-source-normalized-v1.json) records
+checksums and `approved_for_training=false`. It exercises the seven importers
+and UnifiedTicket privacy boundary; it is not a customer corpus or a reviewed
+classifier/retrieval dataset.
+The normalized audit checks ticket IDs within each `source_system`, matching
+the source-local meaning of `external_ticket_id`.
+
 ## PostgreSQL
 
 The Core migration runner applies all numbered files in `migrations/` in order.
