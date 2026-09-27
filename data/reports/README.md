@@ -1,4 +1,29 @@
-# Evidence from two local regional 109 CSV exports
+# Data Quality evidence
+
+## Synthetic importer quality gate
+
+The [synthetic source quality report](synthetic_source_quality_v1.json) audits all
+28 raw fixtures for seven source-specific importers. Its 35 valid tickets and
+35 quarantined rows include seven examples of each expected quarantine reason:
+`BAD_CSV_STRUCTURE`, `INVALID_DATE`, `INVALID_VALUE`,
+`MISSING_REQUIRED_FIELD`, and `UNKNOWN_SCHEMA`. Seven accepted tickets had
+known PII patterns redacted. The report stores aggregate counts, distributions,
+schema fingerprints and input checksums; it contains no ticket text or raw
+rows. All profiles are `SYNTHETIC_TEST_ONLY`; these results are importer
+checks, not customer Data Quality or model training evidence.
+`PII_REVIEW` is covered separately by a sensitive source-ID sentinel test;
+these raw fixtures exercise safe redaction of text instead.
+
+Regenerate into new temporary paths and compare the JSON reports:
+
+```bash
+python3 scripts/generate_synthetic_sources.py --output-dir /tmp/pulse109-sources-v1 --check
+python3 scripts/audit_synthetic_sources.py \
+  --manifest /tmp/pulse109-sources-v1/manifest.json \
+  --output /tmp/pulse109-synthetic-quality.json
+```
+
+## Customer exports
 
 These reports were regenerated on 2026-09-27 from two customer-provided regional
 CSV files for Eastern Kazakhstan and Almaty Region. The raw files remain outside

@@ -78,6 +78,20 @@ class UnifiedTicketTests(unittest.TestCase):
         self.assertNotIn("Иван Иванов", encoded)
         self.assertEqual(result.quarantine.reason, "INVALID_DATE")
 
+    def test_sensitive_source_identifier_is_quarantined_without_leaking_it(self) -> None:
+        result = normalize_row(
+            {
+                "external_ticket_id": "ИИН 900101123456",
+                "region_id": "Астана",
+                "created_at": "2026-01-01",
+                "original_text": "Не горит фонарь",
+            },
+            source_system="ikomek109",
+        )
+        self.assertIsNone(result.ticket)
+        self.assertEqual(result.quarantine.reason, "PII_REVIEW")
+        self.assertNotIn("900101123456", json.dumps(result.quarantine.to_dict(), ensure_ascii=False))
+
     def test_quarantine_does_not_serialize_unknown_sensitive_fields(self) -> None:
         result = get_importer("AIKEY").import_rows([{
             "appealId": "synthetic-1", "region": "Астана", "registeredAt": "bad",

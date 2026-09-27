@@ -1,0 +1,588 @@
+{
+  "fixture_manifest_sha256": "bd863ad9cc15dcc7afa5c119961d09f2c997325163ce070762614e17628c63e3",
+  "purpose": "importer and quality-gate validation only; not customer or training evidence",
+  "report_version": "synthetic-source-quality.v1",
+  "source_count": 7,
+  "sources": [
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "ikomek109/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "e369cd9d66079c420c10f4dc1dc4218155e4b66d1eb5f83fefc4eefcf2a8c502"
+          ],
+          "source_format": "csv",
+          "source_sha256": "cde67775a5dc9a9a3a917554c6ad0a7139eb7ddffd795285e1270ee127b71455",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "ikomek109/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "82be50bad63f77bd25d7e8cc541df618e0d31a1e40e2a3e8fabb72b1c9284228",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "ikomek109/primary.csv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "e53773deef25db20a6af5dba05934082ee2fcdf97ac4d449762c86025fcbbdbe"
+          ],
+          "source_format": "csv",
+          "source_sha256": "46f0de8f34cdab32ea363f8499710b705b2e66125a0bd060a8a128945f451d64",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "ikomek109/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "ikomek109"
+    },
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "as_komek109/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "b087467d9d8f5a17e2c255bd9a75ab01c7cb5dcc36a8773064521fe451ae56ab"
+          ],
+          "source_format": "csv",
+          "source_sha256": "57580e63029efb92e94ad04ef06ca46c7ad8e4fa47efad57776cba4fcd96bd86",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "as_komek109/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "56789b24ff8c2600f7d861ba4603bf0e7575fdc4c24686e7ebfc6b50856fa6ca",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "as_komek109/primary.csv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "56fd53422a3ca59df09d8d29ff711ccd6d110e394f4f2a8f84863fde2b094134"
+          ],
+          "source_format": "csv",
+          "source_sha256": "9da541c43bb72735b2e44e807a31116e246c5880881b5e42f0fe530a0b74a181",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "as_komek109/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "as_komek109"
+    },
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "aikey/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "21735b7c225fac3d410b80b82ef2cebf625d2c6159024029fe9c0791be78c949"
+          ],
+          "source_format": "csv",
+          "source_sha256": "cf3b2414d801d8369b2c144e4f468ec18ba5500569bda58bd99187edddc5bea9",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "aikey/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "8cc19c4bbbb6abac33b14237bcc462c3204f8ba186ab200030ea7f3310b91ad4",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "aikey/primary.csv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "7bfc8ad6f67007c73adb62d4da0a25d149d6dcb457b8877fbc8d4aa21ca632ca"
+          ],
+          "source_format": "csv",
+          "source_sha256": "8898d7fcec14a1862e5e88a3f1e7cff3661525c9f504c356835d09bbbbda1152",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "aikey/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "aikey"
+    },
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "open_city/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "7478bdc4b028d391948c1e278eb96c03779c9b4d67cfb9226186452920aeca0b"
+          ],
+          "source_format": "csv",
+          "source_sha256": "cbc5d1e815a4f0a5207556bd57ddb432509c679c324bd84235954c5c221b0569",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "open_city/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "d60df3ad288bec5b3518507de0932663334470fde722d5117ea9daa7fa1f296d",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "open_city/primary.tsv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "6c2ba5703b39ca2f35acd743c18307d3f29603ee42aaeea8d08d77f1aa5f38f2"
+          ],
+          "source_format": "tsv",
+          "source_sha256": "5b81f4cbe91a0b26cf89c22cc627da3b83d9ab2d5dd8da8941ca03e708dcdefa",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "open_city/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "open_city"
+    },
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "e_sep_su/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "9a13987c712372ab67e226f95689bdeee32dce3c616b489efe759213b9a5d85e"
+          ],
+          "source_format": "csv",
+          "source_sha256": "e36cd5c67fd9cf9737fa2642fb173a6d52976351f8b00df67a0bedaf20f4d371",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "e_sep_su/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "a2d2a03b9c2bafe9b8a83b078f6a6cfd69748f7d4be39e1b55bfa83ea7ddb592",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "e_sep_su/primary.csv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "263c47dd53a7b8eefab5c3b86dd9013b04847914bb55c42a6999da095e99dc78"
+          ],
+          "source_format": "csv",
+          "source_sha256": "0f2d7e605d569cce119e780a0b04db69d78e2abb8e0c025f22ced09d00018397",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "e_sep_su/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "e_sep_su"
+    },
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "ekc109/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "c639fa77e992206371a2958d3332ad98b20de2e23af2709d47c088850e4fe7d7"
+          ],
+          "source_format": "csv",
+          "source_sha256": "2b10c86d609498d7b7b1e85a8797ae6a172b613176d8aaef26a8007d47644a84",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "ekc109/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "d99391da63200453baf0469cf291f84a40092376ec5f47f592ed37c09af38f7f",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "ekc109/primary.tsv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "c56c65363610627cd40439282cd8902b9ca60f7fb978729c0ce08c7c49f5cf86"
+          ],
+          "source_format": "tsv",
+          "source_sha256": "6407c40dc38b89139eb9f91b081e11c666ee3edde98c1a3d71c9218161308960",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "ekc109/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "ekc109"
+    },
+    {
+      "files": {
+        "alternate": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "rdjardem3/alternate.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 0,
+          "quarantine_reasons": {},
+          "schema_fingerprints": [
+            "7b6f918b7d92c42c6d3615aa0b9cc73e2dd9c3b6ad298f349bd0b67175b83f8c"
+          ],
+          "source_format": "csv",
+          "source_sha256": "ae95d7ff273931c6cae84a82c4115026fa414a0c7bad708ee48690442bdcff0b",
+          "valid_record_count": 1
+        },
+        "malformed": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 1,
+          "observed_record_count": 1,
+          "path": "rdjardem3/malformed.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "BAD_CSV_STRUCTURE": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "0be1f75a707d02b811dbe40de6d4ba407adc9a6a06606b8b35ff221d548b3b16",
+          "valid_record_count": 0
+        },
+        "primary": {
+          "duplicate_external_id_count": 1,
+          "invalid_date_count": 1,
+          "malformed_csv_count": 0,
+          "observed_record_count": 7,
+          "path": "rdjardem3/primary.csv",
+          "pii_redacted_ticket_count": 1,
+          "quarantine_count": 3,
+          "quarantine_reasons": {
+            "INVALID_DATE": 1,
+            "INVALID_VALUE": 1,
+            "MISSING_REQUIRED_FIELD": 1
+          },
+          "schema_fingerprints": [
+            "93de6d8c356e4964663e524cbc8e1dc27d1f4e9a1680a256f71bcfe4eabd6098"
+          ],
+          "source_format": "csv",
+          "source_sha256": "483a12256d05257e507031e12bc2ffcd0dd8597c4c6658229760b98beb5afcb8",
+          "valid_record_count": 4
+        },
+        "unknown": {
+          "duplicate_external_id_count": 0,
+          "invalid_date_count": 0,
+          "malformed_csv_count": 0,
+          "observed_record_count": 1,
+          "path": "rdjardem3/unknown.csv",
+          "pii_redacted_ticket_count": 0,
+          "quarantine_count": 1,
+          "quarantine_reasons": {
+            "UNKNOWN_SCHEMA": 1
+          },
+          "schema_fingerprints": [],
+          "source_format": "csv",
+          "source_sha256": "9ff37c969d15a45eb9eb37295c695390d3b78d2fb131337c24cbbc7329acf77a",
+          "valid_record_count": 0
+        }
+      },
+      "profile_status": "SYNTHETIC_TEST_ONLY",
+      "profile_version": "synthetic-aliases.v1",
+      "source_system": "rdjardem3"
+    }
+  ],
+  "synthetic": true,
+  "totals": {
+    "by_language": {
+      "RU": 35
+    },
+    "by_region": {
+      "KZ-ASTANA": 35
+    },
+    "by_source_system": {
+      "aikey": 5,
+      "as_komek109": 5,
+      "e_sep_su": 5,
+      "ekc109": 5,
+      "ikomek109": 5,
+      "open_city": 5,
+      "rdjardem3": 5
+    },
+    "by_status": {
+      "OPEN": 21,
+      "UNKNOWN": 14
+    },
+    "by_topic": {
+      "street_lighting": 21,
+      "unknown": 7,
+      "water_supply": 7
+    },
+    "duplicate_external_id_count": 7,
+    "duplicate_repeat_gold_set_available": false,
+    "file_count": 28,
+    "label_ground_truth": "UNSUITABLE_SYNTHETIC",
+    "observed_record_count": 70,
+    "pii_redacted_ticket_count": 7,
+    "quarantine_count": 35,
+    "quarantine_reasons": {
+      "BAD_CSV_STRUCTURE": 7,
+      "INVALID_DATE": 7,
+      "INVALID_VALUE": 7,
+      "MISSING_REQUIRED_FIELD": 7,
+      "UNKNOWN_SCHEMA": 7
+    },
+    "time_range": {
+      "max": "2026-01-08T00:00:00+00:00",
+      "min": "2026-01-02T00:00:00+00:00"
+    },
+    "valid_field_presence": {
+      "closed_at": 0,
+      "original_text": 35,
+      "priority": 0,
+      "resolution_text": 0,
+      "service_raw": 0,
+      "status": 21,
+      "topic_raw": 35
+    },
+    "valid_ticket_count": 35
+  }
+}
