@@ -76,7 +76,7 @@ def build_normalized_report(path: Path) -> Dict[str, Any]:
 
 def build_109_csv_report(path: Path) -> Dict[str, Any]:
     """Count only structural properties; never serialize source field values."""
-    required = {"application_number", "creation_date", "category", "service", "com_exp"}
+    required = {"application_number", "creation_date", "category", "service"}
     with path.open(encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         headers = reader.fieldnames or []

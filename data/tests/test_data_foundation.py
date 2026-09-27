@@ -281,6 +281,19 @@ class DataAuditTests(unittest.TestCase):
         for sensitive in ("Иван Иванов", "ФИО:", "ticket-1", "private@example.com", "secret"):
             self.assertNotIn(sensitive, encoded)
 
+    def test_raw_csv_report_does_not_require_com_exp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["application_number", "creation_date", "category", "service"])
+                writer.writerow(["ticket-1", "01.02.2025 12:30:00", "Дороги", "Ремонт"])
+            report = build_report(path)
+
+        self.assertEqual(report["record_count"], 1)
+        self.assertNotIn("com_exp", report["nonempty_by_column"])
+        self.assertFalse(report["has_original_text_column"])
+
 
 class MigrationTests(unittest.TestCase):
     def test_postgres_migrations_include_source_of_truth_tables(self) -> None:

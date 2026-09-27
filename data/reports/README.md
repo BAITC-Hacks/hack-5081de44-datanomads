@@ -33,6 +33,7 @@ regional datasets, with no asserted mapping to the seven operational
 `source_system` profiles. Neither export is a reviewed classifier or retrieval
 corpus. `category`, `service` and `contractor` need separate semantic review
 before training or routing use. Neither layout has an explicit priority column.
+The CSV audit counts `com_exp` when present but does not require it.
 
 To reproduce with the same local files:
 
