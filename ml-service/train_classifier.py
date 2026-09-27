@@ -38,8 +38,8 @@ def read_split(path: Path, split: str) -> list[dict[str, str]]:
     for row in rows:
         if row.get("split") != split or row.get("topic_id") not in LABELS:
             raise ValueError(f"invalid split or label in {path}")
-        if row.get("language") not in {"RU", "KZ"} or row.get("synthetic") is not True:
-            raise ValueError(f"expected synthetic RU/KZ rows in {path}")
+        if row.get("language") not in {"RU", "KZ", "MIXED"} or row.get("synthetic") is not True:
+            raise ValueError(f"expected synthetic RU/KZ/MIXED rows in {path}")
         if not row.get("text") or not row.get("scenario_id"):
             raise ValueError(f"missing text or scenario_id in {path}")
     return rows
@@ -48,6 +48,7 @@ def read_split(path: Path, split: str) -> list[dict[str, str]]:
 def validate_splits(splits: dict[str, list[dict[str, str]]]) -> None:
     seen_scenarios: set[str] = set()
     seen_texts: set[str] = set()
+    expected_languages: set[str] | None = None
     for name, rows in splits.items():
         scenarios = {row["scenario_id"] for row in rows}
         texts = {normalized_text(row["text"]) for row in rows}
@@ -55,8 +56,12 @@ def validate_splits(splits: dict[str, list[dict[str, str]]]) -> None:
             raise ValueError(f"scenario or text leakage into {name}")
         if {row["topic_id"] for row in rows} != set(LABELS):
             raise ValueError(f"missing class in {name}")
-        if {row["language"] for row in rows} != {"RU", "KZ"}:
-            raise ValueError(f"missing language in {name}")
+        languages = {row["language"] for row in rows}
+        if not {"RU", "KZ"}.issubset(languages) or not languages <= {"RU", "KZ", "MIXED"}:
+            raise ValueError(f"missing or unsupported language in {name}")
+        if expected_languages is not None and languages != expected_languages:
+            raise ValueError(f"inconsistent languages in {name}")
+        expected_languages = languages
         seen_scenarios.update(scenarios)
         seen_texts.update(texts)
 
@@ -424,7 +429,9 @@ def main() -> None:
             },
             "confident_enabled": confidence_policy.confident_enabled,
             "confidence_policy_evidence": policy_evidence,
-            "languages": ["RU", "KZ", "MIXED"] if args.reviewed_dataset else ["RU", "KZ"],
+            "languages": (["RU", "KZ", "MIXED"] if args.reviewed_dataset else
+                          [language for language in ("RU", "KZ", "MIXED")
+                           if language in {row["language"] for row in splits["train"]}]),
             "labels": list(LABELS),
             "training_config": {
                 "epochs": args.epochs,

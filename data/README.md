@@ -116,6 +116,21 @@ checksums separately from the 6,400 class-labeled rows. These proposals
 require human review before they can serve as challenge evaluation evidence;
 they are never included in train, validation or test splits by this generator.
 
+For MIXED-language pipeline checks, build `classifier_v3` from the additional
+versioned `sdg/classifier_mixed_scenarios.tsv` bank:
+
+```bash
+python3 scripts/generate_synthetic_classifier.py \
+  --mixed-bank data/sdg/classifier_mixed_scenarios.tsv \
+  --output-dir /tmp/pulse109-classifier-v3-rebuild
+```
+
+The local ignored `data/sdg/generated/classifier_v3/` package has 6,448 rows:
+the v2 RU/KZ rows plus 48 MIXED rows, one per topic and split. Its checksums
+are recorded in `manifests/synthetic-classifier-test-v3.json`. Every row remains
+`PENDING` and `approved_for_training=false`; v3 tests language handling and
+does not replace the reviewed training package.
+
 Import a real (uncommitted) source export:
 
 ```bash

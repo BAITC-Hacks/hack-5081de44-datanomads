@@ -35,7 +35,8 @@
 
 Корпус генерируется отдельно; файлы и веса остаются локальными и не попадают
 в Git. `classifier_v1` добавлял неподтверждённое время к части текстов;
-для нового обучения используйте только `classifier_v2`. Для установленной RTX 3060:
+для локального synthetic demo используйте `classifier_v2` (RU/KZ) или
+`classifier_v3` (RU/KZ/MIXED). Для установленной RTX 3060:
 
 ```bash
 uv venv --python 3.11 .venv
@@ -55,6 +56,10 @@ uv pip install --python .venv/bin/python transformers==4.57.6 -r ml-service/requ
 на реальных обращениях 109. Температура вероятностей подбирается на
 validation, но калибровка на реальных данных отсутствует. Поэтому все
 подсказки обученного кандидата требуют проверки оператора (`needs_review=true`).
+
+Demo trainer также принимает локальный `data/sdg/generated/classifier_v3/` через
+`--demo-data-dir` и сохраняет MIXED slice в метриках и manifest. Этот набор
+остаётся `PENDING` и не подходит для reviewed training.
 
 Локальный API с обученной моделью:
 

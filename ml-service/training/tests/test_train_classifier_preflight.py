@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import torch
 
-from train_classifier import LABELS, calibration_report, load_reviewed_splits, score, validate_splits
+from train_classifier import LABELS, calibration_report, load_reviewed_splits, read_split, score, validate_splits
+from scripts.generate_synthetic_classifier import MIXED_BANK, generate
 from training.classifier_token_audit import audit_token_lengths
 from test_dataset_builder import build_fixture_package, fixture_inputs
 
@@ -19,6 +20,16 @@ class StubTokenizer:
 
 
 class TrainClassifierPreflightTests(unittest.TestCase):
+    def test_demo_v3_splits_include_mixed_language(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "classifier-v3"
+            generate(output, mixed_bank_path=MIXED_BANK)
+            splits = {name: read_split(output / f"{name}.jsonl", name)
+                      for name in ("train", "validation", "test")}
+            validate_splits(splits)
+            self.assertTrue(all({row["language"] for row in rows} == {"RU", "KZ", "MIXED"}
+                                for rows in splits.values()))
+
     def test_demo_split_rejects_canonically_equivalent_text(self) -> None:
         splits = {
             name: [
