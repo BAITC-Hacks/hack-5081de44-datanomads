@@ -59,7 +59,7 @@ def write_jsonl(records: list[QuarantineRecord], path: Path) -> None:
     """Write a deterministic, inspectable quarantine artifact."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
+    with path.open("x", encoding="utf-8", newline="\n") as handle:
         for record in records:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
 

@@ -37,10 +37,15 @@ def main() -> int:
     parser.add_argument("--synthetic", action="store_true")
     args = parser.parse_args()
 
+    paths = (args.input.resolve(), args.output.resolve(), args.quarantine.resolve())
+    if len(set(paths)) != 3 or any(path.exists() or path.is_symlink() for path in
+                                   (args.output, args.quarantine)):
+        parser.error("input, output and quarantine paths must differ; output paths must be new")
+
     importer = get_importer(args.source)
     result = importer.import_file(args.input)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8", newline="\n") as handle:
+    with args.output.open("x", encoding="utf-8", newline="\n") as handle:
         for ticket in result.tickets:
             handle.write(json.dumps(ticket.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
     write_jsonl(result.quarantine, args.quarantine)

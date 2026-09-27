@@ -3,7 +3,10 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -265,6 +268,40 @@ class ImporterTests(unittest.TestCase):
         )
         self.assertEqual(result.valid_count, 1)
         self.assertEqual(result.duplicate_external_ids, ["same"])
+
+
+class ImportCliTests(unittest.TestCase):
+    def test_import_creates_outputs_once_and_preserves_existing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.csv"
+            source.write_text(
+                "appealId,region,registeredAt,messageText\n"
+                "one,Астана,2026-01-01,Текст\n", encoding="utf-8",
+            )
+            output = root / "normalized.jsonl"
+            quarantine = root / "quarantine.jsonl"
+            command = [sys.executable, str(ROOT / "scripts/import_tickets.py"),
+                       "--source", "AIKEY", str(source), "--output", str(output),
+                       "--quarantine", str(quarantine)]
+            environment = {key: value for key, value in os.environ.items() if key != "PULSE_CORE_URL"}
+            first = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            saved_output = output.read_bytes()
+            saved_quarantine = quarantine.read_bytes()
+
+            repeated = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
+            self.assertEqual(repeated.returncode, 2)
+            self.assertEqual(output.read_bytes(), saved_output)
+            self.assertEqual(quarantine.read_bytes(), saved_quarantine)
+
+            next_output = root / "next.jsonl"
+            blocked = subprocess.run([*command[:5], "--output", str(next_output),
+                                      "--quarantine", str(quarantine)],
+                                     cwd=ROOT, env=environment, capture_output=True, text=True)
+            self.assertEqual(blocked.returncode, 2)
+            self.assertFalse(next_output.exists())
+            self.assertEqual(quarantine.read_bytes(), saved_quarantine)
 
 
 class DemoFixtureTests(unittest.TestCase):
