@@ -151,3 +151,12 @@ recall and detection delay unset because no incident ground truth was supplied.
 The unit is one region's total per day, not region × reviewed topic × time;
 missing days are treated as zero pending source-quality verification. This
 exploration cannot establish a runtime alert threshold.
+
+## Feedback candidate dataset
+
+`scripts/build_feedback_candidate.py` validates an explicit
+`learning-feedback-export.v1` JSONL, excludes frozen test IDs/groups/text and
+writes an immutable offline candidate package only after the configured
+minimum feedback count. Operator-confirmed topic is the sole training label;
+prediction is retained separately. Contract, command and current Core export
+gap are documented in [`docs/feedback-candidate-dataset.md`](../../docs/feedback-candidate-dataset.md).
