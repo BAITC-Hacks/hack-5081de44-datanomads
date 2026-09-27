@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from data.importers import get_importer
+
 AUDIT_COLUMNS = {
     "application_number", "creation_date", "closing_date", "region", "district",
     "street", "full_name", "applicant_number", "application_type",
@@ -147,7 +149,62 @@ def build_109_csv_report(path: Path) -> Dict[str, Any]:
     }
 
 
-def build_report(path: Path) -> Dict[str, Any]:
+def build_source_report(path: Path, source_system: str, *, synthetic: bool) -> Dict[str, Any]:
+    """Audit a source export via its importer without serializing source values."""
+    importer = get_importer(source_system)
+    result = importer.import_file(path)
+    created = [ticket.created_at for ticket in result.tickets]
+    reasons = Counter(row.reason for row in result.quarantine)
+    fields = ("original_text", "topic_raw", "service_raw", "priority", "status", "closed_at", "resolution_text")
+    completeness = {
+        field: sum(getattr(ticket, field) not in (None, "", "UNKNOWN", "unknown") for ticket in result.tickets)
+        for field in fields
+    }
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "format": "source_export",
+        "synthetic": synthetic,
+        "source_system": result.source_system,
+        "source_sha256": digest.hexdigest(),
+        "source_format": path.suffix.lower().lstrip("."),
+        "encoding_attempted": "utf-8-sig" if path.suffix.lower() in {".csv", ".tsv", ".json", ".jsonl", ".ndjson"} else None,
+        "delimiter": "\\t" if path.suffix.lower() == ".tsv" else importer.csv_delimiter if path.suffix.lower() == ".csv" else None,
+        "profile_version": result.profile_version,
+        "profile_status": result.profile_status,
+        "schema_fingerprints": sorted(set(result.schema_fingerprints)),
+        "observed_record_count": result.valid_count + result.quarantine_count,
+        "valid_record_count": result.valid_count,
+        "quarantine_count": result.quarantine_count,
+        "quarantine_reasons": dict(sorted(reasons.items())),
+        "duplicate_external_id_count": len(result.duplicate_external_ids),
+        "invalid_date_count": reasons["INVALID_DATE"],
+        "malformed_csv_count": reasons["BAD_CSV_STRUCTURE"],
+        "shifted_column_assessment": "UNVERIFIED_SEMANTICS",
+        "time_range": {
+            "min": min(created).isoformat() if created else None,
+            "max": max(created).isoformat() if created else None,
+        },
+        "by_region": dict(sorted(Counter(ticket.region_id for ticket in result.tickets).items())),
+        "by_source_system": {result.source_system: result.valid_count},
+        "by_topic": dict(sorted(Counter(ticket.topic_id for ticket in result.tickets).items())),
+        "by_language": dict(sorted(Counter(ticket.language for ticket in result.tickets).items())),
+        "by_status": dict(sorted(Counter(ticket.status for ticket in result.tickets).items())),
+        "valid_field_presence": completeness,
+        "pii_redacted_ticket_count": sum(ticket.text_redaction_count > 0 for ticket in result.tickets),
+        "pii_quarantine_count": reasons["PII_REVIEW"],
+        "duplicate_repeat_gold_set_available": False,
+        "label_semantics": "UNVERIFIED_SEMANTICS",
+    }
+
+
+def build_report(path: Path, *, source_system: str | None = None, synthetic: bool | None = None) -> Dict[str, Any]:
+    if source_system:
+        if synthetic is None:
+            raise ValueError("source audit requires an explicit synthetic or real origin")
+        return build_source_report(path, source_system, synthetic=synthetic)
     if path.suffix.lower() == ".csv":
         return build_109_csv_report(path)
     return build_normalized_report(path)
@@ -157,8 +214,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--source", help="source system for source-specific raw export audit")
+    origin = parser.add_mutually_exclusive_group()
+    origin.add_argument("--synthetic", action="store_true", help="mark a source audit as synthetic")
+    origin.add_argument("--real", action="store_true", help="mark a source audit as real input")
     args = parser.parse_args()
-    report = build_report(args.input)
+    if args.source and not (args.synthetic or args.real):
+        parser.error("--source requires --synthetic or --real")
+    if (args.synthetic or args.real) and not args.source:
+        parser.error("--synthetic/--real requires --source")
+    report = build_report(args.input, source_system=args.source,
+                          synthetic=args.synthetic if args.source else None)
     serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

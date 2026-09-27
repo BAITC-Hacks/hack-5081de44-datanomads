@@ -12,7 +12,7 @@ from data.normalization import minimize_text, scan_pii
 from data.normalization.pipeline import normalize_row
 from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
 from data.schemas.unified_ticket import UnifiedTicket
-from scripts.data_audit import build_report
+from scripts.data_audit import build_report, build_source_report
 from scripts.generate_synthetic_sources import SPECS, generate as generate_synthetic_sources
 
 
@@ -80,6 +80,25 @@ class UnifiedTicketTests(unittest.TestCase):
         self.assertNotIn("Персональный тестовый секрет", encoded)
         self.assertNotIn("private@example.invalid", encoded)
         self.assertNotIn("secret_contact", encoded)
+
+    def test_optional_text_and_precise_location_are_minimized(self) -> None:
+        result = normalize_row({
+            "external_ticket_id": "synthetic-safe-1",
+            "region_id": "Астана",
+            "created_at": "2026-01-01",
+            "original_text": "Нет воды",
+            "topic_raw": "Водоснабжение synthetic@example.invalid",
+            "district": "Район, телефон +7 700 000-00-00",
+            "official_response": "Ответ на synthetic@example.invalid",
+            "coordinates": {"latitude": 51.1, "longitude": 71.4},
+        }, source_system="AIKEY")
+        self.assertTrue(result.valid)
+        encoded = json.dumps(result.ticket.to_dict(), ensure_ascii=False)
+        self.assertNotIn("synthetic@example.invalid", encoded)
+        self.assertNotIn("+7 700 000-00-00", encoded)
+        self.assertNotIn("51.1", encoded)
+        self.assertEqual(result.ticket.topic_id, "water_supply")
+        self.assertGreaterEqual(result.ticket.text_redaction_count, 3)
 
 
 class ImporterTests(unittest.TestCase):
@@ -211,6 +230,22 @@ class DemoFixtureTests(unittest.TestCase):
 
 
 class DataAuditTests(unittest.TestCase):
+    def test_source_report_is_aggregate_and_marks_unverified_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = generate_synthetic_sources(root, check=True)
+            source = manifest["sources"][0]
+            path = root / source["files"]["primary"]["path"]
+            report = build_source_report(path, source["source_system"], synthetic=True)
+        self.assertEqual((report["valid_record_count"], report["quarantine_count"]), (4, 3))
+        self.assertEqual(report["quarantine_reasons"], {"INVALID_DATE": 1, "INVALID_VALUE": 1, "MISSING_REQUIRED_FIELD": 1})
+        self.assertEqual(report["pii_redacted_ticket_count"], 1)
+        self.assertEqual(report["label_semantics"], "UNVERIFIED_SEMANTICS")
+        self.assertTrue(report["synthetic"])
+        encoded = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("synthetic@example.invalid", encoded)
+        self.assertNotIn("У дома не горит фонарь", encoded)
+
     def test_raw_csv_report_contains_counts_without_source_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.csv"

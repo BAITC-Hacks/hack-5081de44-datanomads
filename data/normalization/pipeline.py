@@ -114,6 +114,14 @@ def normalize_row(
                 SchemaValidationError("MISSING_REQUIRED_FIELD", f"{field_name} is required", field_name),
             )
 
+    if scan_pii(row.get("external_ticket_id")).detected:
+        return _quarantine(
+            canonical_source,
+            row_number,
+            row,
+            SchemaValidationError("PII_REVIEW", "source identifier may contain PII", "external_ticket_id"),
+        )
+
     try:
         region_id = canonical_region_id(row.get("region_id"))
         if not region_id:
@@ -125,15 +133,18 @@ def normalize_row(
         if not text:
             raise SchemaValidationError("MISSING_REQUIRED_FIELD", "original_text is empty", "original_text")
         language = canonical_language(row.get("language"), text)
-        topic_raw = str(row.get("topic_raw") or "UNKNOWN").strip() or "UNKNOWN"
-        topic_id = canonical_topic_id(row.get("topic_id") or topic_raw)
-        service_raw = str(row.get("service_raw") or "").strip() or None
-        if service_raw:
-            service_raw, service_report = minimize_text(service_raw)
+        safe_text = {}
+        for field_name in ("topic_raw", "service_raw", "district", "object", "channel", "resolution_text", "official_response"):
+            value = row.get(field_name)
+            safe_value, report = minimize_text(value) if value else ("", PIIReport())
+            safe_text[field_name] = safe_value or None
             pii_report = PIIReport(
-                tuple(dict.fromkeys(pii_report.categories + service_report.categories)),
-                pii_report.redaction_count + service_report.redaction_count,
+                tuple(dict.fromkeys(pii_report.categories + report.categories)),
+                pii_report.redaction_count + report.redaction_count,
             )
+        topic_raw = safe_text["topic_raw"] or "UNKNOWN"
+        topic_id = canonical_topic_id(row.get("topic_id") or topic_raw)
+        service_raw = safe_text["service_raw"]
         address = row.get("address")
         if address:
             # Exact addresses are not needed by the safe layer.  Keep an
@@ -153,15 +164,17 @@ def normalize_row(
                 "service_id": row.get("service_id") or _service_id(service_raw),
                 "priority": canonical_priority(row.get("priority")),
                 "status": canonical_status(row.get("status")),
-                "district": row.get("district"),
+                "district": safe_text["district"],
                 "address": address,
-                "coordinates": row.get("coordinates"),
-                "object": row.get("object"),
-                "channel": row.get("channel"),
+                # Precise coordinates can identify a household; this layer
+                # only needs the region and optional district.
+                "coordinates": None,
+                "object": safe_text["object"],
+                "channel": safe_text["channel"],
                 "closed_at": closed_at,
                 "deadline_at": deadline_at,
-                "resolution_text": row.get("resolution_text"),
-                "official_response": row.get("official_response"),
+                "resolution_text": safe_text["resolution_text"],
+                "official_response": safe_text["official_response"],
                 # Attachments are metadata-only in the unified layer.  Their
                 # contents must never be copied to ML/analytics-safe data.
                 "attachments": (),
@@ -179,12 +192,14 @@ def normalize_row(
         # A residual match means the source contains a PII form this safe
         # masker does not understand.  Keep the row visible in quarantine for
         # a source-specific rule rather than silently leaking it downstream.
-        residual = scan_pii(ticket.original_text)
-        if residual.detected:
+        residual_categories = [category for value in (
+            ticket.original_text, ticket.topic_raw, ticket.service_raw, ticket.district,
+            ticket.object, ticket.channel, ticket.resolution_text, ticket.official_response,
+        ) for category in scan_pii(value).categories]
+        if residual_categories:
             raise SchemaValidationError(
                 "PII_REVIEW",
-                "PII remains after minimization: " + ", ".join(residual.categories),
-                "original_text",
+                "PII remains after minimization: " + ", ".join(dict.fromkeys(residual_categories)),
             )
         return NormalizationResult(ticket=ticket)
     except SchemaValidationError as error:

@@ -59,7 +59,8 @@ Quarantine rows keep only column/nonempty counts, reason and row number; raw
 headers and values are not copied to reports or Core. Known phones, IINs,
 e-mail addresses, labeled names/addresses and attachments are replaced with
 typed tokens or removed from normalized text. A residual PII match is
-quarantined for source-specific review.
+quarantined for source-specific review. Optional text fields use the same
+minimization, and precise coordinates are omitted from the safe layer.
 
 ## Deterministic demo dataset
 
@@ -108,7 +109,20 @@ python scripts/import_tickets.py \
 
 The importer exits with status `2` when any row is quarantined, so a job cannot
 mistake a partial load for a clean import. `scripts/data_audit.py` produces a
-quality report with coverage, duplicates, dates and distributions.
+quality report with coverage, duplicates, dates and distributions. For a raw
+source export, pass `--source` so the report uses the relevant importer. Add
+`--synthetic` for generated fixtures:
+
+```bash
+python3 scripts/data_audit.py data/synthetic_raw/v1/ikomek109/primary.csv \
+  --source iKOMEK109 --synthetic --output /tmp/pulse109-source-audit.json
+```
+
+The report contains aggregate counts and a source checksum, never source row
+values. For a real local export, use `--real` with `--source`. The origin flag
+is required so synthetic reports cannot silently look like real evidence.
+Alias and label semantics remain unverified until a real export is inspected
+and reviewed.
 
 ## PostgreSQL
 
