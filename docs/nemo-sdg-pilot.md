@@ -61,6 +61,44 @@ prompt, model ID и seed запроса к локальной LLM. `variant_id` 
 он не доказывает детерминизм sampler Data Designer и полного повторного запуска.
 Это **не готовый обучающий корпус**.
 
+## Человеческая проверка кандидатов
+
+Для этого пилота создайте очередь в игнорируемом Git каталоге. Исходные
+`candidates.jsonl` и `pilot_scenarios.jsonl` нужны и при дальнейшей проверке:
+
+```bash
+python3 scripts/review_synthetic_classifier.py prepare \
+  --candidates /path/to/candidates.jsonl \
+  --output data/reviews/sdg-pilot-review.jsonl
+```
+
+В каждой строке очереди `candidate` и `scenario_facts_ru` неизменяемы.
+Рецензент сравнивает текст с фактами ситуации и заполняет `decision`,
+`reviewer_id`, `reviewed_at` с часовым поясом, `review_reason` и `checks`.
+Для `APPROVED` нужен `review_reason="VERIFIED"` и `true` для всех шести
+проверок: качества scenario facts, сохранения фактов, отсутствия выдуманных
+фактов, правильности темы, языка и стиля. Для `REJECTED` или `DEFERRED`
+указывается причина из допустимых кодов. Исходные поля, включая `PENDING`,
+не меняются. Очередь должна содержать решение или сохранённый `PENDING`
+для каждого кандидата.
+
+```bash
+python3 scripts/review_synthetic_classifier.py validate \
+  data/reviews/sdg-pilot-review.jsonl \
+  --candidates /path/to/candidates.jsonl
+python3 scripts/review_synthetic_classifier.py export \
+  data/reviews/sdg-pilot-review.jsonl \
+  --candidates /path/to/candidates.jsonl \
+  --output data/reviews/sdg-pilot-approved.jsonl
+```
+
+Экспорт содержит только одобренные строки в формате classifier dataset
+builder. Поле `review_evidence_sha256` ссылается на checksum полной очереди
+решений; храните этот файл вместе с исходными кандидатами и scenarios.
+Скрипт проверяет привязку к ним, полноту очереди, базовые форматы PII и
+provenance, но не подменяет смысловую оценку человека. До ручной проверки
+экспорт невозможен.
+
 ## Проверки
 
 [`pulse_sdg.py`](../scripts/pulse_sdg.py) до обращения к модели проверяет, что

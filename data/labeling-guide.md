@@ -65,3 +65,10 @@ Generated `PENDING` records cannot enter the final training dataset. A human
 review must record provenance and a decision before any `APPROVED` variant is
 eligible. The existing synthetic classifier demo remains a pending candidate,
 not a reviewed gold set.
+
+For NeMo pilot candidates, use `scripts/review_synthetic_classifier.py` as
+described in `docs/nemo-sdg-pilot.md`. The queue binds each decision to the
+unchanged candidate, source scenario facts and both input checksums. Approval
+requires explicit positive checks for facts, label, language and style. Keep
+the human review queue as evidence for its SHA-256 reference in the exported
+classifier rows. These synthetic texts are not original citizen appeals.
