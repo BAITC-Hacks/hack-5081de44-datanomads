@@ -42,6 +42,17 @@ class FieldAvailabilityTests(unittest.TestCase):
             self.assertEqual(vko_report["duplicate_source_id_count"], 1)
             self.assertEqual(vko_report["invalid_creation_date_count"], 1)
             self.assertEqual(vko_report["joint_presence"]["created_and_category"], 1)
+            self.assertIsNone(vko_report["source_system"])
+            self.assertEqual(vko_report["source_system_status"], "UNVERIFIED")
+            self.assertEqual(vko_report["encoding"], "utf-8")
+            self.assertEqual(vko_report["delimiter"], ",")
+            columns = {item["name"]: item for item in vko_report["columns"]}
+            self.assertEqual(columns["creation_date"]["inferred_safe_type"], "STRING_WITH_INVALID_DATE_VALUES")
+            self.assertEqual(columns["creation_date"]["invalid_nonempty_date_count"], 1)
+            self.assertEqual(columns["full_name"]["pii_risk"], "DIRECT_PERSONAL_IDENTIFIER")
+            self.assertEqual(columns["full_name"]["nonempty_count"], 1)
+            self.assertEqual(vko_report["candidate_roles"]["original_appeal_text"]["columns"], [])
+            self.assertEqual(vko_report["candidate_roles"]["priority_label"]["status"], "ABSENT")
             self.assertEqual(vko_report["fields"]["original_appeal_text"]["present_count"], 0)
             self.assertEqual(almaty_report["fields"]["raw_service"]["present_count"], 1)
             self.assertIsNone(almaty_report["fields"]["region_hint"]["source_column"])
@@ -49,6 +60,7 @@ class FieldAvailabilityTests(unittest.TestCase):
             self.assertEqual(almaty_report["fields"]["raw_service"]["semantic_status"],
                              "OBSERVED_ISSUE_TYPE_NOT_VERIFIED_EXECUTOR")
             self.assertEqual(report["required_follow_up_questions"], [])
+            self.assertEqual(report["report_version"], "customer-field-availability.v2")
             self.assertEqual(set(report["cross_source_value_comparison"]), set(vko_report["fields"]))
             encoded = json.dumps(report, ensure_ascii=False)
             for sentinel in ("PII-STREET-SENTINEL", "PII-NAME-SENTINEL", "PII-TEXT-SENTINEL"):

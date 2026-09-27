@@ -116,6 +116,38 @@ CROSS_SOURCE = {
     "verified_resolution": "UNAVAILABLE_IN_BOTH",
 }
 
+PII_RISK = {
+    "application_number": "SOURCE_RECORD_IDENTIFIER",
+    "applicant_number": "DIRECT_PERSONAL_IDENTIFIER",
+    "full_name": "DIRECT_PERSONAL_IDENTIFIER",
+    "operator": "OPERATOR_IDENTIFIER",
+    "street": "PRECISE_LOCATION",
+    "district": "LOCATION_HINT",
+    "region": "LOCATION_HINT",
+    "com_exp": "UNSTRUCTURED_TEXT_PII_POSSIBLE",
+    "result": "UNSTRUCTURED_TEXT_PII_POSSIBLE",
+    "contractor": "PERSON_OR_ORGANIZATION_UNVERIFIED",
+}
+
+
+def _candidate_roles(profile: str) -> dict:
+    return {
+        "original_appeal_text": {
+            "columns": [], "status": "ABSENT_CONFIRMED_BY_CUSTOMER",
+            "excluded_column": "com_exp",
+        },
+        "topic_label": {"columns": ["category"], "status": "UNVERIFIED_SEMANTICS"},
+        "service_or_routing_label": {
+            "columns": ["service", "contractor"],
+            "status": "UNVERIFIED_SEMANTICS",
+        },
+        "priority_label": {"columns": [], "status": "ABSENT"},
+        "resolution": {
+            "columns": ["closing_date", "result", "status"] + (["status_1"] if profile == "almaty_109" else []),
+            "status": "UNVERIFIED_SEMANTICS",
+        },
+    }
+
 
 def _source_checksum(path: Path) -> str:
     digest = hashlib.sha256()
@@ -141,18 +173,27 @@ def scan_profile(path: Path, profile: str) -> dict:
     index = 0 if profile == "vko_109" else 1
     columns = {fact: choices[index] for fact, choices in FACT_COLUMNS.items()}
     presence: Counter = Counter()
+    column_presence: Counter = Counter()
+    invalid_column_dates: Counter = Counter()
     joint: Counter = Counter()
     identifiers = set()
     row_count = malformed_count = duplicate_ids = invalid_creation_dates = 0
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        if len(reader.fieldnames or []) != len(HEADERS[profile]) or set(reader.fieldnames or []) != HEADERS[profile]:
+        headers = reader.fieldnames or []
+        if len(headers) != len(HEADERS[profile]) or set(headers) != HEADERS[profile]:
             raise ValueError("customer CSV schema differs from the reviewed profile")
         for row in reader:
             row_count += 1
             if None in row or any(value is None for value in row.values()):
                 malformed_count += 1
                 continue
+            for column in headers:
+                value = row[column].strip()
+                if value:
+                    column_presence[column] += 1
+                    if column in {"creation_date", "closing_date"} and not _date_present(value):
+                        invalid_column_dates[column] += 1
             observed = set()
             for fact, column in columns.items():
                 if column is None:
@@ -174,6 +215,25 @@ def scan_profile(path: Path, profile: str) -> dict:
             for name, needed in JOINT_FACTS.items():
                 if set(needed).issubset(observed):
                     joint[name] += 1
+    with path.open("rb") as stream:
+        encoding = "utf-8-sig" if stream.read(3) == b"\xef\xbb\xbf" else "utf-8"
+    column_schema = []
+    for column in headers:
+        if column in {"creation_date", "closing_date"}:
+            safe_type = "STRING_WITH_INVALID_DATE_VALUES" if invalid_column_dates[column] else "LOCAL_DATETIME_STRING"
+        elif column in {"application_number", "applicant_number", "operator"}:
+            safe_type = "OPAQUE_IDENTIFIER_STRING"
+        else:
+            safe_type = "STRING"
+        item = {
+            "name": column,
+            "inferred_safe_type": safe_type,
+            "nonempty_count": column_presence[column],
+            "pii_risk": PII_RISK.get(column, "UNVERIFIED_PII_STATUS"),
+        }
+        if column in {"creation_date", "closing_date"}:
+            item["invalid_nonempty_date_count"] = invalid_column_dates[column]
+        column_schema.append(item)
     fields = {}
     for fact, column in columns.items():
         count = presence[fact]
@@ -191,7 +251,13 @@ def scan_profile(path: Path, profile: str) -> dict:
         }
     return {
         "profile_id": profile,
+        "source_system": None,
+        "source_system_status": "UNVERIFIED",
         "source_sha256": _source_checksum(path),
+        "source_format": "csv",
+        "encoding": encoding,
+        "delimiter": ",",
+        "columns": column_schema,
         "schema_fingerprint_sha256": "sha256:" + hashlib.sha256("\n".join(sorted(HEADERS[profile])).encode()).hexdigest(),
         "record_count": row_count,
         "malformed_row_count": malformed_count,
@@ -199,13 +265,14 @@ def scan_profile(path: Path, profile: str) -> dict:
         "invalid_creation_date_count": invalid_creation_dates,
         "fields": fields,
         "joint_presence": {name: joint[name] for name in JOINT_FACTS},
+        "candidate_roles": _candidate_roles(profile),
     }
 
 
 def build_report(vko: Path, almaty: Path) -> dict:
     profiles = [scan_profile(vko, "vko_109"), scan_profile(almaty, "almaty_109")]
     return {
-        "report_version": "customer-field-availability.v1",
+        "report_version": "customer-field-availability.v2",
         "scope": "two_customer_109_exports_structural_metadata_only",
         "profiles": profiles,
         "cross_source_value_comparison": CROSS_SOURCE,

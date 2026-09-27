@@ -28,7 +28,147 @@
   },
   "profiles": [
     {
+      "candidate_roles": {
+        "original_appeal_text": {
+          "columns": [],
+          "excluded_column": "com_exp",
+          "status": "ABSENT_CONFIRMED_BY_CUSTOMER"
+        },
+        "priority_label": {
+          "columns": [],
+          "status": "ABSENT"
+        },
+        "resolution": {
+          "columns": [
+            "closing_date",
+            "result",
+            "status"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "service_or_routing_label": {
+          "columns": [
+            "service",
+            "contractor"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "topic_label": {
+          "columns": [
+            "category"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        }
+      },
+      "columns": [
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "application_number",
+          "nonempty_count": 83385,
+          "pii_risk": "SOURCE_RECORD_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "creation_date",
+          "nonempty_count": 83385,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "closing_date",
+          "nonempty_count": 83362,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "region",
+          "nonempty_count": 83385,
+          "pii_risk": "LOCATION_HINT"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "district",
+          "nonempty_count": 721,
+          "pii_risk": "LOCATION_HINT"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "street",
+          "nonempty_count": 22347,
+          "pii_risk": "PRECISE_LOCATION"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "full_name",
+          "nonempty_count": 6499,
+          "pii_risk": "DIRECT_PERSONAL_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "applicant_number",
+          "nonempty_count": 0,
+          "pii_risk": "DIRECT_PERSONAL_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "application_type",
+          "nonempty_count": 83382,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "submittal_channel",
+          "nonempty_count": 83385,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "category",
+          "nonempty_count": 83384,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "service",
+          "nonempty_count": 83384,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "contractor",
+          "nonempty_count": 77874,
+          "pii_risk": "PERSON_OR_ORGANIZATION_UNVERIFIED"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "com_exp",
+          "nonempty_count": 1690,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "result",
+          "nonempty_count": 83312,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "status",
+          "nonempty_count": 83385,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "operator",
+          "nonempty_count": 3,
+          "pii_risk": "OPERATOR_IDENTIFIER"
+        }
+      ],
+      "delimiter": ",",
       "duplicate_source_id_count": 0,
+      "encoding": "utf-8-sig",
       "fields": {
         "application_type": {
           "missing_or_invalid_count": 3,
@@ -194,10 +334,118 @@
       "profile_id": "vko_109",
       "record_count": 83385,
       "schema_fingerprint_sha256": "sha256:3bdee0aae2fdc33f34c4f263ec9616dd5f4ec5de3e4dbb96a276a63b0df470e2",
-      "source_sha256": "sha256:bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716"
+      "source_format": "csv",
+      "source_sha256": "sha256:bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+      "source_system": null,
+      "source_system_status": "UNVERIFIED"
     },
     {
+      "candidate_roles": {
+        "original_appeal_text": {
+          "columns": [],
+          "excluded_column": "com_exp",
+          "status": "ABSENT_CONFIRMED_BY_CUSTOMER"
+        },
+        "priority_label": {
+          "columns": [],
+          "status": "ABSENT"
+        },
+        "resolution": {
+          "columns": [
+            "closing_date",
+            "result",
+            "status",
+            "status_1"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "service_or_routing_label": {
+          "columns": [
+            "service",
+            "contractor"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "topic_label": {
+          "columns": [
+            "category"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        }
+      },
+      "columns": [
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "application_number",
+          "nonempty_count": 19912,
+          "pii_risk": "SOURCE_RECORD_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "creation_date",
+          "nonempty_count": 19912,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "closing_date",
+          "nonempty_count": 18152,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "com_exp",
+          "nonempty_count": 6343,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "result",
+          "nonempty_count": 17881,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "contractor",
+          "nonempty_count": 8796,
+          "pii_risk": "PERSON_OR_ORGANIZATION_UNVERIFIED"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "status",
+          "nonempty_count": 19686,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "category",
+          "nonempty_count": 19599,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "service",
+          "nonempty_count": 19841,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "status_1",
+          "nonempty_count": 19857,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "submittal_channel",
+          "nonempty_count": 19890,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        }
+      ],
+      "delimiter": ",",
       "duplicate_source_id_count": 0,
+      "encoding": "utf-8-sig",
       "fields": {
         "application_type": {
           "missing_or_invalid_count": 19912,
@@ -363,11 +611,14 @@
       "profile_id": "almaty_109",
       "record_count": 19912,
       "schema_fingerprint_sha256": "sha256:68870675b01cc47d7f6212a58cd3d4b951c84dcac513d32179e717cd869c5ed3",
-      "source_sha256": "sha256:9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f"
+      "source_format": "csv",
+      "source_sha256": "sha256:9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f",
+      "source_system": null,
+      "source_system_status": "UNVERIFIED"
     }
   ],
   "recommended_routing_or_priority_rules": [],
-  "report_version": "customer-field-availability.v1",
+  "report_version": "customer-field-availability.v2",
   "required_follow_up_questions": [],
   "scope": "two_customer_109_exports_structural_metadata_only"
 }
