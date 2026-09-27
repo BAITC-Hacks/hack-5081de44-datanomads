@@ -101,6 +101,8 @@ def verify_embedder_candidate(artifact: Path, *, load_model: bool = True) -> Emb
     if artifact.is_symlink():
         raise ValueError("embedder artifact directory must not be a symlink")
     manifest = EmbedderManifest.read(artifact / "manifest.json")
+    if manifest.artifact_uri != ".":
+        raise ValueError("embedder artifact URI must point to its directory")
     expected = {"manifest.json", *manifest.artifact_files, *manifest.bundle_files}
     actual = {path.relative_to(artifact).as_posix() for path in artifact.rglob("*") if path.is_file()}
     if actual != expected or any(path.is_symlink() for path in artifact.rglob("*")):

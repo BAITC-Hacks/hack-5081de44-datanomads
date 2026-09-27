@@ -61,6 +61,14 @@ class EmbedderCandidateTests(unittest.TestCase):
             completed = subprocess.run(command, capture_output=True, text=True, check=False)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(json.loads(completed.stdout)["status"], "VERIFIED")
+            manifest_path = output / "manifest.json"
+            original_manifest = manifest_path.read_bytes()
+            wrong_uri = json.loads(original_manifest)
+            wrong_uri["artifact_uri"] = "elsewhere"
+            manifest_path.write_text(json.dumps(wrong_uri), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "artifact URI"):
+                verify_embedder_candidate(output, load_model=False)
+            manifest_path.write_bytes(original_manifest)
             with self.assertRaises(FileExistsError):
                 train_embedder_candidate(package, base, baseline_path, output,
                                          model_version="embedder_candidate_v1",

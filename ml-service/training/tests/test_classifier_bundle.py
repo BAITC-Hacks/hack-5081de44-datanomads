@@ -73,6 +73,22 @@ class ClassifierBundleTests(unittest.TestCase):
                 verify_classifier_bundle(bundle)
             metrics_path.write_bytes(original_metrics)
 
+            thresholds_path = bundle / "thresholds.json"
+            original_thresholds = thresholds_path.read_bytes()
+            manifest_path = bundle / "manifest.json"
+            original_manifest = manifest_path.read_bytes()
+            thresholds = json.loads(original_thresholds)
+            thresholds["confidence_thresholds"]["low_confidence_below"] = 0.6
+            thresholds_path.write_text(json.dumps(thresholds), encoding="utf-8")
+            changed_manifest = json.loads(original_manifest)
+            changed_manifest["confidence_thresholds"] = thresholds["confidence_thresholds"]
+            changed_manifest["bundle_files"]["thresholds.json"] = checksum(thresholds_path)
+            manifest_path.write_text(json.dumps(changed_manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "does not match its evidence"):
+                verify_classifier_bundle(bundle)
+            thresholds_path.write_bytes(original_thresholds)
+            manifest_path.write_bytes(original_manifest)
+
             (bundle / "model" / "extra.txt").write_text("unexpected", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "unexpected or missing"):
                 verify_classifier_bundle(bundle)

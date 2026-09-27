@@ -89,6 +89,7 @@ def verify_classifier_bundle(bundle: Path) -> ClassifierManifest:
             labels.get("labels") != manifest.labels or
             labels.get("id2label") != {str(index): label for index, label in enumerate(manifest.labels)} or
             thresholds.get("confidence_thresholds") != manifest.confidence_thresholds or
+            manifest.confidence_thresholds != (runtime.model_extra or {}).get("confidence_thresholds") or
             thresholds.get("confidence_policy_version") != (runtime.model_extra or {}).get("confidence_policy_version") or
             thresholds.get("confident_enabled") != (runtime.model_extra or {}).get("confident_enabled")):
         raise ValueError("classifier bundle manifest does not match its evidence")
