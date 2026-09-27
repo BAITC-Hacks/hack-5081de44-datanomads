@@ -73,6 +73,7 @@ pub struct Config {
     pub learning_min_feedback_count: i32,
     pub learning_manual_close_enabled: bool,
     pub learning_promotion_policy_version: String,
+    pub learning_evaluation_dataset_version: Option<String>,
 }
 
 impl Default for Config {
@@ -86,6 +87,7 @@ impl Default for Config {
             learning_min_feedback_count: DEFAULT_LEARNING_MIN_FEEDBACK_COUNT,
             learning_manual_close_enabled: true,
             learning_promotion_policy_version: DEFAULT_LEARNING_PROMOTION_POLICY_VERSION.to_owned(),
+            learning_evaluation_dataset_version: None,
         }
     }
 }
@@ -143,6 +145,12 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(defaults.learning_promotion_policy_version),
+            learning_evaluation_dataset_version: env::var(
+                "PULSE_LEARNING_EVALUATION_DATASET_VERSION",
+            )
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
         }
     }
 }
@@ -535,6 +543,8 @@ pub struct LearningCycle {
     pub collect_started_at: String,
     pub collect_ends_at: String,
     pub production_model_version: Option<String>,
+    pub frozen_evaluation_dataset_version: Option<String>,
+    pub candidate_dataset_checksum: Option<String>,
     pub min_feedback_count: u32,
     pub promotion_policy_version: String,
     pub manual_close_enabled: bool,
@@ -1381,6 +1391,8 @@ impl Store {
             collect_started_at: "2026-09-18T10:00:00Z".to_owned(),
             collect_ends_at: "2026-09-25T10:00:00Z".to_owned(),
             production_model_version: Some("classifier-demo-2026-09-001".to_owned()),
+            frozen_evaluation_dataset_version: None,
+            candidate_dataset_checksum: None,
             min_feedback_count: DEFAULT_LEARNING_MIN_FEEDBACK_COUNT as u32,
             promotion_policy_version: DEFAULT_LEARNING_PROMOTION_POLICY_VERSION.to_owned(),
             manual_close_enabled: true,
@@ -4907,8 +4919,8 @@ async fn learning_overview(
 
 #[derive(Debug, Deserialize, Default)]
 pub struct CreateLearningCycleRequest {
-    pub dataset_version: Option<String>,
     pub candidate_model_version: Option<String>,
+    pub evaluation_dataset_version: Option<String>,
 }
 
 async fn create_learning_cycle(
@@ -4922,7 +4934,9 @@ async fn create_learning_cycle(
             .create_learning_cycle(&request, &state.config)
             .await
             .map_err(|error| {
-                if error.contains("active learning cycle") {
+                if error.contains("active learning cycle")
+                    || error.contains("frozen evaluation dataset")
+                {
                     ApiError::Conflict(error)
                 } else {
                     ApiError::Internal(error)
@@ -4952,9 +4966,7 @@ async fn create_learning_cycle(
         id: format!("cycle-{:03}", store.next_cycle_number),
         cycle_id: format!("cycle-{:03}", store.next_cycle_number),
         state: "COLLECT".to_owned(),
-        dataset_version: request
-            .dataset_version
-            .unwrap_or_else(|| format!("dataset-demo-2026-09-{:03}", store.next_cycle_number)),
+        dataset_version: "pending".to_owned(),
         candidate_model_version: request.candidate_model_version.unwrap_or_else(|| {
             format!(
                 "classifier-candidate-2026-09-{:03}",
@@ -4964,6 +4976,10 @@ async fn create_learning_cycle(
         collect_started_at: started_at.to_rfc3339(),
         collect_ends_at: ends_at.to_rfc3339(),
         production_model_version,
+        frozen_evaluation_dataset_version: request
+            .evaluation_dataset_version
+            .or_else(|| state.config.learning_evaluation_dataset_version.clone()),
+        candidate_dataset_checksum: None,
         min_feedback_count: state.config.learning_min_feedback_count as u32,
         promotion_policy_version: state.config.learning_promotion_policy_version.clone(),
         manual_close_enabled: state.config.learning_manual_close_enabled,

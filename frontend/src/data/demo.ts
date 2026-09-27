@@ -154,6 +154,8 @@ export const demoData: DashboardData = {
     collectStartedAt: '',
     collectEndsAt: '',
     minFeedbackCount: 0,
+    frozenEvaluationDatasetVersion: undefined,
+    candidateDatasetChecksum: undefined,
     promotionPolicyVersion: 'policy-v1',
     manualCloseEnabled: false,
     updatedAt: 'нет данных',

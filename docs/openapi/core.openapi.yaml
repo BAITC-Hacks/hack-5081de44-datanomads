@@ -1438,16 +1438,18 @@ components:
         resolved: { type: integer }
     LearningCycle:
       type: object
-      required: [id, cycle_id, state, dataset_version, candidate_model_version, collect_started_at, collect_ends_at, min_feedback_count, promotion_policy_version, manual_close_enabled, feedback_count, created_at, updated_at]
+      required: [id, cycle_id, state, dataset_version, candidate_model_version, collect_started_at, collect_ends_at, frozen_evaluation_dataset_version, candidate_dataset_checksum, min_feedback_count, promotion_policy_version, manual_close_enabled, feedback_count, created_at, updated_at]
       properties:
         id: { type: string }
         cycle_id: { type: string }
-        state: { type: string, enum: [COLLECT, TRAINING, EVALUATE, DECISION, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK] }
+        state: { type: string, enum: [COLLECT, TRAINING, EVALUATE, DECISION, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK, DATASET_BUILD_FAILED] }
         dataset_version: { type: string }
         candidate_model_version: { type: string }
         collect_started_at: { type: string, format: date-time }
         collect_ends_at: { type: string, format: date-time }
         production_model_version: { type: string, nullable: true }
+        frozen_evaluation_dataset_version: { type: string, nullable: true }
+        candidate_dataset_checksum: { type: string, nullable: true, pattern: '^[a-f0-9]{64}$' }
         min_feedback_count: { type: integer }
         promotion_policy_version: { type: string }
         manual_close_enabled: { type: boolean }
@@ -1467,8 +1469,8 @@ components:
     CreateLearningCycleRequest:
       type: object
       properties:
-        dataset_version: { type: string }
         candidate_model_version: { type: string }
+        evaluation_dataset_version: { type: string, description: Frozen dataset version whose ticket IDs are copied into the cycle at creation. }
     LearningFeedbackRequest:
       type: object
       required: [ticket_id]

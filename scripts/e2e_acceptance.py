@@ -289,18 +289,62 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     status, _, reindex = json_request(base_url, "POST", "/api/v1/retrieval/reindex", role="MANAGER", timeout=timeout)
     expect(status == 202 and reindex.get("job_type") == "REINDEX_QDRANT", f"reindex queue failed: {reindex}")
 
+    evaluation_dataset = f"{dataset}-evaluation"
+    evaluation_source = f"{source}-evaluation"
+    evaluation_ticket = {
+        "external_ticket_id": f"{evaluation_source}-0",
+        "region_id": region,
+        "created_at": created_at,
+        "original_text": f"E2E {suffix}: holdout обращение по водоснабжению",
+        "language": "ru",
+        "topic_raw": "water_supply",
+        "status": "OPEN",
+        "channel": "e2e",
+    }
+    status, _, evaluation_import = json_request(
+        base_url,
+        "POST",
+        "/api/v1/import",
+        body={
+            "source_system": evaluation_source,
+            "source_uri": f"memory://{evaluation_source}.json",
+            "dataset_version": evaluation_dataset,
+            "manifest_uri": f"memory://{evaluation_dataset}/manifest.json",
+            "manifest_sha256": "e2e-evaluation-manifest",
+            "is_synthetic": True,
+            "tickets": [evaluation_ticket],
+        },
+        timeout=timeout,
+    )
+    expect(status == 201, f"frozen evaluation dataset import failed: {status} {evaluation_import}")
+
     status, _, cycle = json_request(
         base_url,
         "POST",
         "/api/v1/learning",
-        body={"dataset_version": f"{dataset}-feedback", "candidate_model_version": f"classifier-{suffix}"},
+        body={
+            "evaluation_dataset_version": evaluation_dataset,
+            "candidate_model_version": f"classifier-{suffix}",
+        },
         role="ML_REVIEWER",
         timeout=timeout,
     )
     expect(status == 201, f"learning cycle creation failed: {cycle}")
     cycle_id = str(cycle["id"])
-    status, _, feedback = json_request(base_url, "POST", f"/api/v1/learning/{cycle_id}/feedback", body={"ticket_id": ticket_ids[0], "decision": "confirm"}, role="OPERATOR", timeout=timeout)
-    expect(status == 201, f"learning feedback failed: {feedback}")
+    status, _, feedback = json_request(
+        base_url,
+        "POST",
+        f"/api/v1/assist/{ticket_ids[0]}/correct",
+        body={
+            "topic_id": "water_supply",
+            "service": "service_water",
+            "priority": "high",
+            "note": "e2e learning correction",
+        },
+        role="OPERATOR",
+        timeout=timeout,
+    )
+    expect(status == 200, f"learning feedback correction failed: {feedback}")
     status, _, closed_cycle = json_request(base_url, "POST", "/api/v1/learning/cycle/close", body={"cycle_id": cycle_id}, role="ML_REVIEWER", timeout=timeout)
     expect(status == 202 and closed_cycle.get("state") == "TRAINING", f"learning close failed: {closed_cycle}")
     evaluation: dict[str, Any] = {}

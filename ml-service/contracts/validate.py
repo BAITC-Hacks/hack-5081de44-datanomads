@@ -62,6 +62,8 @@ def validate_demo_artifacts() -> list[str]:
     for schema_name, file_name in (
         ("ModelEvaluation", "model-evaluation.demo.json"),
         ("LearningFeedbackExport", "learning-feedback-export.demo.json"),
+        ("CandidateDatasetBuildRequest", "candidate-dataset-build-request.demo.json"),
+        ("CandidateDatasetManifest", "candidate-dataset-manifest.demo.json"),
         ("CandidateEvaluation", "candidate-evaluation.demo.json"),
     ):
         _validate_file(examples / file_name, schema_name)

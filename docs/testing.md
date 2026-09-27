@@ -109,7 +109,9 @@ fake trainer включается отдельно и не считается р
 ## Data/PII safety tests
 
 - bad CSV/invalid date/missing field отправляются в quarantine с причиной;
-- frozen evaluation set не попадает в candidate train;
+- frozen evaluation IDs/version передаются candidate builder-у и не попадают в candidate train;
+- payload `TRAIN_CLASSIFIER` содержит только version/artifact references и не содержит ticket text;
+- candidate builder failure виден как `DATASET_BUILD_FAILED` и `background_jobs.FAILED`;
 - полный ticket text, IIN, phone, name, address и attachments отсутствуют в
   default logs;
 - Qdrant payload содержит только allow-listed metadata;

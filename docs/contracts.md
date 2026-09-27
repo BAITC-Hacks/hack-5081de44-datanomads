@@ -12,6 +12,8 @@ validation does not import Rust Core, React, `data/**`, or training code.
 | `EmbedderManifest` | `embedder-manifest.v1` | Embedder metadata, dimension, distance and preprocessing |
 | `ModelEvaluation` | `model-evaluation.v1` | Versioned offline, shadow or backtest result |
 | `LearningFeedbackExport` | `learning-feedback-export.v1` | Validated ticket references, predictions and operator decisions |
+| `CandidateDatasetBuildRequest` | `candidate-dataset-build-request.v1` | Cycle, feedback references and frozen evaluation identifiers passed to the builder |
+| `CandidateDatasetManifest` | `candidate-dataset-manifest.v1` | Immutable candidate artifact version, checksum and source lineage |
 | `CandidateEvaluation` | `candidate-evaluation.v1` | Offline/shadow evidence and policy decision state |
 | `ModelManifest` | `model-manifest.v1` | ML service model manifest envelope |
 
@@ -20,8 +22,14 @@ importer's schema. The standalone package carries the same v1 schema so an
 artifact bundle can be checked by itself; `--check-demo` rejects any drift
 between the two copies and validates every checked-in normalized demo record.
 The export schema stores ticket identifiers and decision evidence, not a second
-copy of ticket text. A dataset builder resolves those IDs against its versioned
-normalized dataset package.
+copy of ticket text. The Data/ML builder resolves those IDs against normalized
+PostgreSQL ticket rows and uses dataset links to record source-version lineage.
+
+The candidate build job stores only cycle, model, feedback and evaluation IDs,
+versions, and export artifact locations. The Data/ML builder resolves the
+referenced normalized tickets, excludes the frozen evaluation IDs, and writes
+the checksummed candidate artifact. Its manifest records the evaluation
+version and the exact ticket IDs retained for training.
 
 Trained manifests require a `sha256:` checksum with 64 lowercase hexadecimal
 characters and an artifact URI. A deterministic baseline must instead declare

@@ -7,6 +7,8 @@
     "EmbedderManifest": "schemas/v1/embedder-manifest.schema.json",
     "ModelEvaluation": "schemas/v1/model-evaluation.schema.json",
     "LearningFeedbackExport": "schemas/v1/learning-feedback-export.schema.json",
+    "CandidateDatasetBuildRequest": "schemas/v1/candidate-dataset-build-request.schema.json",
+    "CandidateDatasetManifest": "schemas/v1/candidate-dataset-manifest.schema.json",
     "CandidateEvaluation": "schemas/v1/candidate-evaluation.schema.json",
     "ModelManifest": "schemas/v1/model-manifest.schema.json",
     "ModelMetadata": "schemas/v1/model-metadata.schema.json"

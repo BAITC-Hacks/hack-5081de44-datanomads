@@ -149,13 +149,15 @@ export interface ModelStatus {
 
 export interface LearningCycle {
   id: string
-  stage: 'COLLECT' | 'TRAIN' | 'EVALUATE' | 'DECISION' | 'PROMOTED' | 'REJECTED' | 'INSUFFICIENT_FEEDBACK'
+  stage: 'COLLECT' | 'TRAIN' | 'EVALUATE' | 'DECISION' | 'PROMOTED' | 'REJECTED' | 'INSUFFICIENT_FEEDBACK' | 'DATASET_BUILD_FAILED'
   dataset: string
   feedbackCount: number
   candidate: string
   collectStartedAt: string
   collectEndsAt: string
   productionModelVersion?: string
+  frozenEvaluationDatasetVersion?: string
+  candidateDatasetChecksum?: string
   minFeedbackCount: number
   promotionPolicyVersion: string
   manualCloseEnabled: boolean

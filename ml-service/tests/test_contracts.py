@@ -37,6 +37,8 @@ class SharedContractTests(unittest.TestCase):
                 "EmbedderManifest",
                 "ModelEvaluation",
                 "LearningFeedbackExport",
+                "CandidateDatasetBuildRequest",
+                "CandidateDatasetManifest",
                 "CandidateEvaluation",
             },
         )

@@ -1,0 +1,11 @@
+{
+  "schema_version": "candidate-dataset-build-request.v1",
+  "cycle_id": "demo-cycle-013",
+  "candidate_model_version": "classifier-candidate-demo-013",
+  "production_model_version": "classifier-demo-2026-09-21-001",
+  "feedback_ids": ["feedback-21"],
+  "feedback_export_uri": "file:///artifacts/datasets/exports/demo-cycle-013.json",
+  "feedback_export_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "frozen_evaluation_dataset_version": "demo-evaluation.v1",
+  "frozen_evaluation_ticket_ids": ["ticket-evaluation-1"]
+}

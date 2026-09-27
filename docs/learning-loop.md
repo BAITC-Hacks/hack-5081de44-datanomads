@@ -13,8 +13,8 @@ COLLECT → TRAINING → EVALUATE → DECISION
 
 - `COLLECT`: production продолжает обслуживать обращения; feedback только
   накапливается.
-- `TRAINING`: валидный feedback замораживается в candidate dataset и запускает
-  offline job.
+- `TRAINING`: validated feedback проходит через Data/ML candidate dataset
+  builder; после регистрации checksum ставится offline training job.
 - `EVALUATE`: candidate работает shadow рядом с production на свежих данных;
   production остаётся serving.
 - `DECISION`: KPI и critical regressions доступны reviewer.
@@ -113,15 +113,31 @@ The Core API reads these environment variables:
 | `PULSE_LEARNING_MIN_FEEDBACK_COUNT` | `1` | Valid feedback rows required before training is queued |
 | `PULSE_LEARNING_MANUAL_CLOSE` | enabled for `demo`/`test`/`unit`, disabled otherwise | Allows a reviewer to close before the end time |
 | `PULSE_LEARNING_PROMOTION_POLICY_VERSION` | `policy-v1` | Policy version frozen on cycle creation |
+| `PULSE_LEARNING_EVALUATION_DATASET_VERSION` | unset | Registered dataset version whose ticket IDs are frozen for evaluation exclusion |
 
-The existing PostgreSQL worker checks expired COLLECT cycles on each poll. It
-marks cycles below the threshold `INSUFFICIENT_FEEDBACK` without creating a
-candidate or job; otherwise it atomically moves the cycle to `TRAINING` and
-queues the existing classifier job. A feedback request tied to a closed,
-expired, or non-COLLECT cycle receives `409`. Operator decisions remain saved
-outside the learning dataset when there is no active COLLECT cycle; the Core
-response reports `NO_ACTIVE_COLLECT_CYCLE` in that case. No retraining job is
-created per operator click.
+The configured evaluation dataset version must already be registered in
+`dataset_versions` and have `dataset_ticket_links`. Core copies its ticket IDs
+to `learning_cycle_evaluation_tickets` when the cycle is created. A reviewer
+may override the version in the cycle creation request.
+
+The PostgreSQL worker checks expired COLLECT cycles on each poll. Below the
+feedback threshold it records `INSUFFICIENT_FEEDBACK` without creating a
+candidate or job. Otherwise it queues `BUILD_CANDIDATE_DATASET` with validated
+feedback IDs and the frozen evaluation version/IDs. The Data/ML builder writes
+an ID-only feedback export, resolves normalized ticket text from PostgreSQL,
+excludes the frozen evaluation IDs, then returns a candidate dataset version,
+artifact URI, and checksums. The ML worker registers that lineage and queues
+`TRAIN_CLASSIFIER` in one transaction. The persisted training job contains no
+ticket text or feedback comments. Builder errors mark the job `FAILED` and the
+cycle `DATASET_BUILD_FAILED` with a sanitized error code.
+
+If no frozen evaluation dataset is configured, the build job fails visibly with
+`FROZEN_EVALUATION_SET_NOT_CONFIGURED`; the worker does not invent a holdout.
+A feedback request tied to a closed, expired, or non-COLLECT cycle receives
+`409`. Operator decisions remain saved outside the learning dataset when there
+is no active COLLECT cycle; the Core response reports
+`NO_ACTIVE_COLLECT_CYCLE` in that case. No retraining job is created per
+operator click.
 
 ## Invariants
 

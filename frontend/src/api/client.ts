@@ -177,7 +177,7 @@ interface BackendAnalytics {
 interface BackendForecast { source?: string; status?: string; insufficient_history?: boolean; history?: Array<{ date: string; tickets: number; resolved: number }>; points: Array<{ date: string; tickets: number; resolved: number }>; model_version: string; model?: string; expected_peaks?: string[]; backtest?: Record<string, unknown> }
 interface BackendAlert { id: string; severity: string; status: string; title: string; description: string; region_id: string; topic_id: string; ticket_count: number; detected_at: string }
 interface BackendAlerts { source?: string; items: BackendAlert[] }
-interface BackendLearningCycle { id: string; cycle_id: string; state: string; dataset_version: string; candidate_model_version: string; collect_started_at: string; collect_ends_at: string; production_model_version: string | null; min_feedback_count: number; promotion_policy_version: string; manual_close_enabled: boolean; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
+interface BackendLearningCycle { id: string; cycle_id: string; state: string; dataset_version: string; candidate_model_version: string; collect_started_at: string; collect_ends_at: string; production_model_version: string | null; frozen_evaluation_dataset_version: string | null; candidate_dataset_checksum: string | null; min_feedback_count: number; promotion_policy_version: string; manual_close_enabled: boolean; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
 interface BackendLearning { source?: string; items?: BackendLearningCycle[]; active_cycle?: BackendLearningCycle; production_model?: { id: string; status: string }; controlled_loop?: Record<string, unknown> }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
 export interface CandidateEvaluation {
@@ -215,6 +215,8 @@ function mapLearningStage(value: string): LearningCycle['stage'] {
       return 'REJECTED'
     case 'INSUFFICIENT_FEEDBACK':
       return 'INSUFFICIENT_FEEDBACK'
+    case 'DATASET_BUILD_FAILED':
+      return 'DATASET_BUILD_FAILED'
     default:
       return 'COLLECT'
   }
@@ -370,7 +372,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   const alerts: Alert[] = alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity.toLowerCase() === 'critical' ? 'critical' : alert.severity.toLowerCase() === 'high' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status.toLowerCase() === 'acknowledged' ? 'В работе' : alert.status.toLowerCase() === 'closed' ? 'Закрыт' : 'Новый' }))
   const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date, forecast: point.tickets }))
   const cycle = learning.active_cycle ?? learning.items?.[0]
-  const learningData: LearningCycle = cycle ? { id: cycle.id, stage: mapLearningStage(cycle.state), dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, collectStartedAt: cycle.collect_started_at, collectEndsAt: cycle.collect_ends_at, productionModelVersion: cycle.production_model_version ?? undefined, minFeedbackCount: cycle.min_feedback_count, promotionPolicyVersion: cycle.promotion_policy_version, manualCloseEnabled: cycle.manual_close_enabled, updatedAt: cycle.updated_at, decisionNote: cycle.decision_note } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', collectStartedAt: '', collectEndsAt: '', minFeedbackCount: 0, promotionPolicyVersion: 'policy-v1', manualCloseEnabled: false, updatedAt: 'нет данных' }
+  const learningData: LearningCycle = cycle ? { id: cycle.id, stage: mapLearningStage(cycle.state), dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, collectStartedAt: cycle.collect_started_at, collectEndsAt: cycle.collect_ends_at, productionModelVersion: cycle.production_model_version ?? undefined, frozenEvaluationDatasetVersion: cycle.frozen_evaluation_dataset_version ?? undefined, candidateDatasetChecksum: cycle.candidate_dataset_checksum ?? undefined, minFeedbackCount: cycle.min_feedback_count, promotionPolicyVersion: cycle.promotion_policy_version, manualCloseEnabled: cycle.manual_close_enabled, updatedAt: cycle.updated_at, decisionNote: cycle.decision_note } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', collectStartedAt: '', collectEndsAt: '', minFeedbackCount: 0, promotionPolicyVersion: 'policy-v1', manualCloseEnabled: false, updatedAt: 'нет данных' }
   const modelData: ModelStatus[] = models.items.map((model) => {
     const status = model.status.toLowerCase()
     return {

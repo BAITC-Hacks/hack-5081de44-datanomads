@@ -831,13 +831,15 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
       <div className="dataset-stat"><span>Порог обратной связи</span><strong>{learning.minFeedbackCount}</strong></div>
       <div className="dataset-stat"><span>Окно COLLECT</span><strong>{collectWindowLabel}</strong></div>
       <div className="dataset-stat"><span>Production baseline</span><strong>{learning.productionModelVersion ?? 'не зафиксирована'}</strong></div>
+      <div className="dataset-stat"><span>Frozen evaluation dataset</span><strong>{learning.frozenEvaluationDatasetVersion ?? 'не настроен'}</strong></div>
+      {learning.candidateDatasetChecksum && <div className="dataset-stat"><span>Candidate dataset SHA-256</span><strong>{learning.candidateDatasetChecksum}</strong></div>}
       <div className="dataset-stat"><span>Датасет</span><strong>{learning.dataset}</strong></div>
       <div className="dataset-stat"><span>Кандидат</span><strong>{learning.candidate}</strong></div>
       {learning.decisionNote && <p className="panel-note learning-decision-note">Решение: {learning.decisionNote}</p>}
       <div className="learning-actions" aria-label="Действия reviewer">
         {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && <button className="button button-primary" disabled={busy !== null || !canCloseCollect} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть цикл'}</button>}
         {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && !canCloseCollect && <p className="panel-note">Сбор завершится автоматически по окончании окна COLLECT.</p>}
-        {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
+        {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK', 'DATASET_BUILD_FAILED'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <button className="button button-secondary" disabled={busy !== null} onClick={() => void runAction('evaluation')}>{busy === 'evaluation' ? 'Читаем…' : 'Показать evaluation'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <>
           <input className="learning-note" aria-label="Комментарий reviewer" placeholder="Комментарий к решению (необязательно)" value={note} onChange={(event) => setNote(event.target.value)} disabled={busy !== null} />

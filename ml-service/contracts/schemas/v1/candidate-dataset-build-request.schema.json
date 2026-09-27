@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/candidate-dataset-build-request.v1.json",
+  "title": "Pulse 109 CandidateDatasetBuildRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "cycle_id",
+    "candidate_model_version",
+    "production_model_version",
+    "feedback_ids",
+    "feedback_export_uri",
+    "feedback_export_sha256",
+    "frozen_evaluation_dataset_version",
+    "frozen_evaluation_ticket_ids"
+  ],
+  "properties": {
+    "schema_version": {"const": "candidate-dataset-build-request.v1"},
+    "cycle_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "candidate_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "production_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "feedback_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 200}
+    },
+    "feedback_export_uri": {"type": "string", "minLength": 1},
+    "feedback_export_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "frozen_evaluation_dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "frozen_evaluation_ticket_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 200}
+    }
+  }
+}

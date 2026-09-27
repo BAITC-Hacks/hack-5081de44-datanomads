@@ -13,12 +13,17 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.schemas import EvaluationRequest, TrainingRequest
+from app.candidate_dataset import build_candidate_dataset, export_validated_feedback
 from app.services import make_services
+
+_CANDIDATE_DATASET_SCHEMA_VERSION = "candidate-training-dataset.v1"
+_CLASSIFIER_TRAINING_CONFIG_VERSION = "classifier-training.v1"
 
 
 def run_stdin_job(kind: str | None, payload: dict[str, Any]) -> int:
@@ -70,16 +75,23 @@ async def claim_job(pool: Any) -> Any | None:
 
 
 async def advance_expired_learning_cycle(pool: Any) -> bool:
-    """Close one expired COLLECT cycle and enqueue training only above its gate."""
+    """Close one expired cycle and queue dataset orchestration above its gate."""
 
     async with pool.acquire() as connection:
         async with connection.transaction():
             cycle = await connection.fetchrow(
                 """
                 SELECT lc.id, lc.cycle_id, lc.min_feedback_count,
-                       lc.candidate_dataset_version, lc.candidate_model_version,
+                       lc.candidate_model_version, lc.production_model_version,
+                       lc.frozen_evaluation_dataset_version,
                        (SELECT COUNT(*)::int FROM learning_feedback lf
-                        WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_count
+                        WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_count,
+                       (SELECT COALESCE(array_agg(lf.id::text ORDER BY lf.id), ARRAY[]::text[])
+                        FROM learning_feedback lf
+                        WHERE lf.cycle_id = lc.id AND lf.validation_status = 'VALID') AS feedback_ids,
+                       (SELECT COALESCE(array_agg(let.ticket_id::text ORDER BY let.ticket_id), ARRAY[]::text[])
+                        FROM learning_cycle_evaluation_tickets let
+                        WHERE let.learning_cycle_id = lc.id) AS frozen_evaluation_ticket_ids
                 FROM learning_cycles lc
                 WHERE lc.state = 'COLLECT' AND lc.collect_ends_at <= now()
                 ORDER BY lc.collect_ends_at, lc.id
@@ -109,24 +121,28 @@ async def advance_expired_learning_cycle(pool: Any) -> bool:
             await connection.execute(
                 """
                 UPDATE learning_cycles
-                SET state = 'TRAINING', updated_at = now()
+                SET state = 'TRAINING', decision_note = 'BUILDING_CANDIDATE_DATASET', updated_at = now()
                 WHERE id = $1 AND state = 'COLLECT'
                 """,
                 int(cycle["id"]),
             )
             payload = {
-                "kind": "training",
+                "kind": "build_candidate_dataset",
                 "cycle_id": cycle_id,
                 "candidate_model_version": cycle["candidate_model_version"] or "pending",
-                "model_type": "classifier",
-                "dataset_version": cycle["candidate_dataset_version"] or "pending",
-                "samples": [],
-                "min_samples": 0,
+                "production_model_version": cycle["production_model_version"],
+                "feedback_ids": [str(value) for value in cycle["feedback_ids"]],
+                "frozen_evaluation_dataset_version": cycle[
+                    "frozen_evaluation_dataset_version"
+                ],
+                "frozen_evaluation_ticket_ids": [
+                    str(value) for value in cycle["frozen_evaluation_ticket_ids"]
+                ],
             }
             await connection.execute(
                 """
                 INSERT INTO background_jobs (job_type, payload, state)
-                VALUES ('TRAIN_CLASSIFIER', $1::jsonb, 'QUEUED')
+                VALUES ('BUILD_CANDIDATE_DATASET', $1::jsonb, 'QUEUED')
                 """,
                 json.dumps(payload),
             )
@@ -164,8 +180,26 @@ async def fail_job(pool: Any, job_id: int, error: str) -> None:
 
 
 def safe_job_error(error: Exception) -> str:
-    if isinstance(error, RuntimeError) and str(error) == "TRAINER_NOT_CONFIGURED":
-        return "TRAINER_NOT_CONFIGURED"
+    safe_runtime_errors = {
+        "TRAINER_NOT_CONFIGURED",
+        "PRODUCTION_BASELINE_NOT_CONFIGURED",
+        "FROZEN_EVALUATION_SET_NOT_CONFIGURED",
+        "VALIDATED_FEEDBACK_UNAVAILABLE",
+        "VALIDATED_FEEDBACK_CHANGED",
+        "FEEDBACK_LABELS_UNAVAILABLE",
+        "PRODUCTION_BASELINE_MISMATCH",
+        "SOURCE_TICKET_UNAVAILABLE",
+        "SOURCE_TICKET_TEXT_UNAVAILABLE",
+        "INSUFFICIENT_CANDIDATE_DATASET",
+        "FEEDBACK_EXPORT_CHECKSUM_MISMATCH",
+        "FEEDBACK_EXPORT_LINEAGE_MISMATCH",
+        "CANDIDATE_DATASET_VERSION_CONFLICT",
+        "LEARNING_CYCLE_NOT_FOUND",
+        "INVALID_CYCLE_ID",
+        "INVALID_FEEDBACK_TIMESTAMP",
+    }
+    if isinstance(error, RuntimeError) and str(error) in safe_runtime_errors:
+        return str(error)
     if isinstance(error, (ValidationError, json.JSONDecodeError)):
         return "INVALID_JOB_PAYLOAD"
     return "JOB_FAILED"
@@ -198,6 +232,176 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
         str(cycle_id),
         "FAKE_TRAINER_COMPLETED" if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"} else "TRAINER_NOT_CONFIGURED",
     )
+
+
+async def persist_candidate_dataset_and_queue_training(
+    pool: Any,
+    build_job_id: int,
+    request_payload: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Register dataset lineage and queue training in one transaction."""
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            cycle = await connection.fetchrow(
+                """
+                SELECT id, state, production_model_version, candidate_model_version,
+                       frozen_evaluation_dataset_version, candidate_dataset_version,
+                       min_feedback_count
+                FROM learning_cycles
+                WHERE cycle_id = $1 OR id::text = $1
+                LIMIT 1
+                FOR UPDATE
+                """,
+                str(request_payload["cycle_id"]),
+            )
+            if cycle is None:
+                raise RuntimeError("LEARNING_CYCLE_NOT_FOUND")
+            if cycle["state"] != "TRAINING":
+                raise RuntimeError("CANDIDATE_DATASET_VERSION_CONFLICT")
+            if (
+                cycle["production_model_version"] != result["production_model_version"]
+                or cycle["candidate_model_version"] != result["candidate_model_version"]
+                or cycle["frozen_evaluation_dataset_version"]
+                != result["frozen_evaluation_dataset_version"]
+                or request_payload.get("frozen_evaluation_dataset_version")
+                != result["frozen_evaluation_dataset_version"]
+            ):
+                raise RuntimeError("CANDIDATE_DATASET_VERSION_CONFLICT")
+            if int(result["record_count"]) < int(cycle["min_feedback_count"]):
+                raise RuntimeError("INSUFFICIENT_CANDIDATE_DATASET")
+            if cycle["candidate_dataset_version"] not in (
+                None,
+                result["dataset_version"],
+            ):
+                raise RuntimeError("CANDIDATE_DATASET_VERSION_CONFLICT")
+
+            await connection.execute(
+                """
+                INSERT INTO dataset_versions (
+                    dataset_version, schema_version, manifest_uri, manifest_sha256,
+                    content_sha256, is_synthetic, record_count, quarantine_record_count
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+                ON CONFLICT (dataset_version) DO NOTHING
+                """,
+                result["dataset_version"],
+                _CANDIDATE_DATASET_SCHEMA_VERSION,
+                result["manifest_uri"],
+                result["manifest_sha256"],
+                result["content_sha256"],
+                bool(result["synthetic"]),
+                int(result["record_count"]),
+            )
+            registered_dataset = await connection.fetchrow(
+                """
+                SELECT schema_version, manifest_uri, manifest_sha256,
+                       content_sha256, is_synthetic, record_count
+                FROM dataset_versions
+                WHERE dataset_version = $1
+                FOR UPDATE
+                """,
+                result["dataset_version"],
+            )
+            if registered_dataset is None or (
+                registered_dataset["schema_version"] != _CANDIDATE_DATASET_SCHEMA_VERSION
+                or registered_dataset["manifest_uri"] != result["manifest_uri"]
+                or registered_dataset["manifest_sha256"] != result["manifest_sha256"]
+                or registered_dataset["content_sha256"] != result["content_sha256"]
+                or bool(registered_dataset["is_synthetic"]) != bool(result["synthetic"])
+                or int(registered_dataset["record_count"]) != int(result["record_count"])
+            ):
+                raise RuntimeError("CANDIDATE_DATASET_VERSION_CONFLICT")
+
+            await connection.execute(
+                """
+                INSERT INTO dataset_ticket_links (dataset_version, ticket_id)
+                SELECT $1, ids.ticket_id
+                FROM UNNEST($2::bigint[]) AS ids(ticket_id)
+                ON CONFLICT DO NOTHING
+                """,
+                result["dataset_version"],
+                [int(value) for value in result["training_ticket_ids"]],
+            )
+            updated_cycle = await connection.execute(
+                """
+                UPDATE learning_cycles
+                SET candidate_dataset_version = $2,
+                    candidate_dataset_checksum = $3,
+                    decision_note = 'CANDIDATE_DATASET_READY',
+                    updated_at = now()
+                WHERE id = $1 AND state = 'TRAINING'
+                """,
+                int(cycle["id"]),
+                result["dataset_version"],
+                result["content_sha256"],
+            )
+            if updated_cycle != "UPDATE 1":
+                raise RuntimeError("CANDIDATE_DATASET_VERSION_CONFLICT")
+
+            training_payload = {
+                "kind": "training",
+                "cycle_id": str(request_payload["cycle_id"]),
+                "candidate_model_version": str(cycle["candidate_model_version"] or "pending"),
+                "model_type": "classifier",
+                "dataset_version": str(result["dataset_version"]),
+                "dataset_uri": str(result["artifact_uri"]),
+                "dataset_checksum": str(result["content_sha256"]),
+                "dataset_manifest_uri": str(result["manifest_uri"]),
+                "dataset_manifest_sha256": str(result["manifest_sha256"]),
+                "production_model_version": str(cycle["production_model_version"]),
+                "training_config_version": _CLASSIFIER_TRAINING_CONFIG_VERSION,
+                "min_samples": int(cycle["min_feedback_count"]),
+            }
+            await connection.execute(
+                """
+                INSERT INTO background_jobs (job_type, payload, state)
+                VALUES ('TRAIN_CLASSIFIER', $1::jsonb, 'QUEUED')
+                """,
+                json.dumps(training_payload),
+            )
+            await connection.execute(
+                """
+                UPDATE background_jobs
+                SET state = 'COMPLETED',
+                    finished_at = now(),
+                    payload = payload || jsonb_build_object('result', $2::jsonb)
+                WHERE id = $1
+                """,
+                build_job_id,
+                json.dumps(result, ensure_ascii=False),
+            )
+
+
+async def fail_candidate_dataset_build(
+    pool: Any,
+    job_id: int,
+    payload: dict[str, Any],
+    error_code: str,
+) -> None:
+    """Expose dataset-build failures on both the job and its learning cycle."""
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                """
+                UPDATE background_jobs
+                SET state = 'FAILED', finished_at = now(), error = $2
+                WHERE id = $1
+                """,
+                job_id,
+                error_code[:4000],
+            )
+            await connection.execute(
+                """
+                UPDATE learning_cycles
+                SET state = 'DATASET_BUILD_FAILED', decision_note = $2, updated_at = now()
+                WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING'
+                """,
+                str(payload.get("cycle_id") or ""),
+                error_code[:4000],
+            )
 
 
 def default_qdrant_collection(embedder_version: str, dimension: int) -> str:
@@ -445,16 +649,33 @@ async def reindex_qdrant(pool: Any, payload: dict[str, Any], job_id: int) -> dic
 async def process_job(pool: Any, job: Any) -> None:
     job_id = int(job["id"])
     kind = str(job["job_type"]).lower()
+    payload: dict[str, Any] = {}
     try:
         raw_payload = job["payload"] or {}
         if isinstance(raw_payload, str):
             raw_payload = json.loads(raw_payload)
         payload = dict(raw_payload)
-        _, _, _, _, _, trainer, evaluator = make_services()
         if kind == "reindex_qdrant":
             result = await reindex_qdrant(pool, payload, job_id)
             await complete_job(pool, job_id, result)
             return
+        if kind == "build_candidate_dataset":
+            artifact_dir = Path(os.environ.get("MODEL_DIR", "/app/trained-artifacts"))
+            builder_request = await export_validated_feedback(
+                pool,
+                payload,
+                artifact_dir / "datasets",
+            )
+            result = await build_candidate_dataset(pool, builder_request, artifact_dir)
+            await persist_candidate_dataset_and_queue_training(
+                pool,
+                job_id,
+                payload,
+                result,
+            )
+            return
+
+        _, _, _, _, _, trainer, evaluator = make_services()
         if kind == "train_classifier":
             if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() not in {"1", "true", "yes"}:
                 raise RuntimeError("TRAINER_NOT_CONFIGURED")
@@ -481,8 +702,11 @@ async def process_job(pool: Any, job: Any) -> None:
             await update_learning_cycle(pool, payload, result=result)
     except Exception as exc:
         error_code = safe_job_error(exc)
-        await fail_job(pool, job_id, error_code)
-        await update_learning_cycle(pool, payload, error=error_code)
+        if kind == "build_candidate_dataset":
+            await fail_candidate_dataset_build(pool, job_id, payload, error_code)
+        else:
+            await fail_job(pool, job_id, error_code)
+            await update_learning_cycle(pool, payload, error=error_code)
 
 
 async def run_worker() -> None:
