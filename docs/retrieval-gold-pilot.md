@@ -65,3 +65,34 @@ claim retrieval quality or production coverage. A final gold set needs more
 independent incidents, complete RU/KZ/MIXED coverage, reviewed evaluation
 pairs and an expert review of top-3 results from the evaluated model. No
 retrieval metric is reported from this unreviewed pilot.
+
+## Expanded review seed
+
+[`pilot_relations_v2.jsonl`](../data/sdg/pilot_relations_v2.jsonl) keeps the
+original 15 pairs and adds 30 invented pairs. Its nine independent relation
+groups cover waste containers, transport, heating, a possible area-wide water
+incident, standing water on a road, and a fallen tree in addition to the
+original lighting, road damage, and water-pressure cases. The added pairs
+exercise identical wording in different synthetic regions, different objects
+at one location, different issues at one object, neighboring topics, and a new
+episode after repair stated in the synthetic context. The possible area-wide
+incident has an explicitly unknown causal link; the reviewer can defer it.
+One group includes MIXED text, but this small seed is not a balanced language
+or topic sample.
+
+The previous source and `data/reviews/retrieval-pilot.jsonl` remain intact.
+Prepare and validate a separate v2 queue:
+
+```bash
+python3 scripts/review_retrieval_relations.py prepare \
+  --source data/sdg/pilot_relations_v2.jsonl \
+  --output data/reviews/retrieval-pilot-v2.jsonl
+python3 scripts/review_retrieval_relations.py validate \
+  data/reviews/retrieval-pilot-v2.jsonl \
+  --source data/sdg/pilot_relations_v2.jsonl
+```
+
+Every v2 row is still `PENDING`; no relation label or quality metric is
+approved by adding these synthetic cases. An approved package still requires
+human review of every pair and a held-out evaluation set with enough
+independent reviewed incidents.
