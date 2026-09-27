@@ -219,6 +219,86 @@ fn import_request_requires_explicit_synthetic_provenance() {
 }
 
 #[tokio::test]
+async fn related_ticket_detail_returns_permitted_context_and_latest_operator_action() {
+    let application = app(AppState::demo());
+    let ticket = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ticket.status(), 200);
+    let ticket: serde_json::Value =
+        serde_json::from_slice(&to_bytes(ticket.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(!ticket["ticket"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+    assert!(!ticket["ticket"]["topic_label"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+    assert!(!ticket["ticket"]["region_name"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+    assert!(!ticket["ticket"]["created_at"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+
+    let corrected = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/assist/ticket-001/correct")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"topic_id":"TOPIC-ROADS","service":"service_other","priority":"critical"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(corrected.status(), 200);
+
+    let ticket = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ticket.status(), 200);
+    let ticket: serde_json::Value =
+        serde_json::from_slice(&to_bytes(ticket.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(ticket["latest_decision"]["action"], "correct");
+    assert_eq!(
+        ticket["latest_decision"]["confirmed_topic_id"],
+        "TOPIC-ROADS"
+    );
+    assert!(ticket["latest_decision"]["created_at"].as_str().is_some());
+
+    let denied = application
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-001")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
 async fn corrected_decision_updates_template_without_rewriting_prediction() {
     let application = app(AppState::demo());
     let corrected = application

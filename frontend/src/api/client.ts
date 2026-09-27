@@ -1,9 +1,9 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
-import { combineRelatedCandidates, mapTicketChannel } from '../operator'
+import { combineRelatedCandidates, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../operator'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -90,6 +90,8 @@ interface BackendSimilar {
   ticket_id: string
   score: number
   relation: string
+  topic_id?: string
+  region_id?: string
 }
 
 interface BackendAssistPreview {
@@ -111,6 +113,7 @@ interface BackendTicketDetail {
     priority: string
     service_provenance?: RuleProvenance
     priority_provenance?: RuleProvenance
+    created_at?: string
   }
 }
 
@@ -197,7 +200,7 @@ function serviceIdForLabel(label?: string, services: TaxonomyOption[] = []) {
 function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, knownTickets: BackendTicket[] = [], preview?: BackendAssistPreview): Ticket {
   const prediction = detail?.prediction ?? preview?.prediction
   const latest = detail?.latest_decision
-  const related = combineRelatedCandidates(preview?.similar_tickets, preview?.duplicate_candidates, preview?.repeat_candidates)
+  const related = topRelatedCandidates(combineRelatedCandidates(preview?.similar_tickets, preview?.duplicate_candidates, preview?.repeat_candidates))
   const topic = latest ? item.topic_label : prediction?.topic_label ?? 'Не определено'
   const alternatives = prediction?.alternatives ?? []
   const confidenceAvailable = Boolean(prediction && prediction.model_version !== 'unavailable')
@@ -207,9 +210,10 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     id: candidate.ticket_id,
     title: knownTickets.find((ticket) => ticket.id === candidate.ticket_id)?.text ?? 'Связанное обращение',
     similarity: candidate.score,
-    createdAt: 'недавно',
+    createdAt: 'Дата не загружена',
     relation: mapRelation(candidate.relation),
     candidateTypes: candidate.candidateTypes,
+    matchedFactors: matchingTicketFactors(item.topic_id, item.region_id, candidate.topic_id, candidate.region_id),
   }))
   const status = latest?.action === 'correct' ? 'corrected' : latest?.action === 'confirm' || item.status === 'triaged' ? 'confirmed' : 'new'
   return {
@@ -248,6 +252,32 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     responseTemplateSource: preview?.response_template?.source,
     assistPreview: preview?.orchestration,
     channel: mapTicketChannel(item.source),
+  }
+}
+
+export async function loadRelatedTicketDetail(ticketId: string): Promise<RelatedTicketDetail> {
+  const detail = await request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticketId)}`)
+  const ticket = detail.ticket
+  const decision = detail.latest_decision
+  const decisionPriority = decision?.priority?.trim()
+  const decisionService = decision?.service?.trim()
+
+  return {
+    id: ticket.id,
+    externalRef: ticket.external_ref?.trim() || undefined,
+    originalText: ticket.text?.trim() || 'Текст обращения не предоставлен',
+    topic: ticket.topic_label?.trim() || 'Тема не указана',
+    region: ticket.region_name?.trim() || 'Регион не указан',
+    createdAt: ticket.created_at?.trim() || 'Время не указано',
+    status: ticket.status?.trim() || 'Статус не указан',
+    channel: mapTicketChannel(ticket.source),
+    latestDecision: decision ? {
+      action: decision.action,
+      confirmedTopicId: decision.confirmed_topic_id,
+      service: decisionService && !['unknown', 'unavailable'].includes(decisionService.toLowerCase()) ? decisionService : undefined,
+      priority: decisionPriority && !['unknown', 'unavailable'].includes(decisionPriority.toLowerCase()) ? mapPriority(decisionPriority) : undefined,
+      createdAt: decision.created_at?.trim() || undefined,
+    } : undefined,
   }
 }
 

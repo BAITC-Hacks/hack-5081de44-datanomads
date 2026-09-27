@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { BackendTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RuleProvenance, Ticket, TopicMetric } from './types'
 import { DataChart } from './components/DataChart'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
@@ -22,6 +22,13 @@ type Route =
 type IconName = 'inbox' | 'pulse' | 'grid' | 'map' | 'tag' | 'trend' | 'bell' | 'forecast' | 'file' | 'cycle' | 'model' | 'search' | 'settings' | 'help' | 'chevron' | 'arrow' | 'check' | 'edit' | 'external' | 'download' | 'more' | 'clock' | 'close'
 type DrilldownHandler = (dimension: DrilldownDimension, value: string | undefined, label: string) => void
 type DrilldownState = { label: string; items: BackendTicket[]; total: number } | null
+type RelatedTicketPanelState = {
+  ticketId: string
+  matchedFactors: string[]
+  loading: boolean
+  detail?: RelatedTicketDetail
+  error?: string
+}
 const PREVIEW_STAGE_LABELS: Record<string, string> = {
   language: 'определение языка',
   classification: 'классификация',
@@ -315,6 +322,8 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
   const [statusFilter, setStatusFilter] = useState<'all' | 'new' | 'reviewed'>('all')
   const [priorityFilter, setPriorityFilter] = useState<'all' | Priority>('all')
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false)
+  const [relatedDetail, setRelatedDetail] = useState<RelatedTicketPanelState | null>(null)
+  const relatedDetailRequestId = useRef(0)
   const selected = tickets.find((ticket) => ticket.id === selectedId) ?? tickets[0]
 
   const filtered = useMemo(() => tickets.filter((ticket) => {
@@ -360,6 +369,30 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
     }
   }
 
+  const openRelatedTicket = async (ticketId: string, matchedFactors: string[]) => {
+    const requestId = relatedDetailRequestId.current + 1
+    relatedDetailRequestId.current = requestId
+    setRelatedDetail({ ticketId, matchedFactors, loading: true })
+    try {
+      const detail = await loadRelatedTicketDetail(ticketId)
+      if (relatedDetailRequestId.current !== requestId) return
+      setRelatedDetail({ ticketId, matchedFactors, loading: false, detail })
+    } catch (error) {
+      if (relatedDetailRequestId.current !== requestId) return
+      setRelatedDetail({
+        ticketId,
+        matchedFactors,
+        loading: false,
+        error: error instanceof Error ? error.message : 'ошибка API',
+      })
+    }
+  }
+
+  const closeRelatedTicket = () => {
+    relatedDetailRequestId.current += 1
+    setRelatedDetail(null)
+  }
+
   const confirmationRate = overview.operatorDecisions ? Math.round((overview.confirmedDecisions / overview.operatorDecisions) * 100) : 0
   const decisionLatency = overview.avgDecisionMinutes && overview.avgDecisionMinutes > 0 ? `${Math.round(overview.avgDecisionMinutes)} мин` : 'нет решений'
   return <div className="operator-page">
@@ -370,12 +403,13 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
         <div className="filter-row"><div className="inline-search"><Icon name="search" size={16} /><input aria-label="Фильтр очереди" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти обращение" /></div><select aria-label="Фильтр по статусу" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">Все статусы</option><option value="new">Новые</option><option value="reviewed">Разобранные</option></select><select aria-label="Фильтр по приоритету" value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as typeof priorityFilter)}><option value="all">Все приоритеты</option><option value="Критический">Критический</option><option value="Высокий">Высокий</option><option value="Средний">Средний</option><option value="Низкий">Низкий</option></select></div>
         <div className="ticket-table-wrap"><table className="ticket-table"><thead><tr><th scope="col">Обращение</th><th scope="col">Тема</th><th scope="col">Уверенность</th><th scope="col">Регион</th><th scope="col">Приоритет</th><th scope="col"><span className="sr-only">Действия</span></th></tr></thead><tbody>{filtered.map((ticket) => <tr key={ticket.id} className={selected?.id === ticket.id ? 'selected-row' : ''} onClick={() => { setSelectedId(ticket.id); setMobileDetailOpen(true) }}><td><div className="ticket-id">{ticket.id}<span className={`channel-dot channel-${ticket.channel.replace(/[^a-zA-Z]/g, '').toLowerCase()}`} /></div><div className="ticket-preview">{ticket.originalText}</div><span className="ticket-time">{ticket.createdAt} · {languageLabel(ticket.language)}</span></td><td><span className="topic-cell">{ticket.topic}</span><span className="status-text">{ticket.status === 'new' ? 'Нужно решение' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</span></td><td><Confidence value={ticket.confidence} compact available={ticket.confidenceAvailable !== false} /></td><td><span className="region-cell">{ticket.region}</span></td><td><PriorityBadge priority={ticket.priority} /></td><td><button className="row-arrow icon-button" aria-label={`Открыть ${ticket.id}`} onClick={(event) => { event.stopPropagation(); setSelectedId(ticket.id); setMobileDetailOpen(true) }}><Icon name="arrow" size={17} /></button></td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty-state"><div className="state-icon">⌕</div><h3>Ничего не найдено</h3><p>Измените запрос или сбросьте фильтры.</p><button className="button button-quiet" onClick={() => { setQuery(''); setStatusFilter('all'); setPriorityFilter('all') }}>Сбросить фильтры</button></div>}</div>
       </section>
-      {selected && <TicketDetail ticket={selected} taxonomy={taxonomy} open={mobileDetailOpen} onClose={() => setMobileDetailOpen(false)} onDecision={updateTicket} onRelationFeedback={updateRelation} onOpenRelated={(relatedId) => { setSelectedId(relatedId); setMobileDetailOpen(true) }} />}
+      {selected && <TicketDetail ticket={selected} taxonomy={taxonomy} open={mobileDetailOpen} onClose={() => setMobileDetailOpen(false)} onDecision={updateTicket} onRelationFeedback={updateRelation} onOpenRelated={openRelatedTicket} />}
     </div>
+    {relatedDetail && <RelatedTicketDetailPanel state={relatedDetail} taxonomy={taxonomy} onClose={closeRelatedTicket} onRetry={() => { void openRelatedTicket(relatedDetail.ticketId, relatedDetail.matchedFactors) }} />}
   </div>
 }
 
-function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') => Promise<void>; onOpenRelated: (ticketId: string) => void }) {
+function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED') => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[]) => void }) {
   const [correctionOpen, setCorrectionOpen] = useState(false)
   const [templateOpen, setTemplateOpen] = useState(false)
   const [topic, setTopic] = useState(ticket.topic)
@@ -519,10 +553,61 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
           <p className="panel-note">{ticket.responseTemplate}</p>
         )}
       </div>
-      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">История и связанные обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.length ? ticket.similar.map((item) => <div className="similar-item" key={item.id}><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id)}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span>{item.candidateTypes?.includes('duplicate') && <span className="relation-badge relation-duplicate">Кандидат на дубликат</span>}{item.candidateTypes?.includes('repeat') && <span className="relation-badge relation-repeat">Кандидат на повтор</span>}<span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>) : <p className="panel-note">{emptyHistoryMessage}</p>}</div></div>
+      <div className="detail-section"><div className="section-inline-heading"><div className="field-label">История и связанные обращения <span className="count-pill">{ticket.similar.length}</span></div><span className="field-label">подтвердите связь</span></div><div className="similar-list">{ticket.similar.length ? ticket.similar.map((item) => <div className="similar-item" key={item.id}><div className="similar-main-column"><button className="similar-main similar-open" onClick={() => onOpenRelated(item.id, item.matchedFactors ?? [])}><strong>{item.id}</strong><span>{item.title}</span><Icon name="arrow" size={14} /></button><span className="similar-factors">{item.matchedFactors?.length ? item.matchedFactors.join(' · ') : 'Совпадающие признаки не предоставлены'}</span></div><div className="similar-meta"><span className={`relation-badge ${item.relation === 'Дубликат' ? 'relation-duplicate' : item.relation === 'Повтор' ? 'relation-repeat' : ''}`}>{item.relation}</span>{item.candidateTypes?.includes('duplicate') && <span className="relation-badge relation-duplicate">Кандидат на дубликат</span>}{item.candidateTypes?.includes('repeat') && <span className="relation-badge relation-repeat">Кандидат на повтор</span>}<span>{formatPercent(item.similarity)}</span><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, item.relation === 'Дубликат' ? 'DUPLICATE' : item.relation === 'Повтор' ? 'REPEAT' : 'SIMILAR', 'CONFIRMED')}>Подтвердить</button><button className="text-button" onClick={() => onRelationFeedback(ticket.id, item.id, 'UNRELATED', 'REJECTED')}>Отклонить</button></div></div>) : <p className="panel-note">{emptyHistoryMessage}</p>}</div></div>
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>
+}
+
+function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state: RelatedTicketPanelState; taxonomy: DashboardData['filterOptions']; onClose: () => void; onRetry: () => void }) {
+  const detail = state.detail
+  const decision = detail?.latestDecision
+  const decisionTopic = decision
+    ? taxonomy.topics.find((item) => item.id === decision.confirmedTopicId)?.label ?? decision.confirmedTopicId
+    : ''
+  const decisionAction = decision?.action.toLowerCase() === 'confirm'
+    ? 'Подтверждение предложенной темы'
+    : decision?.action.toLowerCase() === 'correct'
+      ? 'Исправление темы оператором'
+      : decision?.action
+
+  return <div className="related-ticket-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section className="related-ticket-panel" role="dialog" aria-modal="true" aria-labelledby="related-ticket-title">
+      <header className="related-ticket-header">
+        <div><span className="field-label">Контекст для проверки</span><h2 id="related-ticket-title">Связанное обращение</h2><span className="related-ticket-id">{state.ticketId}</span></div>
+        <button className="icon-button" aria-label="Закрыть связанное обращение" onClick={onClose}><Icon name="close" size={18} /></button>
+      </header>
+      {state.loading ? <div className="related-ticket-state" role="status">Загружаю карточку обращения…</div> : state.error ? <div className="related-ticket-state" role="alert"><p>Не удалось загрузить карточку: {state.error}</p><button className="button button-secondary" onClick={onRetry}>Повторить</button></div> : detail && <div className="related-ticket-scroll">
+        <section className="related-ticket-section">
+          <div className="field-label">Оригинальный текст</div>
+          <p className="related-ticket-original">«{detail.originalText}»</p>
+          <p className="source-line">{detail.channel} · {detail.createdAt} · {detail.region}{detail.externalRef && ` · № ${detail.externalRef}`}</p>
+        </section>
+        <section className="related-ticket-section">
+          <div className="field-label">Тема и статус в записи</div>
+          <dl className="related-ticket-meta">
+            <div><dt>Тема</dt><dd>{detail.topic}</dd></div>
+            <div><dt>Статус записи</dt><dd>{detail.status}</dd></div>
+          </dl>
+        </section>
+        <section className="related-ticket-section">
+          <div className="field-label">Последнее доступное действие оператора</div>
+          {decision ? <dl className="related-ticket-meta">
+            <div><dt>Действие</dt><dd>{decisionAction || 'Действие оператора зафиксировано'}</dd></div>
+            <div><dt>Подтверждённая тема</dt><dd>{decisionTopic || 'Тема не указана'}</dd></div>
+            {decision.service && <div><dt>Служба в решении</dt><dd>{decision.service}</dd></div>}
+            {decision.priority && <div><dt>Приоритет в решении</dt><dd>{decision.priority}</dd></div>}
+            {decision.createdAt && <div><dt>Время действия</dt><dd>{decision.createdAt}</dd></div>}
+          </dl> : <p className="panel-note">Операторское действие не зафиксировано. Исход обращения неизвестен.</p>}
+        </section>
+        <section className="related-ticket-section">
+          <div className="field-label">Проверяемые признаки сходства</div>
+          {state.matchedFactors.length ? <div className="related-factor-list">{state.matchedFactors.map((factor) => <span className="relation-badge" key={factor}>{factor}</span>)}</div> : <p className="panel-note">Совпадение по теме или региону не подтверждено доступными полями.</p>}
+        </section>
+        <p className="related-ticket-note">Связанная карточка открыта только для сравнения. Её действие и служба не меняют маршрут текущего обращения.</p>
+      </div>}
+    </section>
+  </div>
 }
 
 function Confidence({ value, state, compact = false, available = true }: { value: number; state?: Ticket['confidenceState']; compact?: boolean; available?: boolean }) {

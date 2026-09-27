@@ -40,6 +40,25 @@ export interface SimilarTicket {
   createdAt: string
   relation: 'Похожий' | 'Повтор' | 'Дубликат'
   candidateTypes?: Array<'similar' | 'duplicate' | 'repeat'>
+  matchedFactors?: string[]
+}
+
+export interface RelatedTicketDetail {
+  id: string
+  externalRef?: string
+  originalText: string
+  topic: string
+  region: string
+  createdAt: string
+  status: string
+  channel: Ticket['channel']
+  latestDecision?: {
+    action: string
+    confirmedTopicId: string
+    service?: string
+    priority?: Priority
+    createdAt?: string
+  }
 }
 
 export interface Ticket {
