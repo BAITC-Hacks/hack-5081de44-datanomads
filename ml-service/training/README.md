@@ -126,3 +126,22 @@ invented metrics when a horizon has no full window. Prophet uses fixed weekly
 seasonality, no yearly or daily seasonality, and no uncertainty sampling; the
 report contains no interval coverage. A single regional backtest does not
 qualify a model for runtime use.
+
+## Spike exploration on regional counts
+
+The CSV spike runner compares count/ratio and weekday median/MAD rules on
+the same daily totals without using future days:
+
+```bash
+python3 scripts/evaluate_spike_csv.py /path/to/regional_export.csv \
+  --output /tmp/regional-spike-exploration.json
+```
+
+Each day uses the preceding eight values for that weekday. Three ratio and
+three robust-score thresholds are reported with raw and seven-day-cooldown
+alert counts; no threshold is selected. The report contains only aggregate
+daily counts, dates and a 20-item `PENDING` review queue. It leaves precision,
+recall and detection delay unset because no incident ground truth was supplied.
+The unit is one region's total per day, not region × reviewed topic × time;
+missing days are treated as zero pending source-quality verification. This
+exploration cannot establish a runtime alert threshold.

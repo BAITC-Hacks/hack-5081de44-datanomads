@@ -1,0 +1,239 @@
+{
+  "calendar_days": 1035,
+  "days_without_records_treated_as_zero": 2,
+  "evaluated_days": 979,
+  "first_date": "2023-01-01",
+  "history_weeks_same_weekday": 8,
+  "invalid_csv_or_date_row_count": 0,
+  "last_date": "2025-10-31",
+  "precision": null,
+  "recall": null,
+  "record_count": 83385,
+  "report_version": "spike-exploration.v1",
+  "review_queue": [
+    {
+      "daily_count": 952,
+      "date": "2024-02-16",
+      "ratio": 12.9524,
+      "review_status": "PENDING",
+      "robust_z": 37.0338,
+      "weekday_median": 73.5
+    },
+    {
+      "daily_count": 548,
+      "date": "2025-01-22",
+      "ratio": 6.4094,
+      "review_status": "PENDING",
+      "robust_z": 25.996,
+      "weekday_median": 85.5
+    },
+    {
+      "daily_count": 221,
+      "date": "2024-07-28",
+      "ratio": 5.6667,
+      "review_status": "PENDING",
+      "robust_z": 20.4596,
+      "weekday_median": 39.0
+    },
+    {
+      "daily_count": 631,
+      "date": "2024-02-15",
+      "ratio": 6.4388,
+      "review_status": "PENDING",
+      "robust_z": 16.7211,
+      "weekday_median": 98.0
+    },
+    {
+      "daily_count": 163,
+      "date": "2023-12-31",
+      "ratio": 5.1746,
+      "review_status": "PENDING",
+      "robust_z": 16.1265,
+      "weekday_median": 31.5
+    },
+    {
+      "daily_count": 199,
+      "date": "2023-10-30",
+      "ratio": 2.9481,
+      "review_status": "PENDING",
+      "robust_z": 16.0057,
+      "weekday_median": 67.5
+    },
+    {
+      "daily_count": 514,
+      "date": "2023-03-03",
+      "ratio": 7.969,
+      "review_status": "PENDING",
+      "robust_z": 15.957,
+      "weekday_median": 64.5
+    },
+    {
+      "daily_count": 351,
+      "date": "2024-02-09",
+      "ratio": 4.7755,
+      "review_status": "PENDING",
+      "robust_z": 14.3978,
+      "weekday_median": 73.5
+    },
+    {
+      "daily_count": 208,
+      "date": "2024-11-11",
+      "ratio": 2.5679,
+      "review_status": "PENDING",
+      "robust_z": 14.1111,
+      "weekday_median": 81.0
+    },
+    {
+      "daily_count": 170,
+      "date": "2023-12-06",
+      "ratio": 2.7419,
+      "review_status": "PENDING",
+      "robust_z": 13.716,
+      "weekday_median": 62.0
+    },
+    {
+      "daily_count": 209,
+      "date": "2023-12-04",
+      "ratio": 3.0963,
+      "review_status": "PENDING",
+      "robust_z": 12.7254,
+      "weekday_median": 67.5
+    },
+    {
+      "daily_count": 197,
+      "date": "2023-12-13",
+      "ratio": 3.0308,
+      "review_status": "PENDING",
+      "robust_z": 12.719,
+      "weekday_median": 65.0
+    },
+    {
+      "daily_count": 709,
+      "date": "2024-02-17",
+      "ratio": 10.9077,
+      "review_status": "PENDING",
+      "robust_z": 12.4106,
+      "weekday_median": 65.0
+    },
+    {
+      "daily_count": 106,
+      "date": "2023-05-14",
+      "ratio": 4.4167,
+      "review_status": "PENDING",
+      "robust_z": 12.2907,
+      "weekday_median": 24.0
+    },
+    {
+      "daily_count": 274,
+      "date": "2025-01-23",
+      "ratio": 3.8322,
+      "review_status": "PENDING",
+      "robust_z": 11.8769,
+      "weekday_median": 71.5
+    },
+    {
+      "daily_count": 141,
+      "date": "2024-07-21",
+      "ratio": 3.76,
+      "review_status": "PENDING",
+      "robust_z": 11.635,
+      "weekday_median": 37.5
+    },
+    {
+      "daily_count": 280,
+      "date": "2025-07-06",
+      "ratio": 7.5676,
+      "review_status": "PENDING",
+      "robust_z": 11.3035,
+      "weekday_median": 37.0
+    },
+    {
+      "daily_count": 138,
+      "date": "2025-04-05",
+      "ratio": 4.3125,
+      "review_status": "PENDING",
+      "robust_z": 10.9994,
+      "weekday_median": 32.0
+    },
+    {
+      "daily_count": 241,
+      "date": "2025-03-09",
+      "ratio": 6.5135,
+      "review_status": "PENDING",
+      "robust_z": 9.8283,
+      "weekday_median": 37.0
+    },
+    {
+      "daily_count": 160,
+      "date": "2023-12-05",
+      "ratio": 2.7119,
+      "review_status": "PENDING",
+      "robust_z": 9.7319,
+      "weekday_median": 59.0
+    }
+  ],
+  "robust_scale": "max(1,sqrt(weekday_median),1.4826*MAD)",
+  "rules": [
+    {
+      "cooldown_alert_count": 64,
+      "cooldown_days": 7,
+      "method": "ratio",
+      "minimum_count": 20,
+      "raw_alert_count": 158,
+      "raw_alerts_per_30_days": 4.8417,
+      "threshold": 1.5
+    },
+    {
+      "cooldown_alert_count": 41,
+      "cooldown_days": 7,
+      "method": "ratio",
+      "minimum_count": 20,
+      "raw_alert_count": 91,
+      "raw_alerts_per_30_days": 2.7886,
+      "threshold": 2.0
+    },
+    {
+      "cooldown_alert_count": 20,
+      "cooldown_days": 7,
+      "method": "ratio",
+      "minimum_count": 20,
+      "raw_alert_count": 38,
+      "raw_alerts_per_30_days": 1.1645,
+      "threshold": 3.0
+    },
+    {
+      "cooldown_alert_count": 43,
+      "cooldown_days": 7,
+      "method": "weekday_robust_z",
+      "minimum_count": 20,
+      "raw_alert_count": 106,
+      "raw_alerts_per_30_days": 3.2482,
+      "threshold": 3.0
+    },
+    {
+      "cooldown_alert_count": 32,
+      "cooldown_days": 7,
+      "method": "weekday_robust_z",
+      "minimum_count": 20,
+      "raw_alert_count": 71,
+      "raw_alerts_per_30_days": 2.1757,
+      "threshold": 4.0
+    },
+    {
+      "cooldown_alert_count": 30,
+      "cooldown_days": 7,
+      "method": "weekday_robust_z",
+      "minimum_count": 20,
+      "raw_alert_count": 60,
+      "raw_alerts_per_30_days": 1.8386,
+      "threshold": 5.0
+    }
+  ],
+  "runtime_eligible": false,
+  "scope": "total_daily_appeals_in_one_export",
+  "selection_status": "NO_REVIEWED_INCIDENT_LABELS",
+  "source_sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+  "status": "EXPLORATORY_NO_GROUND_TRUTH",
+  "time_to_detect": null,
+  "unit": "one_region_total_per_day"
+}
