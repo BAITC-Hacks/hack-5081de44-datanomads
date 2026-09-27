@@ -56,6 +56,20 @@ class EmbedderCandidateTests(unittest.TestCase):
             self.assertEqual(metrics["test"]["candidate_count"], 3)
             self.assertNotIn("Обращение", json.dumps(metrics, ensure_ascii=False))
             self.assertNotIn("query_id", json.dumps(metrics, ensure_ascii=False))
+            metrics_path = output / "metrics.json"
+            manifest_path = output / "manifest.json"
+            original_metrics = metrics_path.read_bytes()
+            original_manifest = manifest_path.read_bytes()
+            metrics["frozen_evaluation_version"] = "another_eval"
+            metrics_path.write_text(json.dumps(metrics, ensure_ascii=False), encoding="utf-8")
+            changed_manifest = json.loads(original_manifest)
+            changed_manifest["bundle_files"]["metrics.json"] = checksum(metrics_path)
+            changed_manifest["evaluation_report_sha256"] = checksum(metrics_path)
+            manifest_path.write_text(json.dumps(changed_manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "manifest and evaluation disagree"):
+                verify_embedder_candidate(output, load_model=False)
+            metrics_path.write_bytes(original_metrics)
+            manifest_path.write_bytes(original_manifest)
             command = [sys.executable, str(Path(__file__).resolve().parents[3] / "scripts/train_embedder_candidate.py"),
                        "verify", "--artifact", str(output)]
             completed = subprocess.run(command, capture_output=True, text=True, check=False)

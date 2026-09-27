@@ -118,8 +118,13 @@ def verify_embedder_candidate(artifact: Path, *, load_model: bool = True) -> Emb
     metrics = json.loads((artifact / "metrics.json").read_text(encoding="utf-8"))
     config = json.loads((artifact / "training_config.json").read_text(encoding="utf-8"))
     test_metrics = metrics.get("test") if isinstance(metrics, dict) else None
-    if (not isinstance(metrics, dict) or metrics.get("dataset_version") != manifest.dataset_version or
+    if (not isinstance(metrics, dict) or
+            metrics.get("report_version") != "embedder-candidate-evaluation.v1" or
+            metrics.get("dataset_version") != manifest.dataset_version or
+            metrics.get("dataset_content_sha256") != manifest.dataset_content_sha256 or
+            metrics.get("frozen_evaluation_version") != manifest.frozen_evaluation_version or
             metrics.get("frozen_evaluation_sha256") != manifest.frozen_evaluation_sha256 or
+            metrics.get("synthetic") != manifest.synthetic or
             metrics.get("model_version") != manifest.model_version or
             not isinstance(test_metrics, dict) or test_metrics.get("metrics") != manifest.retrieval_metrics or
             config != manifest.training_config):
