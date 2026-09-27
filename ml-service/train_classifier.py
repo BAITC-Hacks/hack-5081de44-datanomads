@@ -26,7 +26,7 @@ from app.confidence import ConfidencePolicy, POLICY_VERSION
 from app.classifier_input import encode_classifier_texts
 from training.atomic_publish import publish_directory
 from training.classifier_baselines import load_verified_classifier_package
-from training.dataset_builder import checksum as file_checksum
+from training.dataset_builder import checksum as file_checksum, normalized_text
 
 LABELS = tuple(topic.topic_id for topic in TOPICS if topic.topic_id != "other")
 
@@ -50,7 +50,7 @@ def validate_splits(splits: dict[str, list[dict[str, str]]]) -> None:
     seen_texts: set[str] = set()
     for name, rows in splits.items():
         scenarios = {row["scenario_id"] for row in rows}
-        texts = {" ".join(row["text"].casefold().split()) for row in rows}
+        texts = {normalized_text(row["text"]) for row in rows}
         if seen_scenarios & scenarios or seen_texts & texts:
             raise ValueError(f"scenario or text leakage into {name}")
         if {row["topic_id"] for row in rows} != set(LABELS):

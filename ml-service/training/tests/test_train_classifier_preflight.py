@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import torch
 
-from train_classifier import LABELS, calibration_report, load_reviewed_splits, score
+from train_classifier import LABELS, calibration_report, load_reviewed_splits, score, validate_splits
 from training.classifier_token_audit import audit_token_lengths
 from test_dataset_builder import build_fixture_package, fixture_inputs
 
@@ -19,6 +19,20 @@ class StubTokenizer:
 
 
 class TrainClassifierPreflightTests(unittest.TestCase):
+    def test_demo_split_rejects_canonically_equivalent_text(self) -> None:
+        splits = {
+            name: [
+                {"scenario_id": f"{name}_{label}_{language}", "topic_id": label,
+                 "language": language, "text": f"Текст {name} {label} {language}"}
+                for label in LABELS for language in ("RU", "KZ")
+            ]
+            for name in ("train", "validation", "test")
+        }
+        splits["train"][0]["text"] = "Обращение: ё"
+        splits["validation"][0]["text"] = "Обращение: е\u0308"
+        with self.assertRaisesRegex(ValueError, "text leakage"):
+            validate_splits(splits)
+
     def test_score_includes_class_balance_and_error_matrix(self) -> None:
         metrics = score(["roads", "roads", "water_supply"], ["roads", "water_supply", "water_supply"])
         self.assertEqual(metrics["accuracy"], 0.666667)
