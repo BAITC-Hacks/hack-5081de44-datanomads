@@ -530,7 +530,10 @@ is high load only when its count strictly exceeds the threshold. The report
 aggregates TP/FP/FN/TN and precision/recall/F1 for predicted versus observed
 high-load days. Undefined ratios are `null`. This is an aggregate-count proxy,
 not reviewed peak labels or evidence of staffing capacity; model selection
-still uses WAPE only. The checked-in regional reports use the earlier v2 schema.
+still uses WAPE only. The checked-in Eastern Kazakhstan report uses the earlier
+v2 schema; its v3 proxy requires refitting Prophet on every eligible origin.
+The Almaty Region report uses v3, but has no eligible windows and therefore
+contains no high-load metrics or Prophet fit.
 
 ## Spike exploration on regional counts
 

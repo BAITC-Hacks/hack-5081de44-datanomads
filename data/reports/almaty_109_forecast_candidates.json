@@ -2,6 +2,7 @@
   "calendar_days": 315,
   "count_prediction_policy": "clip_negative_to_zero",
   "first_date": "2025-01-01",
+  "high_load_day_proxy_policy": "strictly_above_pre_origin_observed_history_p90_nearest_rank.v1",
   "interval_status": "NOT_EVALUATED",
   "invalid_csv_or_date_row_count": 0,
   "last_date": "2025-11-11",
@@ -19,7 +20,7 @@
   },
   "prophet_version": null,
   "record_count": 19912,
-  "report_version": "forecast-candidates.v2",
+  "report_version": "forecast-candidates.v3",
   "results": [
     {
       "available_calendar_days": 315,
