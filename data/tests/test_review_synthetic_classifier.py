@@ -115,6 +115,25 @@ class SyntheticClassifierReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             read_reviews(self.review, self.candidates, DEFAULT_SEEDS)
 
+    def test_duplicate_json_fields_fail_closed(self) -> None:
+        candidate = self.candidates.read_text(encoding="utf-8")
+        self.assertIn('"text":', candidate)
+        self.candidates.write_text(
+            candidate.replace('"text":', '"text": "spoof", "text":', 1), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "line 1: duplicate JSON field"):
+            prepare(self.candidates, DEFAULT_SEEDS, Path(self.temporary.name) / "other.jsonl")
+
+        self.candidates.write_text(candidate, encoding="utf-8")
+        review = self.review.read_text(encoding="utf-8")
+        self.assertIn('"topic_correct": null', review)
+        self.review.write_text(
+            review.replace('"topic_correct": null', '"topic_correct": false, "topic_correct": null', 1),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "line 1: duplicate JSON field"):
+            read_reviews(self.review, self.candidates, DEFAULT_SEEDS)
+
     def test_rejects_sensitive_candidate_before_queue(self) -> None:
         rows = [json.loads(line) for line in self.candidates.read_text(encoding="utf-8").splitlines()]
         rows[0]["text"] = "ИИН 000000000000"

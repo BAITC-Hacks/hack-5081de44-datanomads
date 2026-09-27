@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from data.normalization.pii import scan_pii
 from scripts.pulse_sdg import LANGUAGES
+from scripts.strict_json import unique_object
 
 
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
@@ -56,9 +57,11 @@ def _read_jsonl(path: Path) -> list[dict]:
             if not line.strip():
                 continue
             try:
-                row = json.loads(line)
+                row = json.loads(line, object_pairs_hook=unique_object)
             except json.JSONDecodeError as error:
                 raise ValueError(f"line {line_number}: invalid JSON") from error
+            except ValueError as error:
+                raise ValueError(f"line {line_number}: {error}") from error
             if not isinstance(row, dict):
                 raise ValueError(f"line {line_number}: expected object")
             rows.append(row)

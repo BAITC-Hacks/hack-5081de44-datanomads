@@ -134,6 +134,24 @@ class RetrievalRelationReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete"):
             read_reviews(self.review, PILOT)
 
+    def test_duplicate_json_fields_fail_closed(self) -> None:
+        source = Path(self.temporary.name) / "duplicate-source.jsonl"
+        source.write_text(
+            PILOT.read_text(encoding="utf-8").replace('"pair_id":', '"pair_id":"spoof","pair_id":', 1),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "line 1: duplicate JSON field"):
+            read_source(source)
+
+        review = self.review.read_text(encoding="utf-8")
+        self.assertIn('"facts_consistent": null', review)
+        self.review.write_text(
+            review.replace('"facts_consistent": null', '"facts_consistent": false, "facts_consistent": null', 1),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "line 1: duplicate JSON field"):
+            read_reviews(self.review, PILOT)
+
     def test_source_rejects_cross_group_entity_and_sensitive_context(self) -> None:
         rows = [json.loads(line) for line in PILOT.read_text(encoding="utf-8").splitlines()]
         modified = Path(self.temporary.name) / "modified.jsonl"

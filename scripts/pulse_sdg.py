@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import TOPIC_DEFINITIONS
+from scripts.strict_json import unique_object
 
 DEFAULT_SEEDS = ROOT / "data/sdg/pilot_scenarios.jsonl"
 CATALOG = ROOT / "data/catalogs/almaty_2025_taxonomy_review.json"
@@ -62,7 +63,7 @@ def source_checksum(path: Path) -> str:
 
 
 def read_seeds(path: Path) -> dict[str, dict]:
-    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     allowed = {
         (pair["source_category"], pair["source_service"]): pair
         for pair in catalog["pairs"]
@@ -73,7 +74,10 @@ def read_seeds(path: Path) -> dict[str, dict]:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
-            seed = json.loads(line)
+            try:
+                seed = json.loads(line, object_pairs_hook=unique_object)
+            except ValueError as error:
+                raise ValueError(f"seed line {line_number}: {error}") from error
             if (not isinstance(seed, dict) or not REQUIRED_SEED_FIELDS <= set(seed) or
                     set(seed) - REQUIRED_SEED_FIELDS - OPTIONAL_SEED_FIELDS):
                 raise ValueError(f"seed line {line_number}: unexpected fields")

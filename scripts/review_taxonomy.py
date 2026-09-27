@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from data.normalization.pii import scan_pii
 from data.schemas.taxonomy import CANONICAL_SOURCE_SYSTEMS, TOPIC_DEFINITIONS
+from scripts.strict_json import unique_object
 
 
 CATALOG = ROOT / "data/catalogs/almaty_2025_taxonomy_review.json"
@@ -41,7 +42,7 @@ def sha256(path: Path) -> str:
 
 
 def prepare_almaty(catalog_path: Path, output_path: Path) -> int:
-    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     if (not isinstance(catalog, dict) or not isinstance(catalog.get("pairs"), list) or
             not isinstance(catalog.get("source"), dict) or
             not isinstance(catalog["source"].get("sha256"), str) or
@@ -152,7 +153,7 @@ def _validate_row(row: dict, line_number: int) -> None:
 
 
 def read_reviews(path: Path, catalog_path: Path = CATALOG) -> list[dict]:
-    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     if (not isinstance(catalog, dict) or not isinstance(catalog.get("pairs"), list) or
             not isinstance(catalog.get("source"), dict) or
             not isinstance(catalog["source"].get("sha256"), str)):
@@ -172,7 +173,10 @@ def read_reviews(path: Path, catalog_path: Path = CATALOG) -> list[dict]:
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line, object_pairs_hook=unique_object)
+        except ValueError as error:
+            raise ValueError(f"review line {line_number}: {error}") from error
         if not isinstance(row, dict):
             raise ValueError(f"review line {line_number}: expected object")
         _validate_row(row, line_number)

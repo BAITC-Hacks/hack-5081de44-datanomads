@@ -66,6 +66,16 @@ class PilotSdgTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         read_seeds(path)
 
+    def test_seed_rejects_duplicate_json_fields(self) -> None:
+        seed = next(iter(read_seeds(DEFAULT_SEEDS).values()))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scenario.jsonl"
+            payload = json.dumps(seed, ensure_ascii=False)
+            spoofed = payload.replace('"topic_id":', '"topic_id": "spoof", "topic_id":', 1)
+            path.write_text(spoofed + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "seed line 1: duplicate JSON field"):
+                read_seeds(path)
+
     def test_authored_seed_cannot_claim_customer_catalog_origin(self) -> None:
         seeds = read_seeds(DEFAULT_SEEDS)
         authored = seeds["telecom_001"]

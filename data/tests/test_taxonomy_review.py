@@ -37,6 +37,30 @@ class TaxonomyReviewTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 read_reviews(queue)
 
+    def test_catalog_and_review_reject_duplicate_json_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = root / "catalog.json"
+            source = CATALOG.read_text(encoding="utf-8")
+            self.assertIn('"source_category":', source)
+            catalog.write_text(
+                source.replace('"source_category":', '"source_category": "spoof", "source_category":', 1),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
+                prepare_almaty(catalog, root / "other.jsonl")
+
+            queue = root / "review.jsonl"
+            prepare_almaty(CATALOG, queue)
+            review = queue.read_text(encoding="utf-8")
+            self.assertIn('"decision": "PENDING"', review)
+            queue.write_text(
+                review.replace('"decision": "PENDING"', '"decision": "APPROVED", "decision": "PENDING"', 1),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "review line 1: duplicate JSON field"):
+                read_reviews(queue)
+
     def test_export_requires_explicit_human_provenance_and_keeps_composite_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             queue = Path(directory) / "review.jsonl"
