@@ -51,7 +51,13 @@ class SpikeReviewExportTests(unittest.TestCase):
                         writer.writerow([day.strftime("%d.%m.%Y 10:00:00"), "PRIVATE_SENTINEL"])
 
             report = build_report(path)
+            self.assertEqual(report["report_version"], "spike-review-candidates.v2")
             self.assertEqual(report["source_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(report["evaluated_days"], len(report["evaluated_dates"]))
+            self.assertEqual(
+                report["evaluated_date_sha256"],
+                hashlib.sha256("\n".join(report["evaluated_dates"]).encode("ascii")).hexdigest(),
+            )
             self.assertEqual(report["record_count"], 65 * 40 + 80)
             self.assertEqual(report["review_item_count"], 1)
             self.assertEqual(report["review_items"][0]["date"], "2025-03-05")

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ from scripts.evaluate_spike_csv import evaluate_series, score_series
 def review_candidates(series: list[int | None], first_day: date) -> dict:
     evaluation = evaluate_series(series, first_day)
     scored = score_series(series, first_day)
+    evaluated_dates = [row["date"] for row in scored]
     candidates: dict[int, dict] = {}
     for rule in evaluation["rules"]:
         previous_emitted = -rule["cooldown_days"]
@@ -54,6 +56,8 @@ def review_candidates(series: list[int | None], first_day: date) -> dict:
     return {
         "status": evaluation["status"],
         "evaluated_days": evaluation["evaluated_days"],
+        "evaluated_dates": evaluated_dates,
+        "evaluated_date_sha256": hashlib.sha256("\n".join(evaluated_dates).encode("ascii")).hexdigest(),
         "excluded_unobserved_or_incomplete_history_days": evaluation["excluded_unobserved_or_incomplete_history_days"],
         "rules": evaluation["rules"],
         "review_item_count": len(candidates),
@@ -64,7 +68,7 @@ def review_candidates(series: list[int | None], first_day: date) -> dict:
 def build_report(path: Path) -> dict:
     series, first_day, last_day, record_count, invalid_rows, digest = daily_counts(path)
     return {
-        "report_version": "spike-review-candidates.v1",
+        "report_version": "spike-review-candidates.v2",
         "source_sha256": digest,
         "scope": "total_daily_appeals_in_one_export",
         "unit": "one_region_total_per_day",
@@ -83,6 +87,7 @@ def build_report(path: Path) -> dict:
             "coverage": "all_evaluated_days_in_same_scope_including_non_alert_days",
             "required_incident_fields": ["incident_id", "onset_date", "end_date", "review_status"],
             "complete_coverage_assertion_required": True,
+            "daily_labels_required_for_every_evaluated_date": True,
         },
         "precision": None,
         "recall": None,
