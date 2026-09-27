@@ -24,8 +24,10 @@ from data.schemas.taxonomy import TOPIC_DEFINITIONS
 
 SEED = 109
 SCENARIO_BANK = ROOT / "data/sdg/classifier_scenarios.tsv"
+MIXED_BANK = ROOT / "data/sdg/classifier_mixed_scenarios.tsv"
 CHALLENGE_BANK = ROOT / "data/sdg/classifier_challenges.tsv"
 DEFAULT_OUTPUT = ROOT / "data/sdg/generated/classifier_v2"
+MIXED_OUTPUT = ROOT / "data/sdg/generated/classifier_v3"
 SPLITS = ("train",) * 7 + ("validation",) + ("test",) * 2
 TOPIC_IDS = {topic["id"] for topic in TOPIC_DEFINITIONS}
 CHALLENGE_DECISIONS = {"UNKNOWN", "OTHER", "NEEDS_REVIEW"}
@@ -87,6 +89,38 @@ def read_scenarios(path: Path) -> list[dict[str, str]]:
     if set(counts) != expected_topics or any(count != 10 for count in counts.values()):
         raise ValueError("scenario bank must contain exactly 10 scenarios for each of the 16 topics")
     return scenarios
+
+
+def read_mixed_scenarios(path: Path, scenarios: list[dict[str, str]]) -> dict[str, str]:
+    source = {scenario["scenario_id"]: scenario for scenario in scenarios}
+    mixed = {}
+    seen_texts = set()
+    topic_splits = set()
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames != ["scenario_id", "mixed_text"]:
+            raise ValueError("mixed scenario bank has unexpected columns")
+        for line_number, row in enumerate(reader, start=2):
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError(f"invalid mixed scenario structure at line {line_number}")
+            scenario_id = row["scenario_id"]
+            scenario = source.get(scenario_id)
+            text = row["mixed_text"].strip()
+            if (scenario is None or scenario_id in mixed or not text or
+                    text in (scenario["RU"], scenario["KZ"]) or
+                    not re.search(r"[әғқңөұүһіӘҒҚҢӨҰҮҺІ]", text) or
+                    scan_pii(text).detected or text.casefold() in seen_texts):
+                raise ValueError(f"invalid mixed scenario at line {line_number}")
+            split = SPLITS[int(scenario_id.rsplit("-", 1)[1]) - 1]
+            pair = (scenario["topic_id"], split)
+            if pair in topic_splits:
+                raise ValueError(f"repeated mixed topic/split at line {line_number}")
+            mixed[scenario_id] = text
+            seen_texts.add(text.casefold())
+            topic_splits.add(pair)
+    if topic_splits != {(topic, split) for topic in TOPIC_IDS for split in ("train", "validation", "test")}:
+        raise ValueError("mixed scenario bank needs one scenario per topic and split")
+    return mixed
 
 
 def read_challenges(path: Path) -> list[dict[str, object]]:
@@ -153,9 +187,11 @@ def render_variants(fact: str, language: str, scenario_id: str) -> list[str]:
 
 
 def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
-             challenge_bank_path: Path = CHALLENGE_BANK) -> dict[str, object]:
+             challenge_bank_path: Path = CHALLENGE_BANK,
+             mixed_bank_path: Path | None = None) -> dict[str, object]:
     scenarios = read_scenarios(bank_path)
     challenges = read_challenges(challenge_bank_path)
+    mixed = read_mixed_scenarios(mixed_bank_path, scenarios) if mixed_bank_path else {}
     output_dir.mkdir(parents=True, exist_ok=False)
     paths = {split: output_dir / f"{split}.jsonl" for split in ("train", "validation", "test")}
     counts: Counter[tuple[str, str, str]] = Counter()
@@ -169,8 +205,10 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
             issue_index = int(scenario_id.rsplit("-", 1)[1]) - 1
             split = SPLITS[issue_index]
             groups[split].add(scenario_id)
-            for language in ("RU", "KZ"):
-                variants = render_variants(scenario[language], language, scenario_id)
+            languages = ("RU", "KZ") + (("MIXED",) if scenario_id in mixed else ())
+            for language in languages:
+                variants = ([mixed[scenario_id]] if language == "MIXED" else
+                            render_variants(scenario[language], language, scenario_id))
                 for variant_index, text in enumerate(variants, start=1):
                     if text in seen_texts or scan_pii(text).detected:
                         raise ValueError(f"duplicate or sensitive-looking generated text for {scenario_id}")
@@ -185,6 +223,8 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
                         "synthetic": True,
                         "review_status": "PENDING",
                     }
+                    if mixed_bank_path:
+                        record["approved_for_training"] = False
                     streams[split].write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
                     counts[(split, topic_id, language)] += 1
 
@@ -195,9 +235,10 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
         for challenge in challenges:
             stream.write(json.dumps(challenge, ensure_ascii=False, sort_keys=True) + "\n")
     manifest = {
-        "dataset_version": "synthetic-classifier-v2",
+        "dataset_version": "synthetic-classifier-v3" if mixed_bank_path else "synthetic-classifier-v2",
         "synthetic": True,
-        "purpose": "local classifier demo; not evidence of quality on real 109 appeals",
+        "purpose": ("synthetic pipeline and language-slice testing; not evidence of quality on real 109 appeals"
+                    if mixed_bank_path else "local classifier demo; not evidence of quality on real 109 appeals"),
         "review_status": "PENDING",
         "generation_method": "deterministic_scenario_composition",
         "seed": SEED,
@@ -214,18 +255,28 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
         "split_counts": {split: sum(count for (name, _, _), count in counts.items() if name == split) for split in paths},
         "scenario_counts_by_split": {split: len(group) for split, group in groups.items()},
         "topic_count": len(TOPIC_DEFINITIONS),
-        "language_counts": {language: sum(count for (_, _, name), count in counts.items() if name == language) for language in PHRASES},
+        "language_counts": {language: sum(count for (_, _, name), count in counts.items() if name == language)
+                            for language in sorted({name for _, _, name in counts})},
         "files": {split: {"name": path.name, "sha256": sha256(path)} for split, path in paths.items()},
     }
+    if mixed_bank_path:
+        manifest.update({
+            "approved_for_training": False,
+            "profile_status": "SYNTHETIC_TEST_ONLY",
+            "mixed_bank_sha256": sha256(mixed_bank_path),
+            "mixed_scenario_count": len(mixed),
+        })
     (output_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--mixed-bank", type=Path, help="versioned authored MIXED scenario source for test-only v3")
     args = parser.parse_args()
-    manifest = generate(args.output_dir)
+    output_dir = args.output_dir or (MIXED_OUTPUT if args.mixed_bank else DEFAULT_OUTPUT)
+    manifest = generate(output_dir, mixed_bank_path=args.mixed_bank)
     print(json.dumps({key: manifest[key] for key in (
         "dataset_version", "record_count", "split_counts", "scenario_count",
         "language_counts", "challenge_count",
