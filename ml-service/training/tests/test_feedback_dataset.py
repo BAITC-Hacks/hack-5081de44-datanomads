@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+import unicodedata
 
 from training.dataset_builder import checksum
 from training.feedback_dataset import build_candidate, load_verified_candidate
@@ -135,6 +136,18 @@ class FeedbackCandidateTests(unittest.TestCase):
         })
         self.assertFalse((self.root / "out/candidate_v1").exists())
 
+    def test_rejects_canonically_equivalent_frozen_text(self) -> None:
+        rows = [json.loads(line) for line in (self.frozen / "classifier/test.jsonl").read_text(encoding="utf-8").splitlines()]
+        frozen_text = next(row["text"] for row in rows if "ё" in row["text"].casefold())
+        decomposed = unicodedata.normalize("NFD", frozen_text)
+        self.assertNotEqual(decomposed, frozen_text)
+        row = feedback(1)
+        row["original_text"] = decomposed
+        write_jsonl(self.input, [row])
+        result = self.build(self.root / "out")
+        self.assertEqual(result["rejected_counts"], {"FROZEN_TEXT": 1})
+        self.assertFalse((self.root / "out/candidate_v1").exists())
+
     def test_deduplicates_feedback_id_and_keeps_latest_ticket_decision(self) -> None:
         first = feedback(1)
         later = feedback(2, confirmed_topic="electricity")
@@ -209,8 +222,9 @@ class FeedbackCandidateTests(unittest.TestCase):
         train_path.write_bytes(original)
 
         rows = [json.loads(line) for line in original.decode("utf-8").splitlines()]
-        frozen_text = json.loads((self.frozen / "classifier/test.jsonl").read_text(encoding="utf-8").splitlines()[0])["text"]
-        rows[0]["text"] = frozen_text
+        frozen_rows = [json.loads(line) for line in (self.frozen / "classifier/test.jsonl").read_text(encoding="utf-8").splitlines()]
+        frozen_text = next(row["text"] for row in frozen_rows if "ё" in row["text"].casefold())
+        rows[0]["text"] = unicodedata.normalize("NFD", frozen_text)
         write_jsonl(train_path, rows)
         manifest_path = package / "manifest.json"
         changed = json.loads(manifest_path.read_text(encoding="utf-8"))

@@ -88,7 +88,8 @@ PYTHONPATH=ml-service .venv/bin/python scripts/build_feedback_candidate.py \
 ```
 
 Builder проверяет полный checksum frozen package, затем исключает frozen
-IDs, groups и точные нормализованные тексты classifier/retrieval test. При
+IDs, groups и точные нормализованные тексты classifier/retrieval test
+(Unicode NFC, casefold и свёртка пробелов). При
 повторном feedback ID сохраняется одна идентичная строка; конфликтующие
 версии ID отклоняются целиком. Для одного ticket выбирается последнее
 feedback по времени; остальные учитываются как `SUPERSEDED_TICKET_FEEDBACK`.

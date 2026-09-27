@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import random
 import re
+import unicodedata
 from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -38,7 +39,7 @@ def checksum(path: Path) -> str:
 
 
 def normalized_text(text: str) -> str:
-    return " ".join(text.casefold().split())
+    return " ".join(unicodedata.normalize("NFC", text.casefold()).split())
 
 
 class ReviewedRecord(BaseModel):
