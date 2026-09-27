@@ -109,6 +109,30 @@ do not select a strategy or prove model quality. Frozen test examples are
 verified by package checksum, but their token lengths are not computed. The
 current unreviewed synthetic demo is not evidence about customer appeal lengths.
 
+The existing offline classifier trainer also accepts a verified reviewed
+package. It checks the package, requires all 16 topics used by the current
+runtime and matches the token audit to the package and local tokenizer before
+loading weights. The following command is an example after human review and
+input-strategy selection; `384` is not an automatic recommendation:
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python ml-service/train_classifier.py \
+  --reviewed-dataset data/processed/reviewed-v1 \
+  --token-audit data/processed/reports/reviewed-v1-token-lengths.json \
+  --base-model /path/to/local/xlm-roberta-base \
+  --max-length 384 \
+  --output-dir ml-service/artifacts/classifier-reviewed-v1
+```
+
+The output directory must be new and outside the dataset package. The trainer
+uses only local model files in reviewed mode. Current reviewed package schema
+is synthetic; its holdout metrics are not real-citizen quality evidence. This
+runner uses full fine-tuning so the runtime can load one standalone local
+`safetensors` artifact without an adapter dependency. Batch size is configurable;
+GPU memory, inference latency and the 384/512/head+tail quality comparison must
+still be measured on the reviewed corpus. A failed run leaves no final artifact
+directory, and successful artifacts are not promoted automatically.
+
 ## Retrieval baselines
 
 Evaluate relation groups from the same reviewed package:

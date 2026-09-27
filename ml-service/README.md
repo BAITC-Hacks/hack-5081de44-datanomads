@@ -40,9 +40,12 @@ uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python torch==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 uv pip install --python .venv/bin/python transformers==4.57.6 -r ml-service/requirements.txt
 .venv/bin/python scripts/generate_synthetic_classifier.py
-.venv/bin/python ml-service/train_classifier.py
+.venv/bin/python ml-service/train_classifier.py \
+  --demo-data-dir data/sdg/generated/classifier_v1 \
+  --output-dir ml-service/artifacts/classifier-synthetic-v1
 ```
 
+Указывайте новый `--output-dir`: trainer не перезаписывает существующий artifact.
 Скрипт использует 20 000 train, 2 000 validation и 4 000 test примеров.
 Сценарии между выборками не пересекаются. Артефакт и метрики сохраняются в
 `ml-service/artifacts/classifier-synthetic-v1/`. `macro_f1` на test измеряет

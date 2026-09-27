@@ -22,13 +22,14 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
 
 
-def fixture_inputs(root: Path, *, groups_per_topic: int, retrieval_groups: int, prefix: str) -> tuple[Path, Path, Path, Path, list[dict], list[dict]]:
+def fixture_inputs(root: Path, *, groups_per_topic: int, retrieval_groups: int, prefix: str,
+                   topic_count: int = 10) -> tuple[Path, Path, Path, Path, list[dict], list[dict]]:
     scenario_source = root / f"{prefix}_scenarios.jsonl"
     relation_source = root / f"{prefix}_relations.jsonl"
     scenario_source.write_text(f"synthetic scenario source {prefix}\n", encoding="utf-8")
     relation_source.write_text(f"synthetic relation source {prefix}\n", encoding="utf-8")
     classifier = []
-    for topic in sorted(topic["id"] for topic in TOPIC_DEFINITIONS)[:10]:
+    for topic in sorted(topic["id"] for topic in TOPIC_DEFINITIONS)[:topic_count]:
         for index in range(groups_per_topic):
             scenario_id = f"{prefix}_{topic}_{index}"
             for language in ("RU", "KZ", "MIXED"):
