@@ -26,7 +26,12 @@ Baseline manifest поставляется в image по `/app/artifacts/manifes
 Отдельный volume `/app/trained-artifacts` монтируется в `ml-service` и
 `ml-worker` для будущих immutable versions; обновление image не перекрывается
 старым содержимым volume. Артефакты не загружаются из непроверенного URL во
-время inference.
+время inference. Compose явно передаёт `PULSE_MODEL_MANIFEST_PATH` обоим
+сервисам и по умолчанию указывает на bundled baseline. Runtime path должен
+указывать на JSON `model-manifest.v1` реестра моделей; это не отдельный
+per-model `manifest.yaml`, пример которого приведён ниже. После подключения
+совместимого runtime adapter переменную можно направить на registry JSON из
+`/app/trained-artifacts`; без адаптера production runtime остаётся `not_ready`.
 
 ## Manifest
 

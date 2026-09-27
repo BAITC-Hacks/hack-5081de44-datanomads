@@ -295,7 +295,16 @@ def check_compose(path: Path | None, manifest: Mapping[str, Any], *, strict_dock
         )
         return checks
 
-    command = [docker, "compose", "-f", str(path), "config", "--quiet"]
+    command = [
+        docker,
+        "compose",
+        "--profile",
+        str(manifest["compose"]["demo_profile"]),
+        "-f",
+        str(path),
+        "config",
+        "--quiet",
+    ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:

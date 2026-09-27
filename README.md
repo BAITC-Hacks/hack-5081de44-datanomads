@@ -33,6 +33,8 @@ docker compose --profile demo up --build
 
 `demo-seed` автоматически сверяет checked-in synthetic fixture с manifest и
 идемпотентно импортирует её в PostgreSQL/Qdrant при запуске demo profile.
+Nginx и ML worker ждут успешного seed, поэтому UI не открывается до появления
+начальных данных.
 
 В другом терминале:
 
@@ -48,7 +50,8 @@ OpenAPI-контракты находятся в `docs/openapi/`; Swagger/OpenAP
 `http://127.0.0.1:8081/api/v1/docs`. Эти порты привязаны только к loopback, а
 публичный Nginx возвращает 404 для документационных путей.
 
-Для полного локального reset PostgreSQL/Qdrant нужен явный флаг:
+Для полного локального reset PostgreSQL, Qdrant и ML artifact volume нужен
+явный флаг:
 
 ```bash
 PULSE_CONFIRM_RESET=1 scripts/demo-reset

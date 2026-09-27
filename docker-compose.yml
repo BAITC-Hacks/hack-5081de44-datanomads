@@ -42,6 +42,7 @@ services:
     restart: unless-stopped
     environment:
       PULSE_ENV: ${PULSE_ENV:-demo}
+      PULSE_MODEL_MANIFEST_PATH: ${PULSE_MODEL_MANIFEST_PATH:-/app/artifacts/manifest.json}
       ML_HOST: 0.0.0.0
       ML_PORT: 8000
       MODEL_DIR: ${MODEL_DIR:-/app/trained-artifacts}
@@ -75,6 +76,7 @@ services:
     command: ["python", "/app/worker.py", "--loop"]
     environment:
       PULSE_ENV: ${PULSE_ENV:-demo}
+      PULSE_MODEL_MANIFEST_PATH: ${PULSE_MODEL_MANIFEST_PATH:-/app/artifacts/manifest.json}
       DATABASE_URL: postgresql://${POSTGRES_USER:-pulse}:${POSTGRES_PASSWORD:-pulse_demo_only}@postgres:5432/${POSTGRES_DB:-pulse}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
@@ -95,6 +97,10 @@ services:
         condition: service_healthy
       ml-service:
         condition: service_healthy
+      core-api:
+        condition: service_healthy
+      demo-seed:
+        condition: service_completed_successfully
     networks: [pulse]
 
   demo-seed:
@@ -110,7 +116,8 @@ services:
       - ./data/demo:/data/demo:ro
       - ./data/manifests:/data/manifests:ro
     depends_on:
-      - core-api
+      core-api:
+        condition: service_healthy
     networks: [pulse]
 
   core-api:
@@ -158,6 +165,18 @@ services:
       - "127.0.0.1:${PULSE_CORE_HTTP_PORT:-8081}:8080"
     expose:
       - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
     depends_on:
       postgres:
         condition: service_healthy
@@ -183,14 +202,19 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
+    profiles: [demo]
     restart: unless-stopped
     ports:
       - "127.0.0.1:${PULSE_HTTP_PORT:-8080}:80"
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - frontend
-      - core-api
+      frontend:
+        condition: service_started
+      core-api:
+        condition: service_healthy
+      demo-seed:
+        condition: service_completed_successfully
     networks: [pulse]
 
 networks:

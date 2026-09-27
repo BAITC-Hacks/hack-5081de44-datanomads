@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 if [[ "${PULSE_CONFIRM_RESET:-}" != "1" ]]; then
   cat >&2 <<'EOF'
-This removes the local Pulse PostgreSQL and Qdrant volumes.
+This removes the local Pulse PostgreSQL, Qdrant, and ML artifact volumes.
 Re-run with PULSE_CONFIRM_RESET=1 to continue.
 EOF
   exit 2

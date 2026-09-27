@@ -8,7 +8,7 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates fonts-dejavu-core weasyprint \
+    && apt-get install --no-install-recommends -y ca-certificates fonts-dejavu-core python3 weasyprint \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/pulse109-core /usr/local/bin/pulse109-core
 EXPOSE 8080

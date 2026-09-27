@@ -13,6 +13,10 @@ docker compose --profile demo up --build
 
 Контейнер `demo-seed` ждёт `/readyz`, проверяет checksum synthetic fixture и
 идемпотентно загружает обращения через Core API. Его exit code должен быть 0.
+Core healthcheck ждёт успешные миграции и готовность PostgreSQL, Qdrant и ML;
+`ml-worker` и публичный Nginx запускаются только после успешного завершения
+seed. Поэтому первичный reindex не конкурирует с import, а публичные запросы
+не приходят до появления demo-данных.
 
 После запуска:
 
@@ -28,8 +32,8 @@ scripts/smoke
 docker compose --profile demo down --remove-orphans
 ```
 
-Полный reset demo (удаляет PostgreSQL/Qdrant volumes) требует явного
-подтверждения:
+Полный reset demo (удаляет PostgreSQL, Qdrant и ML artifact volumes) требует
+явного подтверждения:
 
 ```bash
 PULSE_CONFIRM_RESET=1 scripts/demo-reset
@@ -52,9 +56,10 @@ PULSE_CONFIRM_RESET=1 scripts/demo-reset
 | `demo-seed` | — | core-api; profile `demo`, exits after import |
 | `nginx` | 80 → host `PULSE_HTTP_PORT` | frontend/core-api |
 
-Внутренние ML endpoints не публикуются на host и не проксируются Nginx.
-Опубликованные Compose ports для Nginx, PostgreSQL и Qdrant привязаны к
-`127.0.0.1`; сервисы внутри Compose продолжают обращаться друг к другу по
+ML docs и Core route index доступны локально на `ML_HTTP_PORT` и
+`PULSE_CORE_HTTP_PORT`; эти порты, как и Nginx, PostgreSQL и Qdrant, привязаны
+к `127.0.0.1`. Nginx возвращает 404 на docs paths и не проксирует внутренние
+ML endpoints. Сервисы внутри Compose продолжают обращаться друг к другу по
 внутренней сети. Для внешнего доступа нужен отдельный доверенный ingress.
 
 ## Production checklist
@@ -78,9 +83,10 @@ volumes, single replicas и placeholder credentials.
 
 ## Миграции и данные
 
-Миграции применяются отдельной явной командой/entrypoint Core API после
-доступности PostgreSQL, не «тихой» модификацией схемы на каждом запросе.
-Перед миграцией делаются backup и dry-run в staging. Изменение UnifiedTicket,
+Core применяет embedded migrations при старте после доступности PostgreSQL и
+до открытия HTTP listener; `/readyz` остаётся нездоровым, пока версия миграций
+не совпадает с бинарём. Это поддерживает свежие и существующие named volumes.
+Перед production migration делаются backup и dry-run в staging. Изменение UnifiedTicket,
 prediction/decision разделения, model metadata или learning state требует
 совместимого обновления API/OpenAPI и проверок старых записей.
 

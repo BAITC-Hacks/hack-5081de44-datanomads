@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import tempfile
 import subprocess
@@ -170,6 +171,55 @@ class SharedContractTests(unittest.TestCase):
         self.assertEqual(ml_main.app.docs_url, "/docs")
         self.assertEqual(ml_main.app.redoc_url, "/redoc")
         self.assertEqual(ml_main.app.openapi_url, "/openapi.json")
+
+    def test_demo_bootstrap_waits_for_readiness_and_seed_completion(self) -> None:
+        compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+        services = compose["services"]
+        healthcheck = services["core-api"]["healthcheck"]
+        healthcheck_command = " ".join(str(part) for part in healthcheck["test"])
+        self.assertIn("/readyz", healthcheck_command)
+        self.assertEqual(
+            services["demo-seed"]["depends_on"]["core-api"]["condition"],
+            "service_healthy",
+        )
+        self.assertIn("demo", services["nginx"]["profiles"])
+        for service_name in ("ml-worker", "nginx"):
+            with self.subTest(service=service_name):
+                dependencies = services[service_name]["depends_on"]
+                self.assertEqual(
+                    dependencies["demo-seed"]["condition"],
+                    "service_completed_successfully",
+                )
+                self.assertEqual(
+                    dependencies["core-api"]["condition"],
+                    "service_healthy",
+                )
+
+    def test_model_manifest_path_is_shared_and_defaults_to_bundled_baseline(self) -> None:
+        compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+        baseline_path = "${PULSE_MODEL_MANIFEST_PATH:-/app/artifacts/manifest.json}"
+        services = compose["services"]
+        for service_name in ("ml-service", "ml-worker"):
+            with self.subTest(service=service_name):
+                environment = services[service_name]["environment"]
+                self.assertEqual(environment["PULSE_ENV"], "${PULSE_ENV:-demo}")
+                self.assertEqual(environment["PULSE_MODEL_MANIFEST_PATH"], baseline_path)
+        manifest = json.loads((ROOT / "ml-service/artifacts/manifest.json").read_text())
+        self.assertTrue(
+            all(model["status"] == "DEMO_BASELINE" for model in manifest["models"].values())
+        )
+
+    def test_model_registry_uses_an_explicit_manifest_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "manifest.json"
+            manifest_path.write_bytes(MANIFEST.read_bytes())
+            with patch.dict(
+                os.environ,
+                {"PULSE_MODEL_MANIFEST_PATH": str(manifest_path)},
+            ):
+                registry = ModelRegistry(runtime_mode="demo")
+        self.assertEqual(registry.path, manifest_path)
+        self.assertTrue(registry.ready, registry.load_error)
 
     def test_schema_errors_do_not_include_rejected_values(self) -> None:
         with self.assertRaises(ContractValidationError) as raised:
