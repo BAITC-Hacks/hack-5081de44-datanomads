@@ -17,8 +17,10 @@ COPY ml-service/app ./app
 COPY ml-service/artifacts ./artifacts
 COPY ml-service/training ./training
 COPY ml-service/worker.py ./worker.py
+COPY scripts/pulse_sdg.py scripts/review_retrieval_relations.py scripts/review_synthetic_classifier.py ./scripts/
 COPY data/__init__.py ./data/__init__.py
 COPY data/normalization ./data/normalization
 COPY data/schemas ./data/schemas
+RUN python -c "import training.feedback_job"
 
 CMD ["python", "/app/worker.py", "--loop"]
