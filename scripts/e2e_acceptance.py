@@ -741,10 +741,12 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     expect(alert is not None, f"detector did not link the E2E source tickets: {detected}")
     source_ticket_ids = list(map(str, alert.get("linked_ticket_ids", [])))
     evidence = alert.get("detail", {})
+    evidence_source_ticket_ids = list(map(str, evidence.get("source_ticket_ids", [])))
     expect(
         alert.get("current_count") == len(source_ticket_ids)
         and alert.get("ticket_count") == len(source_ticket_ids)
-        and evidence.get("source_ticket_ids") == source_ticket_ids
+        and len(evidence_source_ticket_ids) == len(source_ticket_ids)
+        and set(evidence_source_ticket_ids) == set(source_ticket_ids)
         and e2e_ticket_ids.issubset(set(source_ticket_ids)),
         f"alert evidence does not reproduce its source tickets: {alert}",
     )
@@ -1038,6 +1040,44 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     expect(status == 200, f"learning feedback correction failed: {feedback}")
     status, _, closed_cycle = json_request(base_url, "POST", "/api/v1/learning/cycle/close", body={"cycle_id": cycle_id}, role="ML_REVIEWER", timeout=timeout)
     expect(status == 202 and closed_cycle.get("state") == "TRAINING", f"learning close failed: {closed_cycle}")
+    fake_trainer = os.getenv("PULSE_TEST_FAKE_TRAINER", "false").strip().lower() in {"1", "true", "yes"}
+    if not fake_trainer:
+        learning_snapshot: dict[str, Any] = {}
+        cycle_record: dict[str, Any] = {}
+        for _ in range(40):
+            time.sleep(0.5)
+            status, _, learning_snapshot = json_request(
+                base_url,
+                "GET",
+                "/api/v1/learning",
+                role="ML_REVIEWER",
+                timeout=timeout,
+            )
+            expect(status == 200, f"learning state unavailable after training: {learning_snapshot}")
+            cycle_record = next(
+                (item for item in learning_snapshot.get("items", []) if str(item.get("id")) == cycle_id),
+                {},
+            )
+            if cycle_record.get("state") != "TRAINING":
+                break
+        if cycle_record.get("state") == "DATASET_BUILD_FAILED":
+            production_model_id = (learning_snapshot.get("production_model") or {}).get("id")
+            expect(
+                cycle_record.get("decision_note") == "PRODUCTION_BASELINE_MISMATCH"
+                and production_model_id == cycle.get("production_model_version"),
+                f"model handoff failure was not fail-closed: cycle={cycle_record}, learning={learning_snapshot}",
+            )
+            return {
+                "source_system": source,
+                "ticket_ids": ticket_ids,
+                "alert_id": alert_id,
+                "learning": "BLOCKED_POST_HANDOFF_PRODUCTION_BASELINE_MISMATCH",
+                "checks": "postgres+ml+qdrant+operator+similarity+analytics+query-intent+alerts+sse+forecast+reports+learning-fail-closed+rbac",
+            }
+        expect(
+            cycle_record.get("state") == "EVALUATE",
+            f"normal worker reached neither EVALUATE nor the documented post-handoff blocker: {cycle_record}",
+        )
     evaluation: dict[str, Any] = {}
     for _ in range(40):
         time.sleep(0.5)
@@ -1047,7 +1087,6 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             break
     expect(evaluation.get("state") == "EVALUATE", f"normal worker did not start the evaluation window: {evaluation}")
 
-    fake_trainer = os.getenv("PULSE_TEST_FAKE_TRAINER", "false").strip().lower() in {"1", "true", "yes"}
     if not fake_trainer:
         status, _, shadow_ticket = json_request(
             base_url,

@@ -113,3 +113,40 @@ Core OpenAPI покрывает все 50 операций Axum, ML YAML сов�
 production identity gateway. Подключение pretrained E5, дообученный
 classifier/embedder и его held-out метрики отложены отдельно; обычный runtime
 не выдаёт фиктивный candidate.
+
+## Повторная проверка 2026-09-27 — Tasks 036 и 037
+
+На отдельном проекте `pulse109-task037` свежая установка обнаружила конфликт
+двух миграций с версией `005`. Миграция snapshot связей перенесена на версию
+`017`. После исправления fresh-volume запуск применил 17 уникальных миграций;
+`/readyz` сообщил `applied=17`, `expected=17`, `pending=0`, `failed=0`, а
+PostgreSQL подтвердил успешное применение версий 1–17.
+
+Проверен и сохранённый volume: проект остановлен без `-v`, затем повторно
+поднят через `docker compose -p pulse109-task037 --profile demo up -d
+--build`. Readiness остался `ready` с 17/17 миграциями; повторный demo seed
+сообщил `imported_rows=0`, `duplicate_rows=160`, `indexed_rows=0`.
+
+`scripts/e2e_acceptance.py --restart-core` прошёл P0-проверки API, PostgreSQL,
+ML, Qdrant, оператора, similarity, analytics, query intent, alerts/SSE,
+forecast, reports и RBAC. Learning завершился fail-closed со статусом
+`BLOCKED_POST_HANDOFF_PRODUCTION_BASELINE_MISMATCH`: production указывает на
+`classifier-deterministic-baseline-2026-09-21`, а запущенный ML runtime — на
+`classifier-demo-2026-09-21-001`. Production pointer не изменился; реальный
+bundle модели не подменялся.
+
+Также прошли `PULSE_BASE_URL=http://127.0.0.1:8080 scripts/smoke` и live
+`scripts/smoke_test.py` с PII probe и захватом логов: 56/56 проверок прошли,
+synthetic PII sentinel в 997 строках логов отсутствовал. Role-token probes и
+controlled-learning safety probe были пропущены из-за отсутствующих для них
+переменных конфигурации; observability schema probe сообщил advisory о
+недостающих полях.
+
+Task-037 live `/api/v1/assist/preview` вернул `actionable_context`; проверенный
+пример был классифицирован как уверенный и получил `status=not_needed`.
+Ветка уточнения при изменении службы или приоритета покрыта Rust unit tests;
+интерактивный suggested-сценарий в live demo не наблюдался. Полный backend,
+frontend и helper наборы прошли: 45 Rust unit + 24 API tests, 21 frontend test
+и production build. Rust tests запускались с
+`PULSE_WEASYPRINT_BIN=/tmp/pulse109-weasy-env/bin/weasyprint`, поскольку
+WeasyPrint отсутствует в системном PATH.
