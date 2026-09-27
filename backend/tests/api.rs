@@ -207,10 +207,11 @@ async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
         .unwrap();
     assert_eq!(pdf.status(), 200);
     let pdf = to_bytes(pdf.into_body(), usize::MAX).await.unwrap();
-    let pdf = String::from_utf8_lossy(&pdf);
-    assert!(pdf.contains("topic=TOPIC-DIGITAL"));
-    assert!(pdf.contains("Share"));
-    assert!(pdf.contains("Change vs previous"));
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert!(pdf.len() > 1_000);
+    assert!(pdf[pdf.len().saturating_sub(1_024)..]
+        .windows(5)
+        .any(|window| window == b"%%EOF"));
 
     let xlsx = application
         .clone()
@@ -226,8 +227,16 @@ async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
     let xlsx = to_bytes(xlsx.into_body(), usize::MAX).await.unwrap();
     let xlsx = String::from_utf8_lossy(&xlsx);
     assert!(xlsx.contains("topic=TOPIC-DIGITAL"));
-    assert!(xlsx.contains("share=100.0%"));
-    assert!(xlsx.contains("change=+1 (previous period: 0)"));
+    assert!(xlsx.contains("<t>period</t>"));
+    assert!(xlsx.contains("<t>region_id</t>"));
+    assert!(xlsx.contains("<t>topic_id</t>"));
+    assert!(xlsx.contains("<t>share_pct</t>"));
+    assert!(xlsx.contains("<t>change_abs</t>"));
+    assert!(xlsx.contains("<t>generated_at</t>"));
+    assert!(xlsx.contains("<t>alert_type</t>"));
+    assert!(xlsx.contains("<t>TOPIC-DIGITAL</t>"));
+    assert!(xlsx.contains("<v>100</v>"));
+    assert!(!xlsx.contains("ticket-010"));
 
     let forecast_filters = format!("region_id=R10&topic_id=TOPIC-DIGITAL&{service}&status=TRIAGED");
     let forecast = application

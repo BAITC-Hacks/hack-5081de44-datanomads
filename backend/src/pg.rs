@@ -3148,7 +3148,7 @@ impl PgRepository {
     ) -> Result<Vec<Alert>, String> {
         let current_since = Utc::now() - chrono::Duration::days(analytics_days(query));
         let mut builder = QueryBuilder::<Postgres>::new(
-            "SELECT DISTINCT a.id, a.created_at, t.id AS ticket_id FROM alerts a JOIN alert_ticket_links atl ON atl.alert_id = a.id JOIN tickets t ON t.id = atl.ticket_id WHERE t.created_at >= ",
+            "SELECT DISTINCT a.id, a.created_at, t.id AS ticket_id FROM alerts a JOIN alert_ticket_links atl ON atl.alert_id = a.id JOIN tickets t ON t.id = atl.ticket_id WHERE upper(a.status) <> 'CLOSED' AND t.created_at >= ",
         );
         builder
             .push_bind(current_since)

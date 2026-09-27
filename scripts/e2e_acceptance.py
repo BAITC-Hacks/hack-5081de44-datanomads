@@ -21,11 +21,12 @@ from pathlib import Path
 import sys
 import subprocess
 import time
+import xml.etree.ElementTree as ET
+import zipfile
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-import zipfile
 
 
 class AcceptanceError(RuntimeError):
@@ -654,17 +655,14 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         f"detector reopened a closed incident during cooldown: {after_close_detection}",
     )
 
-    for report_path, magic in (("/api/v1/analytics/export.pdf", b"%PDF-1.4"), ("/api/v1/analytics/export.xlsx", b"PK\x03\x04")):
+    for report_path, magic in (("/api/v1/analytics/export.pdf", b"%PDF-"), ("/api/v1/analytics/export.xlsx", b"PK\x03\x04")):
         filtered_path = f"{report_path}?{topic_analytics_query}"
         status, _, report = request(base_url, "GET", filtered_path, role="MANAGER", timeout=timeout)
         expect(status == 200 and report.startswith(magic), f"report failed: {filtered_path} HTTP {status}")
         if report_path.endswith("pdf"):
-            report_text = report.decode("latin-1")
             expect(
-                f"topic={selected_topic}" in report_text
-                and "Share" in report_text
-                and "Change vs previous" in report_text,
-                "PDF export omitted selected filters or topic comparison columns",
+                len(report) > 1_000 and b"%%EOF" in report[-1_024:],
+                "PDF export is truncated or missing its final marker",
             )
         if report_path.endswith("xlsx"):
             temp_path = Path(os.getenv("TMPDIR", "/tmp")) / f"pulse109-{suffix}.xlsx"
@@ -672,13 +670,75 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             try:
                 with zipfile.ZipFile(temp_path) as archive:
                     bad = archive.testzip()
-                    sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                    sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
                 expect(bad is None, f"XLSX archive is corrupt: {bad}")
+                namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                rows = []
+                for row in sheet.findall(".//main:sheetData/main:row", namespace):
+                    values = {}
+                    for cell in row.findall("main:c", namespace):
+                        column = "".join(character for character in cell.attrib["r"] if character.isalpha())
+                        text_value = cell.find("main:is/main:t", namespace)
+                        numeric_value = cell.find("main:v", namespace)
+                        if text_value is not None:
+                            values[column] = text_value.text or ""
+                        elif numeric_value is not None:
+                            values[column] = numeric_value.text or ""
+                        else:
+                            values[column] = ""
+                    rows.append(values)
+                headers = rows[0]
+                columns = {value: key for key, value in headers.items()}
+                topic_export = next(
+                    (
+                        row
+                        for row in rows[1:]
+                        if row.get(columns.get("record_type", "")) == "topic"
+                        and row.get(columns.get("topic_id", "")) == selected_topic
+                    ),
+                    None,
+                )
+                filters_export = next(
+                    (
+                        row
+                        for row in rows[1:]
+                        if row.get(columns.get("record_type", "")) == "metadata"
+                        and row.get(columns.get("metric", "")) == "filters"
+                    ),
+                    None,
+                )
+                expected_change = report_topic.get("change_abs")
+                required_columns = {
+                    "period",
+                    "region_id",
+                    "topic_id",
+                    "record_type",
+                    "value",
+                    "previous_value",
+                    "change_abs",
+                    "change_pct",
+                    "share_pct",
+                    "generated_at",
+                    "alert_type",
+                    "severity",
+                    "ticket_count",
+                }
                 expect(
-                    f"topic={selected_topic}" in sheet
-                    and "share=100.0%" in sheet
-                    and "change=" in sheet,
-                    "XLSX export omitted selected filters or topic comparison values",
+                    required_columns.issubset(columns)
+                    and topic_export is not None
+                    and int(topic_export.get(columns["value"], "-1")) == topic_total
+                    and math.isclose(float(topic_export.get(columns["share_pct"], "nan")), 100.0)
+                    and expected_change is not None
+                    and int(topic_export.get(columns["change_abs"], "-1")) == int(expected_change)
+                    and int(topic_export.get(columns["previous_value"], "-1"))
+                    == max(topic_total - int(expected_change), 0)
+                    and filters_export is not None
+                    and filters_export.get(columns["region_id"]) == region
+                    and filters_export.get(columns["topic_id"]) == selected_topic
+                    and f"region={region}" in filters_export.get(columns["details"], "")
+                    and f"topic={selected_topic}" in filters_export.get(columns["details"], "")
+                    and any(row.get(columns["generated_at"]) for row in rows[1:]),
+                    "XLSX export omitted the selected topic or its matching numeric analytics values",
                 )
             finally:
                 temp_path.unlink(missing_ok=True)

@@ -25,6 +25,8 @@ use std::{
     collections::BTreeMap,
     convert::Infallible,
     env,
+    io::Write,
+    process::{Command, Stdio},
     sync::{Arc, RwLock},
     time::{Duration as StdDuration, Instant},
 };
@@ -4668,6 +4670,7 @@ fn memory_report_slice(store: &Store, query: &AnalyticsQuery) -> Result<ReportSl
     let alerts = store
         .alerts
         .values()
+        .filter(|alert| !alert.status.eq_ignore_ascii_case("CLOSED"))
         .filter_map(|alert| {
             let ticket_ids = alert
                 .linked_ticket_ids
@@ -4708,7 +4711,15 @@ fn report_metric(report: Option<&ReportSlice>, key: &str) -> String {
     report
         .map(|value| &value.analytics)
         .and_then(|value| value.overview.get(key))
-        .map(Value::to_string)
+        .map(|value| {
+            value.as_str().map(str::to_owned).unwrap_or_else(|| {
+                if value.is_null() {
+                    "—".to_owned()
+                } else {
+                    value.to_string()
+                }
+            })
+        })
         .unwrap_or_else(|| "0".to_owned())
 }
 
@@ -4757,61 +4768,195 @@ fn report_previous_count(current: usize, change_abs: Option<i64>) -> usize {
 
 /// Canonical HTML template for a report slice.
 ///
-/// The PDF renderer below is intentionally dependency-free for the Core image:
-/// it consumes this template and lays out its text in a small, valid PDF.  The
-/// The XLSX exporter consumes the same `ReportSlice` directly, so all outputs
-/// are reproducible from one backend snapshot.
+/// Both export formats consume this same slice; the PDF renderer lays out this
+/// HTML while the spreadsheet keeps the underlying values in typed columns.
+const REPORT_CHART_WIDTH: usize = 760;
+const REPORT_TIME_CHART_HEIGHT: usize = 230;
+const REPORT_BAR_ROW_HEIGHT: usize = 34;
+const REPORT_MAX_BAR_ROWS: usize = 12;
+
+fn report_time_series_svg(series: &[TimeSeriesPoint]) -> String {
+    if series.is_empty() {
+        return "<p class=\"empty\">Нет точек временного ряда за выбранный период.</p>".to_owned();
+    }
+
+    let left = 56.0;
+    let right = 18.0;
+    let top = 18.0;
+    let bottom = 36.0;
+    let width = REPORT_CHART_WIDTH as f64;
+    let height = REPORT_TIME_CHART_HEIGHT as f64;
+    let max_count = series
+        .iter()
+        .map(|point| point.tickets)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f64;
+    let plot_width = width - left - right;
+    let plot_height = height - top - bottom;
+    let denominator = series.len().saturating_sub(1).max(1) as f64;
+    let points = series
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let x = if series.len() == 1 {
+                left + plot_width / 2.0
+            } else {
+                left + plot_width * index as f64 / denominator
+            };
+            let y = top + plot_height * (1.0 - point.tickets as f64 / max_count);
+            format!("{x:.1},{y:.1}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let first_date = xml_escape(&series[0].date);
+    let last_date = xml_escape(&series[series.len() - 1].date);
+    let max_label = series.iter().map(|point| point.tickets).max().unwrap_or(0);
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Динамика обращений" viewBox="0 0 {REPORT_CHART_WIDTH} {REPORT_TIME_CHART_HEIGHT}">
+<line x1="{left}" y1="{top}" x2="{left}" y2="{}" stroke="#b7c5cf"/><line x1="{left}" y1="{}" x2="{}" y2="{}" stroke="#b7c5cf"/>
+<line x1="{left}" y1="{}" x2="{}" y2="{}" stroke="#e5eaee" stroke-dasharray="4 4"/><text x="8" y="{}" font-size="11" fill="#52616d">{max_label}</text>
+<polyline points="{points}" fill="none" stroke="#168b63" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="{left}" y="{}" font-size="10" fill="#52616d">{first_date}</text><text x="{}" y="{}" text-anchor="end" font-size="10" fill="#52616d">{last_date}</text></svg>"##,
+        top + plot_height,
+        top + plot_height / 2.0,
+        width - right,
+        top + plot_height / 2.0,
+        top + plot_height,
+        width - right,
+        top + plot_height,
+        top + 4.0,
+        height - 8.0,
+        width - right,
+        height - 8.0,
+    )
+}
+
+fn report_bar_chart_svg(title: &str, values: &[(String, u64)], color: &str) -> String {
+    let mut values = values.to_vec();
+    values.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    values.truncate(REPORT_MAX_BAR_ROWS);
+    if values.is_empty() {
+        return "<p class=\"empty\">Нет данных для диаграммы.</p>".to_owned();
+    }
+
+    let height = 24 + REPORT_BAR_ROW_HEIGHT * values.len();
+    let label_width = 210.0;
+    let bar_width = 460.0;
+    let max_count = values
+        .iter()
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(0)
+        .max(1) as f64;
+    let rows = values
+        .iter()
+        .enumerate()
+        .map(|(index, (label, count))| {
+            let y = 6 + index * REPORT_BAR_ROW_HEIGHT;
+            let width = bar_width * *count as f64 / max_count;
+            format!(
+                "<text x=\"0\" y=\"{}\" font-size=\"11\" fill=\"#344450\">{}</text><rect x=\"{label_width}\" y=\"{}\" width=\"{width:.1}\" height=\"17\" rx=\"3\" fill=\"{color}\"/><text x=\"{}\" y=\"{}\" font-size=\"10\" fill=\"#344450\">{count}</text>",
+                y + 13,
+                xml_escape(label),
+                y,
+                label_width + width + 7.0,
+                y + 12,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"{}\" viewBox=\"0 0 {REPORT_CHART_WIDTH} {height}\">{rows}</svg>",
+        xml_escape(title)
+    )
+}
+
+fn report_optional_number(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.2}"))
+        .unwrap_or_else(|| "—".to_owned())
+}
+
 fn report_html(report: Option<&ReportSlice>) -> String {
     let range = xml_escape(&report_range(report));
-    let total = xml_escape(&report_metric(report, "total_tickets"));
-    let previous_total = xml_escape(&report_metric(report, "previous_total_tickets"));
-    let open = xml_escape(&report_metric(report, "open_tickets"));
-    let resolved = xml_escape(&report_metric(report, "resolved_tickets"));
+    let generated_at = report
+        .map(|value| value.analytics.generated_at.as_str())
+        .map(xml_escape)
+        .unwrap_or_else(|| "—".to_owned());
     let filter_summary = report
         .map(report_filter_summary)
         .map(|summary| xml_escape(&summary))
-        .unwrap_or_else(|| "none".to_owned());
+        .unwrap_or_else(|| "нет".to_owned());
+    let metrics = [
+        ("Всего обращений", "total_tickets"),
+        ("Открыто", "open_tickets"),
+        ("Решено", "resolved_tickets"),
+        ("Высокий приоритет", "high_priority_tickets"),
+        ("Решения операторов", "operator_decisions"),
+        ("Подтверждено", "confirmed_decisions"),
+        ("Исправлено", "corrected_decisions"),
+        ("Средняя уверенность", "average_confidence"),
+        ("Время до решения, мин", "avg_decision_minutes"),
+    ]
+    .iter()
+    .map(|(label, key)| {
+        format!(
+            "<div class=\"metric\"><span>{}</span><strong>{}</strong></div>",
+            xml_escape(label),
+            xml_escape(&report_metric(report, key)),
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("");
+
     let mut region_rows = String::new();
     let mut topic_rows = String::new();
     let mut series_rows = String::new();
     let mut alert_rows = String::new();
     let mut forecast_rows = String::new();
-    let forecast_status = xml_escape(
-        report
-            .map(|value| value.forecast.status.as_str())
-            .unwrap_or("NO_DATA"),
-    );
+    let mut region_chart_values = Vec::new();
+    let mut topic_chart_values = Vec::new();
+    let mut forecast_status = "NO_DATA".to_owned();
+    let mut forecast_model = "—".to_owned();
+    let mut forecast_version = "—".to_owned();
+    let mut forecast_horizon = "—".to_owned();
+    let mut forecast_backtest = "—".to_owned();
+    let mut forecast_peaks = "—".to_owned();
     if let Some(value) = report {
+        let total_tickets = value
+            .analytics
+            .overview
+            .get("total_tickets")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         for bucket in &value.analytics.by_region {
+            region_chart_values.push((bucket.label.clone(), bucket.tickets as u64));
             region_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td></tr>",
+                xml_escape(&bucket.id),
                 xml_escape(&bucket.label),
                 bucket.tickets,
                 report_previous_count(bucket.tickets, bucket.change_abs),
                 report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
+                bucket.avg_confidence,
             ));
         }
         for bucket in &value.analytics.by_topic {
-            if bucket.tickets == 0 && bucket.change_abs.is_none_or(|change| change >= 0) {
-                continue;
-            }
-            let total_tickets = value
-                .analytics
-                .overview
-                .get("total_tickets")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            topic_chart_values.push((bucket.label.clone(), bucket.tickets as u64));
             let share = if total_tickets == 0 {
                 0.0
             } else {
                 bucket.tickets as f64 / total_tickets as f64 * 100.0
             };
             topic_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{share:.1}%</td><td>{}</td></tr>",
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{share:.1}%</td><td>{}</td><td>{:.2}</td></tr>",
+                xml_escape(&bucket.id),
                 xml_escape(&bucket.label),
                 bucket.tickets,
                 report_previous_count(bucket.tickets, bucket.change_abs),
                 report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
+                bucket.avg_confidence,
             ));
         }
         for point in &value.analytics.time_series {
@@ -4824,124 +4969,253 @@ fn report_html(report: Option<&ReportSlice>) -> String {
         }
         for alert in &value.alerts {
             alert_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                xml_escape(&alert.id),
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{} — {}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                xml_escape(&alert.alert_type),
+                xml_escape(&alert.severity),
                 xml_escape(&alert.status),
                 xml_escape(&alert.region_id),
+                xml_escape(&alert.topic_id),
+                xml_escape(alert.period_start.as_deref().unwrap_or("—")),
+                xml_escape(alert.period_end.as_deref().unwrap_or("—")),
+                alert.current_count,
+                report_optional_number(alert.baseline),
                 alert.ticket_count,
+            ));
+        }
+        forecast_status = value.forecast.status.clone();
+        forecast_model = value.forecast.model.clone();
+        forecast_version = value.forecast.model_version.clone();
+        forecast_horizon = value.forecast.horizon_days.to_string();
+        forecast_backtest = value.forecast.backtest.to_string();
+        forecast_peaks = if value.forecast.expected_peaks.is_empty() {
+            "—".to_owned()
+        } else {
+            value.forecast.expected_peaks.join(", ")
+        };
+        for point in &value.forecast.history {
+            forecast_rows.push_str(&format!(
+                "<tr><td>История</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                xml_escape(&point.date),
+                point.tickets,
+                point.resolved,
             ));
         }
         for point in &value.forecast.points {
             forecast_rows.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td></tr>",
+                "<tr><td>Прогноз</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 xml_escape(&point.date),
                 point.tickets,
+                point.resolved,
             ));
         }
     }
+    let region_chart =
+        report_bar_chart_svg("Обращения по регионам", &region_chart_values, "#2788aa");
+    let topic_chart = report_bar_chart_svg("Обращения по темам", &topic_chart_values, "#168b63");
+    let time_series = report
+        .map(|value| report_time_series_svg(&value.analytics.time_series))
+        .unwrap_or_else(|| "<p class=\"empty\">Нет данных для временного ряда.</p>".to_owned());
+    let alerts_empty = if alert_rows.is_empty() {
+        "<p class=\"empty\">В выбранном срезе активных сигналов нет.</p>"
+    } else {
+        ""
+    };
+    let forecast_empty = if forecast_rows.is_empty() {
+        "<p class=\"empty\">Точки прогноза недоступны для этого среза.</p>"
+    } else {
+        ""
+    };
     format!(
         r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Pulse 109 report</title>
-<style>body{{font:14px sans-serif;color:#17202a}}table{{border-collapse:collapse;width:100%;margin:8px 0 18px}}th,td{{border:1px solid #ccd3da;padding:5px;text-align:left}}h1,h2{{margin:12px 0 6px}}</style>
-</head><body><h1>Pulse 109 report</h1><p>Period: {range}</p><p>Filters: {filter_summary}</p>
-<h2>Overview</h2><table><tr><th>Metric</th><th>Current period</th><th>Previous period</th></tr><tr><td>Total tickets</td><td>{total}</td><td>{previous_total}</td></tr><tr><td>Open tickets</td><td>{open}</td><td>—</td></tr><tr><td>Resolved tickets</td><td>{resolved}</td><td>—</td></tr></table>
-<h2>Regions</h2><table><tr><th>Region</th><th>Current period</th><th>Previous period</th><th>Change</th></tr>{region_rows}</table>
-<h2>Topics</h2><table><tr><th>Topic</th><th>Current period</th><th>Previous period</th><th>Share</th><th>Change vs previous</th></tr>{topic_rows}</table>
-<h2>Time series</h2><table><tr><th>Date</th><th>Tickets</th><th>Resolved</th></tr>{series_rows}</table>
-<h2>Alerts</h2><table><tr><th>ID</th><th>Status</th><th>Region</th><th>Tickets</th></tr>{alert_rows}</table>
-<h2>Forecast ({FORECAST_HISTORY_DAYS}-day history window)</h2><p>Status: {forecast_status}</p><table><tr><th>Date</th><th>Tickets</th></tr>{forecast_rows}</table>
-</body></html>"#
+<html lang="ru"><head><meta charset="utf-8"><title>Отчёт Pulse 109</title>
+<style>
+@page {{ size: A4; margin: 16mm 14mm 18mm; @bottom-right {{ content: counter(page) " / " counter(pages); color: #6b7780; font-size: 9pt; }} }}
+body {{ font: 9pt "DejaVu Sans", sans-serif; color: #17202a; line-height: 1.35; }}
+h1 {{ margin: 0 0 6px; color: #123c31; font-size: 22pt; }} h2 {{ margin: 19px 0 7px; padding-bottom: 4px; border-bottom: 1px solid #cbd5d9; color: #174b3c; font-size: 14pt; }}
+h3 {{ margin: 11px 0 5px; color: #344450; font-size: 10pt; }} p {{ margin: 4px 0; }} .meta {{ color: #52616d; }} .metric-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 10px 0; }}
+.metric {{ padding: 8px; border: 1px solid #d7e0e3; border-radius: 4px; background: #f5f8f8; }} .metric span {{ display: block; color: #52616d; font-size: 8pt; }} .metric strong {{ display: block; margin-top: 3px; color: #123c31; font-size: 13pt; }}
+table {{ width: 100%; margin: 7px 0 12px; border-collapse: collapse; }} th,td {{ padding: 5px 6px; border: 1px solid #d7e0e3; text-align: left; vertical-align: top; }} th {{ background: #edf3f2; color: #344450; font-size: 8pt; }} td {{ overflow-wrap: anywhere; }} tr {{ page-break-inside: avoid; }} .chart {{ width: 100%; margin: 4px 0 12px; }} .empty {{ padding: 8px; color: #687780; background: #f5f8f8; }} .small {{ color: #52616d; font-size: 8pt; }}
+</style></head><body>
+<h1>Отчёт Pulse 109</h1><p class="meta">Период: {range} · Сформировано: {generated_at}</p><p class="meta">Фильтры: {filter_summary}</p>
+<h2>Ключевые показатели</h2><div class="metric-grid">{metrics}</div>
+<h2>Графики</h2><h3>Динамика обращений</h3><div class="chart">{time_series}</div><h3>Регионы</h3><div class="chart">{region_chart}</div><h3>Темы</h3><div class="chart">{topic_chart}</div>
+<h2>Регионы</h2><table><thead><tr><th>ID</th><th>Регион</th><th>Текущий период</th><th>Предыдущий период</th><th>Изменение</th><th>Средняя уверенность</th></tr></thead><tbody>{region_rows}</tbody></table>
+<h2>Темы</h2><table><thead><tr><th>ID</th><th>Тема</th><th>Текущий период</th><th>Предыдущий период</th><th>Доля</th><th>Изменение</th><th>Средняя уверенность</th></tr></thead><tbody>{topic_rows}</tbody></table>
+<h2>Временной ряд</h2><table><thead><tr><th>Дата</th><th>Обращения</th><th>Решено</th></tr></thead><tbody>{series_rows}</tbody></table>
+<h2>Активные сигналы выбранного среза</h2>{alerts_empty}<table><thead><tr><th>Тип</th><th>Уровень</th><th>Статус</th><th>Регион</th><th>Тема</th><th>Период</th><th>Текущее</th><th>База</th><th>Обращения</th></tr></thead><tbody>{alert_rows}</tbody></table>
+<h2>Прогноз</h2><p>Статус: {forecast_status} · Модель: {forecast_model} · Версия: {forecast_version} · Горизонт: {forecast_horizon} дней</p><p class="small">Ожидаемые пики: {forecast_peaks} · Backtest: {forecast_backtest}</p>{forecast_empty}<table><thead><tr><th>Ряд</th><th>Дата</th><th>Обращения</th><th>Решено</th></tr></thead><tbody>{forecast_rows}</tbody></table>
+</body></html>"#,
+        forecast_status = xml_escape(&forecast_status),
+        forecast_model = xml_escape(&forecast_model),
+        forecast_version = xml_escape(&forecast_version),
+        forecast_horizon = xml_escape(&forecast_horizon),
+        forecast_peaks = xml_escape(&forecast_peaks),
+        forecast_backtest = xml_escape(&forecast_backtest),
     )
 }
 
-fn html_to_pdf_lines(html: &str) -> Vec<String> {
-    let block_html = html
-        .replace("</h1>", "</h1>\n")
-        .replace("</h2>", "</h2>\n")
-        .replace("</p>", "</p>\n")
-        .replace("</tr>", "</tr>\n")
-        .replace("</td>", " | </td>");
-    let mut plain = String::with_capacity(block_html.len());
-    let mut in_tag = false;
-    for character in block_html.chars() {
-        match character {
-            '<' => in_tag = true,
-            '>' => {
-                in_tag = false;
-                plain.push(' ');
-            }
-            _ if !in_tag => plain.push(character),
-            _ => {}
-        }
-    }
-    plain
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn pdf_escape(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '(' => "\\(".to_owned(),
-            ')' => "\\)".to_owned(),
-            '\\' => "\\\\".to_owned(),
-            character if character.is_ascii() && !character.is_control() => character.to_string(),
-            _ => "?".to_owned(),
-        })
-        .collect()
-}
-
-fn pdf_report(report: Option<&ReportSlice>) -> Vec<u8> {
+async fn pdf_report(report: Option<&ReportSlice>) -> Result<Vec<u8>, String> {
     let html = report_html(report);
-    let mut content = String::from("BT /F1 10 Tf 48 760 Td ");
-    for (index, line) in html_to_pdf_lines(&html).into_iter().take(48).enumerate() {
-        if index > 0 {
-            content.push_str("0 -14 Td ");
+    let renderer = env::var_os("PULSE_WEASYPRINT_BIN").unwrap_or_else(|| "weasyprint".into());
+    tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(renderer)
+            .args(["--quiet", "--encoding", "utf-8", "-", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "PDF renderer is unavailable".to_owned())?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "PDF renderer input is unavailable".to_owned())?
+            .write_all(html.as_bytes())
+            .map_err(|_| "PDF renderer could not read the report".to_owned())?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "PDF renderer could not finish the report".to_owned())?;
+        if !output.status.success()
+            || !output.stdout.starts_with(b"%PDF-")
+            || !output.stdout.windows(5).any(|window| window == b"%%EOF")
+        {
+            return Err("PDF renderer did not produce a valid document".to_owned());
         }
-        content.push('(');
-        content.push_str(&pdf_escape(&line));
-        content.push_str(") Tj ");
+        Ok(output.stdout)
+    })
+    .await
+    .map_err(|_| "PDF renderer task failed".to_owned())?
+}
+
+const REPORT_XLSX_HEADERS: [&str; 25] = [
+    "period",
+    "region_id",
+    "region",
+    "topic_id",
+    "topic",
+    "record_type",
+    "metric",
+    "value",
+    "previous_value",
+    "change_abs",
+    "change_pct",
+    "share_pct",
+    "high_priority",
+    "avg_confidence",
+    "resolved",
+    "status",
+    "details",
+    "generated_at",
+    "alert_type",
+    "severity",
+    "ticket_count",
+    "deviation",
+    "ratio",
+    "robust_z",
+    "detector_version",
+];
+const REPORT_XLSX_COLUMNS: [&str; REPORT_XLSX_HEADERS.len()] = [
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S",
+    "T", "U", "V", "W", "X", "Y",
+];
+
+#[derive(Default)]
+struct ReportExportRow {
+    period: String,
+    region_id: String,
+    region: String,
+    topic_id: String,
+    topic: String,
+    record_type: String,
+    metric: String,
+    value: Option<String>,
+    previous_value: Option<String>,
+    change_abs: Option<String>,
+    change_pct: Option<String>,
+    share_pct: Option<String>,
+    high_priority: Option<String>,
+    avg_confidence: Option<String>,
+    resolved: Option<String>,
+    status: String,
+    details: String,
+    generated_at: String,
+    alert_type: String,
+    severity: String,
+    ticket_count: Option<String>,
+    deviation: Option<String>,
+    ratio: Option<String>,
+    robust_z: Option<String>,
+    detector_version: String,
+}
+
+enum ReportXlsxCell {
+    Text(String),
+    Number(String),
+    Empty,
+}
+
+impl ReportExportRow {
+    fn into_cells(self) -> [ReportXlsxCell; REPORT_XLSX_HEADERS.len()] {
+        [
+            ReportXlsxCell::Text(self.period),
+            ReportXlsxCell::Text(self.region_id),
+            ReportXlsxCell::Text(self.region),
+            ReportXlsxCell::Text(self.topic_id),
+            ReportXlsxCell::Text(self.topic),
+            ReportXlsxCell::Text(self.record_type),
+            ReportXlsxCell::Text(self.metric),
+            report_xlsx_number_cell(self.value),
+            report_xlsx_number_cell(self.previous_value),
+            report_xlsx_number_cell(self.change_abs),
+            report_xlsx_number_cell(self.change_pct),
+            report_xlsx_number_cell(self.share_pct),
+            report_xlsx_number_cell(self.high_priority),
+            report_xlsx_number_cell(self.avg_confidence),
+            report_xlsx_number_cell(self.resolved),
+            ReportXlsxCell::Text(self.status),
+            ReportXlsxCell::Text(self.details),
+            ReportXlsxCell::Text(self.generated_at),
+            ReportXlsxCell::Text(self.alert_type),
+            ReportXlsxCell::Text(self.severity),
+            report_xlsx_number_cell(self.ticket_count),
+            report_xlsx_number_cell(self.deviation),
+            report_xlsx_number_cell(self.ratio),
+            report_xlsx_number_cell(self.robust_z),
+            ReportXlsxCell::Text(self.detector_version),
+        ]
     }
-    content.push_str("ET\n");
-    let bodies = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_vec(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-        format!("<< /Length {} >>\nstream\n{}endstream", content.len(), content).into_bytes(),
-    ];
-    let mut pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
-    let mut offsets = Vec::with_capacity(bodies.len());
-    for (index, body) in bodies.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-        pdf.extend_from_slice(body);
-        pdf.extend_from_slice(b"\nendobj\n");
+}
+
+fn report_xlsx_number_cell(value: Option<String>) -> ReportXlsxCell {
+    value.map_or(ReportXlsxCell::Empty, ReportXlsxCell::Number)
+}
+
+fn report_xlsx_float(value: Option<f64>) -> Option<String> {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| value.to_string())
+}
+
+fn report_xlsx_f32(value: Option<f32>) -> Option<String> {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| value.to_string())
+}
+
+fn report_export_row(
+    period: &str,
+    record_type: &str,
+    metric: &str,
+    value: Option<String>,
+    details: &str,
+) -> ReportExportRow {
+    ReportExportRow {
+        period: period.to_owned(),
+        record_type: record_type.to_owned(),
+        metric: metric.to_owned(),
+        value,
+        details: details.to_owned(),
+        ..ReportExportRow::default()
     }
-    let xref_offset = pdf.len();
-    pdf.extend_from_slice(
-        format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
-    );
-    for offset in offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
-            bodies.len() + 1
-        )
-        .as_bytes(),
-    );
-    pdf
 }
 
 fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
@@ -4950,47 +5224,45 @@ fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
     let workbook = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
     let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
     let range = report_range(report);
-    let mut rows: Vec<[String; 4]> = vec![
-        [
-            "period".to_owned(),
-            "metric".to_owned(),
-            "value".to_owned(),
-            "details".to_owned(),
-        ],
-        [
-            range.clone(),
-            "total_tickets".to_owned(),
-            report_metric(report, "total_tickets"),
-            String::new(),
-        ],
-        [
-            range.clone(),
-            "open_tickets".to_owned(),
-            report_metric(report, "open_tickets"),
-            String::new(),
-        ],
-        [
-            range.clone(),
-            "resolved_tickets".to_owned(),
-            report_metric(report, "resolved_tickets"),
-            String::new(),
-        ],
-    ];
-    rows.push([
-        range.clone(),
-        "filters".to_owned(),
-        report
+    let mut rows = Vec::new();
+    let mut filters_row = report_export_row(
+        &range,
+        "metadata",
+        "filters",
+        None,
+        &report
             .map(report_filter_summary)
             .unwrap_or_else(|| "none".to_owned()),
-        String::new(),
-    ]);
-    rows.push([
-        range.clone(),
-        "previous_total_tickets".to_owned(),
-        report_metric(report, "previous_total_tickets"),
-        report_metric(report, "change_abs"),
-    ]);
+    );
+    if let Some(report) = report {
+        filters_row.region_id = report.filters.region_id.clone().unwrap_or_default();
+        filters_row.topic_id = report.filters.topic_id.clone().unwrap_or_default();
+    }
+    filters_row.status = "READY".to_owned();
+    rows.push(filters_row);
     if let Some(value) = report {
+        let mut generated_row = report_export_row(
+            &range,
+            "metadata",
+            "generated_at",
+            None,
+            &format!("source={}", value.analytics.source),
+        );
+        generated_row.generated_at = value.analytics.generated_at.clone();
+        rows.push(generated_row);
+
+        if let Some(overview) = value.analytics.overview.as_object() {
+            for (metric, metric_value) in overview {
+                let value = metric_value.as_number().map(ToString::to_string);
+                let details = if metric_value.is_null() {
+                    "unavailable"
+                } else {
+                    ""
+                };
+                rows.push(report_export_row(&range, "metric", metric, value, details));
+            }
+        }
+
         let total_tickets = value
             .analytics
             .overview
@@ -4998,104 +5270,159 @@ fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         for bucket in &value.analytics.by_region {
-            rows.push([
-                range.clone(),
-                "region".to_owned(),
-                bucket.tickets.to_string(),
-                format!(
-                    "{}; previous={}; change={}",
-                    bucket.label,
-                    report_previous_count(bucket.tickets, bucket.change_abs),
-                    report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
-                ),
-            ]);
+            let mut row = report_export_row(
+                &range,
+                "region",
+                "tickets",
+                Some(bucket.tickets.to_string()),
+                "",
+            );
+            row.region_id = bucket.id.clone();
+            row.region = bucket.label.clone();
+            row.previous_value =
+                Some(report_previous_count(bucket.tickets, bucket.change_abs).to_string());
+            row.change_abs = bucket.change_abs.map(|change| change.to_string());
+            row.change_pct = report_xlsx_f32(bucket.change_pct);
+            row.share_pct = (total_tickets > 0)
+                .then(|| (bucket.tickets as f64 / total_tickets as f64 * 100.0).to_string());
+            row.high_priority = Some(bucket.high_priority.to_string());
+            row.avg_confidence = report_xlsx_f32(Some(bucket.avg_confidence));
+            rows.push(row);
         }
         for bucket in &value.analytics.by_topic {
-            if bucket.tickets == 0 && bucket.change_abs.is_none_or(|change| change >= 0) {
-                continue;
-            }
             let share = if total_tickets == 0 {
                 0.0
             } else {
                 bucket.tickets as f64 / total_tickets as f64 * 100.0
             };
-            rows.push([
-                range.clone(),
-                "topic".to_owned(),
-                bucket.tickets.to_string(),
-                format!(
-                    "{}; previous={}; share={share:.1}%; change={}; high_priority={}",
-                    bucket.label,
-                    report_previous_count(bucket.tickets, bucket.change_abs),
-                    report_change_label(bucket.change_abs, bucket.change_pct.map(f64::from)),
-                    bucket.high_priority,
-                ),
-            ]);
+            let mut row = report_export_row(
+                &range,
+                "topic",
+                "tickets",
+                Some(bucket.tickets.to_string()),
+                "",
+            );
+            row.topic_id = bucket.id.clone();
+            row.topic = bucket.label.clone();
+            row.previous_value =
+                Some(report_previous_count(bucket.tickets, bucket.change_abs).to_string());
+            row.change_abs = bucket.change_abs.map(|change| change.to_string());
+            row.change_pct = report_xlsx_f32(bucket.change_pct);
+            row.share_pct = (total_tickets > 0).then(|| share.to_string());
+            row.high_priority = Some(bucket.high_priority.to_string());
+            row.avg_confidence = report_xlsx_f32(Some(bucket.avg_confidence));
+            rows.push(row);
         }
         for point in &value.analytics.time_series {
-            rows.push([
-                range.clone(),
-                "series".to_owned(),
-                point.tickets.to_string(),
-                format!("{} resolved={}", point.date, point.resolved),
-            ]);
+            let mut row = report_export_row(
+                &point.date,
+                "series",
+                "tickets",
+                Some(point.tickets.to_string()),
+                "",
+            );
+            row.resolved = Some(point.resolved.to_string());
+            rows.push(row);
         }
         for alert in &value.alerts {
-            rows.push([
-                range.clone(),
-                "alert".to_owned(),
-                alert.ticket_count.to_string(),
-                format!("{} {} {}", alert.id, alert.status, alert.region_id),
-            ]);
+            let period = format!(
+                "{} — {}",
+                alert.period_start.as_deref().unwrap_or("—"),
+                alert.period_end.as_deref().unwrap_or("—"),
+            );
+            let mut row = report_export_row(
+                &period,
+                "alert",
+                &alert.alert_type,
+                Some(alert.current_count.to_string()),
+                "",
+            );
+            row.region_id = alert.region_id.clone();
+            row.topic_id = alert.topic_id.clone();
+            row.alert_type = alert.alert_type.clone();
+            row.severity = alert.severity.clone();
+            row.ticket_count = Some(alert.ticket_count.to_string());
+            row.previous_value = report_xlsx_float(alert.baseline);
+            row.deviation = report_xlsx_float(alert.deviation);
+            row.ratio = report_xlsx_float(alert.ratio);
+            row.robust_z = report_xlsx_float(alert.robust_z);
+            row.detector_version = alert.detector_version.clone().unwrap_or_default();
+            row.status = alert.status.clone();
+            rows.push(row);
         }
-        for point in &value.forecast.points {
-            rows.push([
-                range.clone(),
-                "forecast".to_owned(),
-                point.tickets.to_string(),
-                point.date.clone(),
-            ]);
+        let forecast_metadata = json!({
+            "source": value.forecast.source,
+            "model": value.forecast.model,
+            "model_version": value.forecast.model_version,
+            "horizon_days": value.forecast.horizon_days,
+            "forecast_start": value.forecast.forecast_start,
+            "expected_peaks": value.forecast.expected_peaks,
+            "backtest": value.forecast.backtest,
+        });
+        let mut forecast_row = report_export_row(
+            &range,
+            "forecast_metadata",
+            "forecast",
+            Some(value.forecast.points.len().to_string()),
+            &forecast_metadata.to_string(),
+        );
+        forecast_row.status = value.forecast.status.clone();
+        rows.push(forecast_row);
+        for (record_type, points) in [
+            ("forecast_history", &value.forecast.history),
+            ("forecast", &value.forecast.points),
+        ] {
+            for point in points {
+                let mut row = report_export_row(
+                    &point.date,
+                    record_type,
+                    "tickets",
+                    Some(point.tickets.to_string()),
+                    &format!(
+                        "model={}; version={}",
+                        value.forecast.model, value.forecast.model_version
+                    ),
+                );
+                row.resolved = Some(point.resolved.to_string());
+                row.status = value.forecast.status.clone();
+                rows.push(row);
+            }
         }
-        rows.push([
-            range.clone(),
-            "forecast_status".to_owned(),
-            value.forecast.status.clone(),
-            format!(
-                "{}; history={}d",
-                value.forecast.model, FORECAST_HISTORY_DAYS
-            ),
-        ]);
     } else {
-        rows.push([
-            range.clone(),
-            "forecast_status".to_owned(),
-            "NO_DATA".to_owned(),
-            String::new(),
-        ]);
+        let mut forecast_row = report_export_row(&range, "forecast_metadata", "forecast", None, "");
+        forecast_row.status = "NO_DATA".to_owned();
+        rows.push(forecast_row);
     }
-    let cell = |column: &str, row: usize, value: &str| {
-        format!(
-            r#"<c r="{column}{row}" t="inlineStr"><is><t>{}</t></is></c>"#,
-            xml_escape(value)
-        )
-    };
     let mut sheet_data = String::new();
-    for (index, row) in rows.iter().enumerate() {
+    let header_cells = REPORT_XLSX_HEADERS
+        .iter()
+        .map(|value| ReportXlsxCell::Text((*value).to_owned()))
+        .collect::<Vec<_>>();
+    let mut all_rows = Vec::with_capacity(rows.len() + 1);
+    all_rows.push(header_cells);
+    all_rows.extend(rows.into_iter().map(|row| row.into_cells().into()));
+    for (index, row) in all_rows.iter().enumerate() {
         let row_number = index + 1;
-        sheet_data.push_str(&format!(
-            r#"<row r="{row_number}">{}</row>"#,
-            [
-                cell("A", row_number, &row[0]),
-                cell("B", row_number, &row[1]),
-                cell("C", row_number, &row[2]),
-                cell("D", row_number, &row[3]),
-            ]
-            .join("")
-        ));
+        let cells = row
+            .iter()
+            .zip(REPORT_XLSX_COLUMNS)
+            .filter_map(|(cell, column)| match cell {
+                ReportXlsxCell::Text(value) => Some(format!(
+                    r#"<c r="{column}{row_number}" t="inlineStr"><is><t>{}</t></is></c>"#,
+                    xml_escape(value)
+                )),
+                ReportXlsxCell::Number(value) => {
+                    Some(format!(r#"<c r="{column}{row_number}"><v>{value}</v></c>"#))
+                }
+                ReportXlsxCell::Empty => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        sheet_data.push_str(&format!(r#"<row r="{row_number}">{cells}</row>"#));
     }
     let sheet = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:D{}"/><sheetData>{sheet_data}</sheetData></worksheet>"#,
-        rows.len()
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:Y{}"/><sheetData>{sheet_data}</sheetData></worksheet>"#,
+        all_rows.len()
     );
     let entries = [
         ("[Content_Types].xml", content_types.as_bytes()),
@@ -5109,6 +5436,14 @@ fn xlsx_report(report: Option<&ReportSlice>) -> Vec<u8> {
 
 fn xml_escape(value: &str) -> String {
     value
+        .chars()
+        .filter(|character| {
+            matches!(*character, '\t' | '\n' | '\r')
+                || ('\u{20}'..='\u{d7ff}').contains(character)
+                || ('\u{e000}'..='\u{fffd}').contains(character)
+                || ('\u{10000}'..='\u{10ffff}').contains(character)
+        })
+        .collect::<String>()
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -5116,9 +5451,13 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn report_response(format: &str, report: Option<&ReportSlice>) -> Response {
+async fn report_response(format: &str, report: Option<&ReportSlice>) -> Result<Response, String> {
     let (body, content_type, filename) = if format == "pdf" {
-        (pdf_report(report), "application/pdf", "pulse109-report.pdf")
+        (
+            pdf_report(report).await?,
+            "application/pdf",
+            "pulse109-report.pdf",
+        )
     } else {
         (
             xlsx_report(report),
@@ -5136,7 +5475,7 @@ fn report_response(format: &str, report: Option<&ReportSlice>) -> Response {
             .headers_mut()
             .insert(header::CONTENT_DISPOSITION, value);
     }
-    response
+    Ok(response)
 }
 
 async fn export_pdf(
@@ -5161,11 +5500,17 @@ async fn export_pdf(
             )
             .await
             .map_err(ApiError::Internal)?;
-        return Ok(report_response("pdf", Some(&report)));
+        return report_response("pdf", Some(&report))
+            .await
+            .map_err(ApiError::Internal);
     }
-    let store = state.read_store()?;
-    let report = memory_report_slice(&store, &query)?;
-    Ok(report_response("pdf", Some(&report)))
+    let report = {
+        let store = state.read_store()?;
+        memory_report_slice(&store, &query)?
+    };
+    report_response("pdf", Some(&report))
+        .await
+        .map_err(ApiError::Internal)
 }
 
 async fn export_xlsx(
@@ -5190,11 +5535,17 @@ async fn export_xlsx(
             )
             .await
             .map_err(ApiError::Internal)?;
-        return Ok(report_response("xlsx", Some(&report)));
+        return report_response("xlsx", Some(&report))
+            .await
+            .map_err(ApiError::Internal);
     }
-    let store = state.read_store()?;
-    let report = memory_report_slice(&store, &query)?;
-    Ok(report_response("xlsx", Some(&report)))
+    let report = {
+        let store = state.read_store()?;
+        memory_report_slice(&store, &query)?
+    };
+    report_response("xlsx", Some(&report))
+        .await
+        .map_err(ApiError::Internal)
 }
 
 async fn reports(
@@ -6829,6 +7180,38 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[test]
+    fn report_exports_render_the_slice_without_ticket_text_or_closed_alerts() {
+        let mut store = Store::demo();
+        let ticket_id = store.tickets.keys().next().unwrap().clone();
+        store.tickets.get_mut(&ticket_id).unwrap().text =
+            "REPORT_PRIVATE_TICKET_SENTINEL".to_owned();
+        store.alerts.get_mut("alert-001").unwrap().status = "CLOSED".to_owned();
+        let query = AnalyticsQuery {
+            region_id: None,
+            topic_id: None,
+            service_id: None,
+            status: None,
+            district: None,
+            channel: None,
+            range: Some("30d".to_owned()),
+        };
+        let report = memory_report_slice(&store, &query).unwrap();
+        let html = report_html(Some(&report));
+        let xlsx = xlsx_report(Some(&report));
+
+        assert!(html.contains("generated_at") || html.contains("Сформировано"));
+        assert!(html.contains("<svg"));
+        assert!(html.contains("<table"));
+        assert!(report
+            .alerts
+            .iter()
+            .all(|alert| !alert.status.eq_ignore_ascii_case("CLOSED")));
+        assert!(!html.contains("REPORT_PRIVATE_TICKET_SENTINEL"));
+        assert!(!String::from_utf8_lossy(&xlsx).contains("REPORT_PRIVATE_TICKET_SENTINEL"));
+        assert!(!String::from_utf8_lossy(&xlsx).contains(&ticket_id));
+    }
+
     #[tokio::test]
     async fn health_and_readiness_are_available_without_auth() {
         let app = app(AppState::demo());
@@ -6998,10 +7381,12 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/pdf");
-        assert!(to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .starts_with(b"%PDF-1.4"));
+        let pdf = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(pdf.starts_with(b"%PDF-"));
+        assert!(pdf.len() > 1_000);
+        assert!(pdf[pdf.len().saturating_sub(1_024)..]
+            .windows(5)
+            .any(|window| window == b"%%EOF"));
 
         let response = app
             .oneshot(
