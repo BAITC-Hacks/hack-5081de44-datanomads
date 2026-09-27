@@ -105,6 +105,7 @@ def safe_job_error(error: Exception) -> str:
         "INVALID_REVIEW_LINKS", "INVALID_JOB_PAYLOAD", "INVALID_CANDIDATE_DATASET",
         "INVALID_PRODUCTION_ARTIFACT", "CANDIDATE_SANITY_FAILED",
         "CANDIDATE_VERSION_EXISTS", "DATASET_VERSION_EXISTS", "TRAINING_CYCLE_CHANGED",
+        "INVALID_CRITICAL_POLICY",
     }:
         return str(error)
     if isinstance(error, (ValidationError, json.JSONDecodeError)):
@@ -154,6 +155,14 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
                 )
                 if inserted is None:
                     raise RuntimeError("CANDIDATE_VERSION_EXISTS")
+                offline = result.get("offline_metrics")
+                if offline:
+                    await connection.execute(
+                        "INSERT INTO model_evaluations (evaluation_id, model_version, evaluation_version, split_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision, evaluator) VALUES ($1, $2, $3, $4, $5::jsonb, '{}'::jsonb, $6::jsonb, 0, 'NOT_READY', 'offline-worker')",
+                        f"offline-{candidate}", str(candidate), offline["frozen_evaluation_version"],
+                        offline["dataset_version"], json.dumps(offline, ensure_ascii=False),
+                        json.dumps(offline["regressed_critical_topics"], ensure_ascii=False),
+                    )
             updated = await connection.fetchval(
                 "UPDATE learning_cycles SET state = 'EVALUATE', updated_at = now(), decision_note = $2 WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
                 str(cycle_id),

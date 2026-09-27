@@ -8,10 +8,11 @@ import tempfile
 import unittest
 
 from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, XLMRobertaConfig, XLMRobertaForSequenceClassification
+from transformers import AutoTokenizer, PreTrainedTokenizerFast, XLMRobertaConfig, XLMRobertaForSequenceClassification
 
 from app.trained_classifier import TrainedClassifierService
 from train_classifier import LABELS
+from training.classifier_pair_eval import compare_classifiers
 from training.dataset_builder import build_package, checksum
 from training.feedback_dataset import build_candidate
 from training.feedback_trainer import CandidateTrainingError, train_feedback_candidate
@@ -50,6 +51,7 @@ class FeedbackTrainerTests(unittest.TestCase):
             (production / "manifest.json").write_text(json.dumps({
                 "model_version": "classifier_production_v1", "model_family": "xlm-roberta-sequence-classification",
                 "base_model": "local-tiny", "dataset_version": "reviewed_v1",
+                "frozen_evaluation_version": "eval_v1",
                 "created_at": "2026-09-27T00:00:00Z", "metrics": {"status": "reviewed_synthetic_holdout_only"},
                 "languages": ["RU", "KZ", "MIXED"], "labels": list(LABELS),
                 "training_config": {"max_length": 32, "temperature": 1.0, "input_length_strategy": "head-32"},
@@ -68,6 +70,19 @@ class FeedbackTrainerTests(unittest.TestCase):
             self.assertEqual(candidate.metadata.dataset_version, "candidate_v1")
             self.assertEqual(candidate.metadata.model_extra["base_model_artifact_checksum"],
                              checksum(production / "model.safetensors"))
+            production_tokens = AutoTokenizer.from_pretrained(production, local_files_only=True)("Проверка модели.")
+            candidate_tokens = AutoTokenizer.from_pretrained(output, local_files_only=True)("Проверка модели.")
+            self.assertEqual(dict(production_tokens), dict(candidate_tokens))
+            policy_path = root / "critical-policy.json"
+            policy_path.write_text(json.dumps({
+                "policy_version": "classifier-critical-regression.v1",
+                "critical_topics": [LABELS[0]], "max_f1_drop": 0.1,
+                "min_topic_support": 1, "min_total_samples": 16,
+            }), encoding="utf-8")
+            comparison = compare_classifiers(frozen, production, output, policy_path)
+            self.assertEqual(comparison["sample_count"], 48)
+            self.assertEqual(comparison["candidate"]["model_version"], "classifier_candidate_v1")
+            self.assertEqual(comparison["production"]["model_version"], "classifier_production_v1")
             with self.assertRaises(FileExistsError):
                 train_feedback_candidate(package, frozen, production, output,
                                          candidate_model_version="classifier_candidate_v1")

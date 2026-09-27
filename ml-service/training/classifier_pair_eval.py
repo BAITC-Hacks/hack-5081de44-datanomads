@@ -7,7 +7,9 @@ import hashlib
 import json
 from pathlib import Path
 
+import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from transformers import AutoTokenizer
 
 from app.schemas import ModelMetadata
 from app.trained_classifier import TrainedClassifierService
@@ -49,17 +51,45 @@ def compare_classifiers(package: Path, production_dir: Path, candidate_dir: Path
         if (extra.get("frozen_evaluation_version") != dataset.frozen_evaluation_version or
                 set(metadata.labels) != set(labels)):
             raise ValueError(f"{name} classifier does not match frozen evaluation version or labels")
-        models[name] = (metadata, TrainedClassifierService(path))
-    if models["production"][0].model_version == models["candidate"][0].model_version:
+        models[name] = metadata
+    production = models["production"]
+    candidate = models["candidate"]
+    candidate_extra = candidate.model_extra or {}
+    if production.model_version == candidate.model_version:
         raise ValueError("production and candidate model versions must differ")
-
+    if (candidate.base_model != production.model_version or
+            candidate_extra.get("base_model_artifact_checksum") != production.artifact_checksum or
+            candidate_extra.get("base_model_manifest_sha256") != checksum(production_dir / "manifest.json") or
+            candidate_extra.get("frozen_evaluation_sha256") != dataset.frozen_evaluation_sha256):
+        raise ValueError("candidate classifier does not match production or frozen lineage")
+    for field in ("max_length", "input_length_strategy"):
+        value = production.training_config.get(field)
+        if value is None or candidate.training_config.get(field) != value:
+            raise ValueError("classifier preprocessing differs between production and candidate")
     rows = splits["test"]
+    tokenizers = {
+        name: AutoTokenizer.from_pretrained(path, local_files_only=True)
+        for name, path in (("production", production_dir), ("candidate", candidate_dir))
+    }
+    max_length = production.training_config["max_length"]
+    for row in rows:
+        encoded = [tokenizer(row["text"], truncation=True, max_length=max_length)
+                   for tokenizer in tokenizers.values()]
+        if dict(encoded[0]) != dict(encoded[1]):
+            raise ValueError("classifier tokenization differs on frozen evaluation text")
+    del tokenizers
+
     predictions = {}
-    for name, (_, classifier) in models.items():
+    for name, path in (("production", production_dir), ("candidate", candidate_dir)):
+        classifier = TrainedClassifierService(path)
         predictions[name] = [
             classifier.classify(row["text"], language=row["language"] if row["language"] != "MIXED" else None).topic_id
             for row in rows
         ]
+        device = classifier.device
+        del classifier
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
     production_metrics = evaluate_predictions(rows, predictions["production"], labels)
     candidate_metrics = evaluate_predictions(rows, predictions["candidate"], labels)
     critical = {}
@@ -98,13 +128,13 @@ def compare_classifiers(package: Path, production_dir: Path, candidate_dir: Path
         "policy_version": policy.policy_version,
         "policy_sha256": checksum(policy_path),
         "policy": policy.model_dump(),
-        "production": {"model_version": models["production"][0].model_version,
-                       "dataset_version": models["production"][0].dataset_version,
-                       "artifact_checksum": models["production"][0].artifact_checksum,
+        "production": {"model_version": production.model_version,
+                       "dataset_version": production.dataset_version,
+                       "artifact_checksum": production.artifact_checksum,
                        "metrics": production_metrics},
-        "candidate": {"model_version": models["candidate"][0].model_version,
-                      "dataset_version": models["candidate"][0].dataset_version,
-                      "artifact_checksum": models["candidate"][0].artifact_checksum,
+        "candidate": {"model_version": candidate.model_version,
+                      "dataset_version": candidate.dataset_version,
+                      "artifact_checksum": candidate.artifact_checksum,
                       "metrics": candidate_metrics},
         "macro_f1_delta": round(candidate_metrics["macro_f1"] - production_metrics["macro_f1"], 6),
         "critical_topics": critical,

@@ -92,12 +92,15 @@ critical_regressions, sample_size, decision, created_at
 `TRAINING_INPUT_MISSING`. Для worker с CPU
 PyTorch используйте `docker-compose.training.yml` вместе с основным Compose.
 Каталог `PULSE_TRAINING_INPUT_DIR` должен содержать `review-links.jsonl`,
-`frozen/` (проверенный frozen package) и `production/` (действующий обученный
-classifier artifact). Review links должны быть вручную утверждены; наличие
+`frozen/` (проверенный frozen package), `production/` (действующий обученный
+classifier artifact) и заранее утверждённый `critical-policy.json` формата
+`classifier-critical-regression.v1`. Review links должны быть вручную утверждены; наличие
 двух CSV заказчика этого условия не выполняет. Worker читает feedback из
 PostgreSQL по ID закрытого цикла, экспортирует только проверенные тексты,
 исключает frozen IDs/groups/text, сохраняет versioned dataset и обучает новый
-immutable candidate в закрытом каталоге `ml-training`. При недостатке пригодных
+immutable candidate в закрытом каталоге `ml-training`. Затем он сравнивает обе
+модели на одном frozen test и записывает offline report в `model_evaluations`;
+shadow metrics остаются пустыми до отдельной проверки свежих решений. При недостатке пригодных
 записей цикл получает `INSUFFICIENT_FEEDBACK`; сбой сохраняет код без текста
 обращения. Production pointer не меняется. Image и реальный training job пока
 не проверены на данных заказчика, поскольку исходных текстов и reviewed links

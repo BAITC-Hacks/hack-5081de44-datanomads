@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 
 import pytest
 
@@ -20,6 +21,9 @@ class TrainingConnection:
     async def fetchval(self, query: str, *values):
         self.queries.append((query, values))
         return next(self.returned)
+
+    async def execute(self, query: str, *values):
+        self.queries.append((query, values))
 
 
 class TrainingPool:
@@ -41,16 +45,22 @@ def test_success_registers_dataset_and_new_candidate_without_overwriting(monkeyp
         "dataset_content_sha256": "sha256:" + "b" * 64,
         "sample_count": 2,
         "manifest": {"artifact_uri": "/private/model/manifest.json", "artifact_checksum": "sha256:" + "c" * 64},
+        "offline_metrics": {"report_version": "classifier-pair-evaluation.v1",
+                            "frozen_evaluation_version": "eval_v1", "dataset_version": "reviewed_v1",
+                            "regressed_critical_topics": [], "decision": "PENDING_HUMAN_REVIEW"},
     }
     asyncio.run(update_learning_cycle(pool, {"cycle_id": "1"}, result=result))
     queries = pool.connection.queries
-    assert len(queries) == 3
+    assert len(queries) == 4
     assert "manifest_sha256 = 'pending'" in queries[0][0]
     assert "ON CONFLICT (model_version) DO NOTHING" in queries[1][0]
     assert queries[1][1][0] == "candidate_v1"
     assert queries[1][1][3] == "/private/model/manifest.json"
-    assert "state = 'EVALUATE'" in queries[2][0]
-    assert queries[2][1][1] == "CANDIDATE_TRAINED"
+    assert "INSERT INTO model_evaluations" in queries[2][0]
+    assert "'{}'::jsonb" in queries[2][0]
+    assert json.loads(queries[2][1][4])["decision"] == "PENDING_HUMAN_REVIEW"
+    assert "state = 'EVALUATE'" in queries[3][0]
+    assert queries[3][1][1] == "CANDIDATE_TRAINED"
 
 
 def test_version_collision_fails_without_changing_cycle() -> None:

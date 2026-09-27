@@ -222,6 +222,9 @@ one frozen sample-ID checksum, aggregate metrics and each critical topic's F1
 drop. It returns `CRITICAL_REGRESSION` when a supported critical topic exceeds
 the policy limit, `INSUFFICIENT_EVIDENCE` when minimum support is unmet, or
 `PENDING_HUMAN_REVIEW`. It contains no ticket text and does not promote a model.
+The evaluator checks the candidate's production and frozen-test lineage,
+requires matching input length and strategy, compares tokenization on every
+frozen text, and loads the two classifiers sequentially to limit memory use.
 Current reviewed packages are synthetic, so the comparison cannot establish
 performance on actual citizen appeals. The feedback candidate trainer and a
 production model pointer are still required to run a real controlled-learning
