@@ -18,6 +18,19 @@ from data.schemas.taxonomy import canonical_source_system
 from data.schemas.unified_ticket import SchemaValidationError
 
 
+def _unique_json_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    value: Dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("nonstandard JSON constant")
+
+
 @dataclass
 class ImportResult:
     source_system: str
@@ -233,8 +246,10 @@ class SourceImporter:
         rows: List[Tuple[int, Mapping[str, Any]]] = []
         errors: List[QuarantineRecord] = []
         text = path.read_text(encoding="utf-8-sig")
+        numbered_values: List[Tuple[int, Any]] = []
+        parse_lines = False
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
             if isinstance(parsed, list):
                 values = parsed
             elif isinstance(parsed, Mapping) and isinstance(parsed.get("tickets"), list):
@@ -246,12 +261,19 @@ class SourceImporter:
                 values = [parsed]
             numbered_values = list(enumerate(values, start=1))
         except json.JSONDecodeError:
-            numbered_values = []
+            parse_lines = True
+        except ValueError as error:
+            if path.suffix.lower() not in {".jsonl", ".ndjson"} or text.lstrip().startswith("["):
+                return [], [QuarantineRecord(self.source_system, 1, "UNKNOWN_SCHEMA", str(error), {})]
+            parse_lines = True
+        if parse_lines:
             for row_number, line in enumerate(text.splitlines(), start=1):
                 if not line.strip():
                     continue
                 try:
-                    numbered_values.append((row_number, json.loads(line)))
+                    numbered_values.append((row_number, json.loads(
+                        line, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant,
+                    )))
                 except json.JSONDecodeError as exc:
                     errors.append(
                         QuarantineRecord(
@@ -262,6 +284,10 @@ class SourceImporter:
                             {"line": line},
                         )
                     )
+                except ValueError as error:
+                    errors.append(QuarantineRecord(
+                        self.source_system, row_number, "UNKNOWN_SCHEMA", str(error), {"line": line},
+                    ))
         for row_number, value in numbered_values:
             if not isinstance(value, Mapping):
                 errors.append(

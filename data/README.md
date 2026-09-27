@@ -136,6 +136,10 @@ python3 scripts/data_audit.py data/synthetic_raw/v1/ikomek109/primary.csv \
   --source iKOMEK109 --synthetic --output /tmp/pulse109-source-audit.json
 ```
 
+JSON/JSONL rows with repeated object keys or nonstandard `NaN`/`Infinity`
+constants are quarantined as `UNKNOWN_SCHEMA`; valid neighboring JSONL rows
+remain available for inspection but the import still exits nonzero.
+
 The report contains aggregate counts and a source checksum, never source row
 values. For a real local export, use `--real` with `--source`. The origin flag
 is required so synthetic reports cannot silently look like real evidence.

@@ -210,6 +210,26 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual([(row.reason, row.row_number) for row in result.quarantine],
                          [("UNKNOWN_SCHEMA", 2), ("INVALID_DATE", 3)])
 
+    def test_duplicate_json_fields_are_quarantined_before_mapping(self) -> None:
+        valid = '{"appealId":"one","region":"Астана","registeredAt":"2026-01-01","messageText":"Текст"}'
+        duplicate = '{"appealId":"spoof","appealId":"two","region":"Астана","registeredAt":"2026-01-02","messageText":"Текст"}'
+        nonstandard = '{"appealId":NaN,"region":"Астана","registeredAt":"2026-01-03","messageText":"Текст"}'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jsonl = root / "source.jsonl"
+            jsonl.write_text(valid + "\n" + duplicate + "\n" + nonstandard + "\n", encoding="utf-8")
+            result = get_importer("AIKEY").import_file(jsonl)
+            self.assertEqual(result.valid_count, 1)
+            self.assertEqual([(row.reason, row.row_number) for row in result.quarantine],
+                             [("UNKNOWN_SCHEMA", 2), ("UNKNOWN_SCHEMA", 3)])
+
+            array = root / "source.json"
+            nested = valid[:-1] + ',"metadata":{"key":"one","key":"two"}}'
+            array.write_text("[" + valid + "," + nested + "]", encoding="utf-8")
+            result = get_importer("AIKEY").import_file(array)
+            self.assertEqual(result.valid_count, 0)
+            self.assertEqual([(row.reason, row.row_number) for row in result.quarantine], [("UNKNOWN_SCHEMA", 1)])
+
     def test_xlsx_quarantine_uses_sheet_row_number(self) -> None:
         def cells(values: tuple[str, ...]) -> str:
             return "".join(f'<c t="inlineStr"><is><t>{value}</t></is></c>' for value in values)
