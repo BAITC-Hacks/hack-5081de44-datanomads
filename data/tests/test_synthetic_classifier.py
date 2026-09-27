@@ -42,6 +42,10 @@ class SyntheticClassifierTests(unittest.TestCase):
             self.assertFalse(groups["train"] & groups["test"])
             self.assertFalse(groups["validation"] & groups["test"])
 
+            repeated = generate(Path(directory) / "repeated")
+            self.assertEqual(repeated["files"], manifest["files"])
+            self.assertEqual(repeated["seed"], manifest["seed"])
+
 
 if __name__ == "__main__":
     unittest.main()
