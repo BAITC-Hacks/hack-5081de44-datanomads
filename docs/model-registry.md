@@ -78,8 +78,11 @@ split_version, metrics_json, critical_regressions,
 sample_size, created_at, evaluator
 ```
 
-Production pointer и audit trail обновляются одной транзакцией. Rejected
-candidate остаётся доступным для аудита, но никогда не используется serving.
+Production pointer и audit trail обновляются одной транзакцией. При promotion
+предыдущая production-версия сохраняется со статусом `ARCHIVED`. Reject одной
+транзакцией переводит candidate и learning cycle в `REJECTED`, сохраняет note и
+audit event и не меняет production pointer: это не rollback. Rejected candidate
+остаётся доступным для аудита, но никогда не используется serving.
 
 ## Жизненный цикл
 

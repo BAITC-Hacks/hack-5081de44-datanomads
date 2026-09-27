@@ -451,12 +451,49 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             evaluation.get("decision") != "PENDING_HUMAN_DECISION",
             f"candidate without complete verified evidence must not be promotable: {evaluation}",
         )
-    status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e evaluation reviewed"}, role="ML_REVIEWER", timeout=timeout)
+    status, _, learning_before_rejection = json_request(
+        base_url,
+        "GET",
+        "/api/v1/learning",
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    expect(status == 200, f"learning state before rejection is unavailable: {learning_before_rejection}")
+    production_before_rejection = (learning_before_rejection.get("production_model") or {}).get("id")
+    expect(bool(production_before_rejection), "production model is missing before rejection")
+
+    rejection_note = "e2e evaluation reviewed"
+    status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": rejection_note}, role="ML_REVIEWER", timeout=timeout)
     expect(
         status == 200
         and rejected.get("state") == "REJECTED"
+        and rejected.get("decision_note") == rejection_note
         and rejected.get("production_model_version") == cycle.get("production_model_version"),
-        f"candidate rejection failed or changed production: {rejected}",
+        f"candidate rejection failed or did not persist its note: {rejected}",
+    )
+    candidate_model_version = str(rejected.get("candidate_model_version") or "")
+    status, _, rejected_model = json_request(
+        base_url,
+        "GET",
+        f"/api/v1/models/{candidate_model_version}",
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    expect(
+        status == 200 and str(rejected_model.get("status", "")).upper() == "REJECTED",
+        f"candidate model registry did not persist REJECTED status: {rejected_model}",
+    )
+    status, _, learning_after_rejection = json_request(
+        base_url,
+        "GET",
+        "/api/v1/learning",
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    production_after_rejection = (learning_after_rejection.get("production_model") or {}).get("id")
+    expect(
+        status == 200 and production_after_rejection == production_before_rejection,
+        f"reject changed the production model pointer: {learning_after_rejection}",
     )
     learning_result = "FAKE_CANDIDATE_REJECTED" if fake_trainer else "CANDIDATE_EVIDENCE_VERIFIED_AND_REJECTED"
 

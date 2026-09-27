@@ -4074,28 +4074,55 @@ impl PgRepository {
             .begin()
             .await
             .map_err(|error| format!("begin rejection: {error}"))?;
-        let locked_state: String =
-            sqlx::query_scalar("SELECT state FROM learning_cycles WHERE id = $1 FOR UPDATE")
-                .bind(cycle_db_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|error| format!("lock cycle for rejection: {error}"))?;
+        let locked_cycle = sqlx::query(
+            "SELECT state, candidate_model_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
+        )
+        .bind(cycle_db_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("lock cycle for rejection: {error}"))?;
+        let locked_state: String = locked_cycle
+            .try_get("state")
+            .map_err(|error| format!("learning cycle state: {error}"))?;
         if !matches!(locked_state.as_str(), "EVALUATE" | "DECISION") {
             return Err(format!(
                 "cycle {} cannot be rejected from state {}",
                 cycle.id, locked_state
             ));
         }
-        sqlx::query("UPDATE learning_cycles SET state = 'REJECTED', decision_note = $2, updated_at = now() WHERE id = $1")
+        let candidate_model_version: Option<String> = locked_cycle
+            .try_get("candidate_model_version")
+            .map_err(|error| format!("candidate model version: {error}"))?;
+        if let Some(candidate_model_version) = candidate_model_version {
+            let candidate_transition = sqlx::query(
+                "UPDATE model_versions SET status = 'REJECTED' WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW')",
+            )
+            .bind(candidate_model_version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("reject candidate model: {error}"))?;
+            if candidate_transition.rows_affected() != 1 {
+                return Err("candidate model is no longer rejectable".to_owned());
+            }
+        }
+        let decision_note = note
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("rejected");
+        let transition = sqlx::query("UPDATE learning_cycles SET state = 'REJECTED', decision_note = $2, updated_at = now() WHERE id = $1 AND state = $3")
             .bind(cycle_db_id)
-            .bind(note.or(Some("rejected")))
+            .bind(decision_note)
+            .bind(&locked_state)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("reject learning cycle: {error}"))?;
+        if transition.rows_affected() != 1 {
+            return Err("learning cycle changed before rejection".to_owned());
+        }
         sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason) VALUES ($1, 'REJECT_MODEL', 'learning_cycle', $2, $3)")
             .bind(user_id)
             .bind(cycle.id.clone())
-            .bind(note)
+            .bind(decision_note)
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("audit rejection: {error}"))?;
@@ -4166,7 +4193,7 @@ impl PgRepository {
                     .to_owned(),
             );
         }
-        sqlx::query("UPDATE model_versions SET status = 'REJECTED' WHERE status = 'PRODUCTION' AND model_version <> $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("archive model: {error}"))?;
+        sqlx::query("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'PRODUCTION' AND model_version <> $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("archive model: {error}"))?;
         sqlx::query("UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("promote model: {error}"))?;
         sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason) VALUES ($1, 'PROMOTE_MODEL', 'model_version', $2, 'manual promotion')").bind(user_id).bind(model_id).execute(&mut *tx).await.map_err(|error| format!("audit model promotion: {error}"))?;
         tx.commit()

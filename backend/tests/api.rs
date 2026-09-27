@@ -171,6 +171,99 @@ async fn viewing_candidate_evaluation_does_not_close_its_window() {
 }
 
 #[tokio::test]
+async fn learning_cycle_rejection_requires_a_reviewer_and_keeps_production_unchanged() {
+    let application = app(AppState::demo());
+    let forbidden = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/candidate/reject")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::from(r#"{"note":"not authorized"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
+    let before = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/learning")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), 200);
+    let before: serde_json::Value =
+        serde_json::from_slice(&to_bytes(before.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let production_before = before["production_model"]["id"].as_str().unwrap();
+
+    let close = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/cycle/close")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::from(r#"{"cycle_id":"cycle-001"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(close.status(), 202);
+
+    let reject = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/candidate/reject")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::from(r#"{"note":"reviewed candidate evidence"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reject.status(), 200);
+    let rejected: serde_json::Value =
+        serde_json::from_slice(&to_bytes(reject.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(rejected["state"], "REJECTED");
+    assert_eq!(rejected["decision_note"], "reviewed candidate evidence");
+
+    let candidate_id = rejected["candidate_model_version"].as_str().unwrap();
+    let candidate = application
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/models/{candidate_id}"))
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(candidate.status(), 200);
+    let candidate: serde_json::Value =
+        serde_json::from_slice(&to_bytes(candidate.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(candidate["status"], "rejected");
+
+    let after = application
+        .oneshot(
+            Request::get("/api/v1/learning")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.status(), 200);
+    let after: serde_json::Value =
+        serde_json::from_slice(&to_bytes(after.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(after["production_model"]["id"], production_before);
+}
+
+#[tokio::test]
 async fn operator_decision_reports_when_no_collect_cycle_is_open() {
     let application = app(AppState::demo());
     let response = application

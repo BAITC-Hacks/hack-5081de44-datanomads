@@ -5643,22 +5643,39 @@ async fn reject_learning_cycle(
         return Ok(Json(cycle));
     }
     let mut store = state.write_store()?;
-    let cycle = store
-        .learning_cycles
-        .get_mut(&cycle_id)
-        .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
-    if !matches!(cycle.state.as_str(), "EVALUATE" | "DECISION") {
-        return Err(ApiError::Conflict(format!(
-            "cycle {} cannot be rejected from state {}",
-            cycle.id, cycle.state
-        )));
+    let (candidate_model_version, rejected_cycle) = {
+        let cycle = store
+            .learning_cycles
+            .get_mut(&cycle_id)
+            .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
+        if !matches!(cycle.state.as_str(), "EVALUATE" | "DECISION") {
+            return Err(ApiError::Conflict(format!(
+                "cycle {} cannot be rejected from state {}",
+                cycle.id, cycle.state
+            )));
+        }
+        cycle.state = "REJECTED".to_owned();
+        cycle.decision_note = Some(
+            request
+                .note
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Rejected by {}", actor.user_id)),
+        );
+        cycle.updated_at = DEMO_TIMESTAMP.to_owned();
+        (cycle.candidate_model_version.clone(), cycle.clone())
+    };
+    if let Some(model) = store.models.get_mut(&candidate_model_version) {
+        if matches!(
+            model.status.as_str(),
+            "candidate" | "shadow" | "CANDIDATE" | "SHADOW"
+        ) {
+            model.status = "rejected".to_owned();
+        }
     }
-    cycle.state = "REJECTED".to_owned();
-    cycle.decision_note = request
-        .note
-        .or_else(|| Some(format!("Rejected by {}", actor.user_id)));
-    cycle.updated_at = DEMO_TIMESTAMP.to_owned();
-    Ok(Json(cycle.clone()))
+    Ok(Json(rejected_cycle))
 }
 
 #[derive(Debug, Deserialize)]
