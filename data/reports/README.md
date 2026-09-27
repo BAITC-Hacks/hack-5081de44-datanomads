@@ -2,8 +2,9 @@
 
 These reports were regenerated on 2026-09-27 from two customer-provided regional
 CSV files for Eastern Kazakhstan and Almaty Region. The raw files remain outside
-Git. Reports contain only column presence counts, date ranges, checksums and
-aggregate forecast metrics; they contain no ticket rows or field values.
+Git. Reports contain only field presence and joint-presence counts, semantic
+status, date ranges, checksums and aggregate forecast metrics; they contain no
+ticket rows or field values.
 
 | Export | SHA-256 | Rows | Calendar days | `original_text` column | Forecast status |
 | --- | --- | ---: | ---: | --- | --- |
@@ -38,11 +39,17 @@ regional datasets, with no asserted mapping to the seven operational
 corpus. `category`, `service` and `contractor` need separate semantic review
 before training or routing use. Neither layout has an explicit priority column.
 The CSV audit counts `com_exp` when present but does not require it.
+The [field availability report](customer_109_field_availability.json) and
+[interpretation](../../docs/customer-field-availability.md) list safe structural
+facts, missing fields and limits on within-file and cross-file comparisons.
 
 To reproduce with the same local files:
 
 ```bash
 python3 scripts/data_audit.py /path/to/export.csv --output /tmp/source-audit.json
+python3 scripts/evaluate_field_availability.py \
+  --vko /path/to/vko.csv --almaty /path/to/almaty.csv \
+  --output /tmp/customer-109-field-availability.json
 python3 scripts/evaluate_forecast_csv.py /path/to/export.csv --output /tmp/forecast-baseline.json
 MPLCONFIGDIR=/tmp/pulse109-mpl .venv/bin/python scripts/evaluate_forecast_candidates.py \
   /path/to/export.csv --output /tmp/forecast-candidates.json
