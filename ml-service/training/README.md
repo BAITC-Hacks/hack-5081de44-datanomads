@@ -10,7 +10,7 @@ PYTHONPATH=ml-service .venv/bin/python -m unittest discover \
   -s ml-service/training/tests -v
 ```
 
-The lock resolves 43 packages for Python 3.11.15 on Linux x86_64. Direct
+The lock resolves 49 packages for Python 3.11.15 on Linux x86_64. Direct
 requirements and the core version constraints are kept separately so the lock
 can be regenerated when training code changes. This lock pins package versions,
 but does not pin wheel hashes or other operating systems.
@@ -65,3 +65,21 @@ or exact text:
 
 Offline evaluators must receive a local artifact path and run with
 `HF_HUB_OFFLINE=1` to avoid Hub checks or downloads.
+
+## Classifier baselines
+
+After a reviewed package exists, run both fixed baselines on its train split:
+
+```bash
+.venv/bin/python scripts/evaluate_classifier_baselines.py \
+  --dataset data/processed/reviewed-v1 \
+  --output data/processed/reports/reviewed-v1-classifier-baselines.json
+```
+
+The command checks package and frozen test checksums, then writes majority and
+character TF-IDF + LinearSVC metrics for validation and test. It reports
+macro/weighted/per-class F1, accuracy, confusion matrices, RU/KZ/MIXED slices,
+and region slices with at least 30 examples. Train class counts and imbalance
+are explicit. Model settings are fixed before test evaluation; the output is
+synthetic evidence only until a real reviewed dataset is available. The output
+path must be new.
