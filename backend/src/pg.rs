@@ -3522,6 +3522,8 @@ fn promotion_evidence_ready(
     let offline_minimum = offline["policy"]["min_total_samples"].as_u64().unwrap_or(0);
     let shadow_count = shadow["sample_count"].as_u64().unwrap_or(0);
     let shadow_minimum = shadow["policy"]["min_samples"].as_u64().unwrap_or(0);
+    let real_count = shadow["origin_counts"]["real"].as_u64().unwrap_or(0);
+    let real_minimum = shadow["policy"]["min_real_samples"].as_u64().unwrap_or(0);
     evidence["decision"] == "READY_TO_REVIEW"
         && offline["report_version"] == "classifier-pair-evaluation.v1"
         && offline["decision"] == "PENDING_HUMAN_REVIEW"
@@ -3529,6 +3531,7 @@ fn promotion_evidence_ready(
         && offline["production"]["model_version"] == production_model
         && offline["candidate"]["artifact_checksum"] == candidate_checksum
         && offline["production"]["artifact_checksum"] == production_checksum
+        && offline["policy"]["policy_version"] == "classifier-critical-regression.v1"
         && valid_checksum(candidate_checksum)
         && valid_checksum(production_checksum)
         && offline_count > 0
@@ -3537,13 +3540,19 @@ fn promotion_evidence_ready(
         && offline["regressed_critical_topics"] == json!([])
         && shadow["report_version"] == "classifier-shadow-evaluation.v1"
         && shadow["status"] == "VALID"
+        && shadow["decision"] == "PENDING_HUMAN_REVIEW"
         && shadow["candidate_model_version"] == candidate_model
         && shadow["production_model_version"] == production_model
         && shadow["promotion_policy_version"] == promotion_policy_version
+        && shadow["policy"]["policy_version"] == "classifier-shadow-policy.v1"
+        && shadow["policy"]["promotion_policy_version"] == promotion_policy_version
         && shadow["blind_ab_enabled"].is_boolean()
         && shadow_count > 0
         && shadow_minimum > 0
         && shadow_count >= shadow_minimum
+        && real_minimum > 0
+        && real_count >= real_minimum
+        && shadow["global_regression"] == false
         && evidence["sample_size"] == shadow_count
         && shadow["critical_regressions"] == json!([])
         && evidence["critical_regressions"] == json!([])
@@ -3620,7 +3629,7 @@ mod tests {
                 "report_version": "classifier-pair-evaluation.v1",
                 "decision": "PENDING_HUMAN_REVIEW",
                 "sample_count": 48,
-                "policy": {"min_total_samples": 40},
+                "policy": {"policy_version": "classifier-critical-regression.v1", "min_total_samples": 40},
                 "candidate": {"model_version": "candidate-v1", "artifact_checksum": candidate_checksum},
                 "production": {"model_version": "production-v1", "artifact_checksum": production_checksum},
                 "regressed_critical_topics": []
@@ -3633,7 +3642,10 @@ mod tests {
                 "promotion_policy_version": "policy-v1",
                 "blind_ab_enabled": false,
                 "sample_count": 30,
-                "policy": {"min_samples": 30},
+                "origin_counts": {"real": 30},
+                "policy": {"policy_version": "classifier-shadow-policy.v1", "promotion_policy_version": "policy-v1", "min_samples": 30, "min_real_samples": 30},
+                "decision": "PENDING_HUMAN_REVIEW",
+                "global_regression": false,
                 "critical_regressions": []
             },
             "critical_regressions": [],
@@ -3661,13 +3673,16 @@ mod tests {
         evidence["shadow_metrics"]["sample_count"] = json!(29);
         assert!(!ready(&evidence));
         evidence["shadow_metrics"]["sample_count"] = json!(30);
+        evidence["shadow_metrics"]["origin_counts"]["real"] = json!(29);
+        assert!(!ready(&evidence));
+        evidence["shadow_metrics"]["origin_counts"]["real"] = json!(30);
         evidence["offline_metrics"] = json!({"status": "FAKE_TRAINER_NO_METRICS"});
         assert!(!ready(&evidence));
         evidence["offline_metrics"] = json!({
             "report_version": "classifier-pair-evaluation.v1",
             "decision": "CRITICAL_REGRESSION",
             "sample_count": 48,
-            "policy": {"min_total_samples": 40},
+            "policy": {"policy_version": "classifier-critical-regression.v1", "min_total_samples": 40},
             "candidate": {"model_version": "candidate-v1", "artifact_checksum": candidate_checksum},
             "production": {"model_version": "production-v1", "artifact_checksum": production_checksum},
             "regressed_critical_topics": ["roads"]

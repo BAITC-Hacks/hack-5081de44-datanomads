@@ -227,6 +227,44 @@ performance on actual citizen appeals. The feedback candidate trainer and a
 production model pointer are still required to run a real controlled-learning
 comparison.
 
+## Fresh shadow evaluation
+
+`scripts/evaluate_classifier_shadow.py` accepts a PII-free
+`classifier-shadow-input.v1` JSONL. Each row has one ticket/feedback ID, one
+operator-confirmed topic and **both** production and candidate predictions for
+that ticket. It also carries cycle/model versions, source dataset version,
+synthetic origin, decision time and `validation_status=VALID`. Ticket text is
+not part of the contract. Duplicate tickets, mixed model versions, malformed
+decisions and rows outside the policy window fail validation.
+
+The required policy is `classifier-shadow-policy.v1` with
+`promotion_policy_version`, an aware `window_start`/`window_end`,
+`min_samples`, `min_real_samples`, `critical_topics`, `min_topic_support`,
+`max_topic_agreement_drop` and `max_correction_rate_increase`. Critical-topic
+support counts real operator decisions. Set the policy before examining
+candidate results.
+
+```bash
+.venv/bin/python scripts/evaluate_classifier_shadow.py \
+  --input /path/to/validated-paired-shadow.jsonl \
+  --policy /path/to/approved-shadow-policy.json \
+  --cycle-id cycle_1 \
+  --production-model-version classifier_production_v1 \
+  --candidate-model-version classifier_candidate_v1 \
+  --output data/processed/reports/cycle_1-shadow.json
+```
+
+The report has production/candidate agreement, correction rates and their
+delta, per-topic slices, critical regressions, real/synthetic counts and a
+single sample-ID checksum. It records `blind_ab_enabled=false` and no
+preference score because the current UI has no blind A/B. Too few total, real
+or critical-topic samples give `INSUFFICIENT_EVIDENCE`; an adequately sized
+report with a critical or global correction-rate regression gets a `NO_GO`
+decision. Only a `VALID` report without regressions can contribute to
+promotion evidence.
+Runtime capture/export of candidate shadow predictions is still required;
+this evaluator does not manufacture that input from existing customer CSVs.
+
 ## Retrieval baselines
 
 Evaluate relation groups from the same reviewed package:
