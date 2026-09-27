@@ -25,6 +25,12 @@ ML_OPENAPI = ROOT / "docs/openapi/ml.openapi.yaml"
 
 
 class SharedContractTests(unittest.TestCase):
+    def test_uvicorn_access_logs_are_disabled_by_default(self) -> None:
+        dockerfile = (ROOT / "ml-service/Dockerfile").read_text(encoding="utf-8")
+        readme = (ROOT / "ml-service/README.md").read_text(encoding="utf-8")
+        self.assertIn("--no-access-log", dockerfile)
+        self.assertIn("--no-access-log", readme)
+
     def test_demo_data_and_model_artifacts_validate(self) -> None:
         checked = validate_demo_artifacts()
         self.assertEqual(
@@ -166,7 +172,12 @@ class SharedContractTests(unittest.TestCase):
 
         self.assertEqual(readiness.status_code, 503)
         self.assertEqual(inference.status_code, 503)
-        self.assertEqual(readiness.json()["detail"], "MODEL_MANIFEST_UNAVAILABLE_OR_INVALID")
+        self.assertEqual(readiness.json()["status"], "not_ready")
+        self.assertEqual(readiness.json()["detail"], "model runtime is not ready")
+        self.assertEqual(
+            readiness.json()["checks"]["model_manifest"]["error_code"],
+            "MODEL_MANIFEST_UNAVAILABLE_OR_INVALID",
+        )
 
     def test_production_mode_is_unready_until_a_real_runtime_adapter_exists(self) -> None:
         registry = ModelRegistry(path=MANIFEST, runtime_mode="production")
@@ -175,6 +186,20 @@ class SharedContractTests(unittest.TestCase):
         self.assertEqual(
             registry.get("classifier").artifact_kind,
             "DETERMINISTIC_BASELINE",
+        )
+
+        async def readiness_request() -> httpx.Response:
+            transport = httpx.ASGITransport(app=ml_main.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.get("/readyz")
+
+        with patch.object(ml_main, "registry", registry):
+            readiness = asyncio.run(readiness_request())
+        self.assertEqual(readiness.status_code, 503)
+        self.assertEqual(readiness.json()["status"], "not_ready")
+        self.assertEqual(
+            readiness.json()["checks"]["model_artifact"]["error_code"],
+            "MODEL_RUNTIME_ADAPTER_NOT_CONFIGURED",
         )
 
     def test_demo_mode_does_not_report_a_trained_manifest_as_baseline_serving(self) -> None:

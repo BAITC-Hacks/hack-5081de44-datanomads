@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -52,6 +53,66 @@ class ContractArtifactTests(unittest.TestCase):
         self.assertTrue({"request_id", "trace_id", "latency_ms", "status"}.issubset(required))
         forbidden = set(observability["forbidden_payload_fields"])
         self.assertTrue({"iin", "phone", "name", "full_address", "attachments"}.issubset(forbidden))
+        self.assertEqual(observability["latency_percentiles"], [50, 95])
+        self.assertEqual(observability["latency_group_by"], ["service", "endpoint"])
+        self.assertTrue(
+            {"ticket_id", "user_id", "request_id", "trace_id"}.issubset(
+                set(observability["forbidden_metric_labels"])
+            )
+        )
+
+    def test_latency_percentile_uses_nearest_rank(self):
+        self.assertEqual(self.smoke.nearest_rank_percentile([4.0, 1.0, 3.0, 2.0], 50), 2.0)
+        self.assertEqual(self.smoke.nearest_rank_percentile([4.0, 1.0, 3.0, 2.0], 95), 4.0)
+        self.assertIsNone(self.smoke.finite_latency_ms(True))
+        self.assertIsNone(self.smoke.finite_latency_ms(-0.1))
+        self.assertEqual(self.smoke.finite_latency_ms(0), 0.0)
+
+    def test_log_check_reports_latency_percentiles(self):
+        fields = {
+            "timestamp": "2026-09-27T00:00:00Z",
+            "level": "INFO",
+            "request_id": "internal-1",
+            "trace_id": "trace-safe",
+            "service": "pulse109-core",
+            "endpoint": "/api/v1/tickets",
+            "latency_ms": 12.5,
+            "model_version": "n/a",
+            "status": 200,
+            "error_code": "none",
+            "message": "request_completed",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "requests.jsonl"
+            events = [dict(fields, latency_ms=latency) for latency in (12.5, 20.0)]
+            log_path.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=True)
+        latency_check = next(check for check in checks if check.name == "request latency p50/p95")
+        self.assertTrue(latency_check.ok, latency_check.detail)
+        self.assertIn("p50=12.500ms", latency_check.detail)
+        self.assertIn("p95=20.000ms", latency_check.detail)
+
+    def test_log_check_rejects_nonfinite_latency(self):
+        event = {
+            "timestamp": "2026-09-27T00:00:00Z",
+            "level": "INFO",
+            "request_id": "internal-1",
+            "trace_id": "trace-safe",
+            "service": "pulse109-core",
+            "endpoint": "/api/v1/tickets",
+            "latency_ms": float("inf"),
+            "model_version": "n/a",
+            "status": 200,
+            "error_code": "none",
+            "message": "request_completed",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "requests.jsonl"
+            log_path.write_text(json.dumps(event), encoding="utf-8")
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=True)
+        latency_check = next(check for check in checks if check.name == "request latency p50/p95")
+        self.assertFalse(latency_check.ok)
+        self.assertIn("invalid latency events=1", latency_check.detail)
 
     def test_deterministic_fixture(self):
         self.assert_checks_pass(self.smoke.check_fixture(FIXTURE_PATH, self.manifest))
@@ -72,6 +133,7 @@ class ContractArtifactTests(unittest.TestCase):
 
     def test_core_openapi_does_not_claim_internal_ml_routes(self):
         umbrella = json.loads((ROOT / "docs/openapi/openapi.json").read_text())
+        self.assertIn("503", umbrella["paths"]["/readyz"]["get"]["responses"])
         core = dict(umbrella)
         core["paths"] = {
             path: operations

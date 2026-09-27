@@ -82,10 +82,22 @@ Production model продолжает обслуживать запросы во
 
 ## Надёжность и наблюдаемость
 
-- `/healthz` означает, что процесс жив; `/readyz` — что обязательные зависимости
-  доступны.
+- `/healthz` означает, что процесс жив; `/readyz` проверяет PostgreSQL и
+  применённые миграции, Qdrant и размерность/метрику коллекции, ML runtime,
+  model manifest/artifact и согласованность embedder. Если любая обязательная
+  проверка не пройдена, `/readyz` отвечает `503` с безопасными статусами и
+  кодами ошибок. В in-memory demo внешние зависимости отмечены как
+  `not_applicable`.
 - Core API пишет structured JSON с `request_id`, `trace_id`, `service`,
   `endpoint`, `latency_ms`, `model_version`, `status`, `error_code`.
+- `request_id` в логах генерируется сервисом. `trace_id` — стабильный SHA-256
+  псевдоним входящего trace, общий для Core и ML; исходный заголовок в логи не
+  попадает. Ошибки получают безопасный код по HTTP status.
+- Uvicorn access logs отключены в Docker и локальной команде запуска; ML пишет
+  только структурированный request event с route group, без URL query и body.
+- Smoke check считает nearest-rank p50/p95 `latency_ms` по `service` и
+  `endpoint`. Пороговые значения не задаются. ID обращения, пользователя,
+  региона, темы и trace запрещены как metric labels.
 - `/api/v1/events` держит SSE-соединение открытым: сначала отправляет
   `alerts.snapshot`, после изменения alerts — `alerts.changed`; клиент
   повторно загружает данные при `alerts.resync`.

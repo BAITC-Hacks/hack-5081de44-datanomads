@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -70,6 +71,33 @@ def log_endpoint_path(path: str) -> str:
     return "/" + "/".join(segments[:3])
 
 
+def safe_trace_id(value: str) -> str:
+    """Keep cross-service trace correlation without logging caller identifiers."""
+    prefix = "trace-"
+    digest = value.removeprefix(prefix)
+    if len(digest) == 64 and all(character in "0123456789abcdef" for character in digest):
+        return value
+    return prefix + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def response_error_code(status: int) -> str:
+    known_code = {
+        400: "BAD_REQUEST",
+        401: "UNAUTHORIZED",
+        403: "FORBIDDEN",
+        404: "NOT_FOUND",
+        409: "CONFLICT",
+        422: "VALIDATION_ERROR",
+        429: "RATE_LIMITED",
+        503: "NOT_READY",
+    }.get(status)
+    if known_code is not None:
+        return known_code
+    if status < 400:
+        return "none"
+    return "CLIENT_ERROR" if status < 500 else "SERVER_ERROR"
+
+
 registry, classifier, embedder, forecaster, anomaly_detector, trainer, evaluator = make_services()
 
 app = FastAPI(
@@ -104,18 +132,21 @@ def require_model_runtime(model_type: str) -> ModelMetadata:
 async def request_logging(request: Request, call_next: Any) -> JSONResponse:
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     log_request_id = str(uuid.uuid4())
+    trace_id = safe_trace_id(request.headers.get("x-trace-id") or request_id)
     started = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception as error:
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
         logger.error(
             "request_failed",
             extra={
                 "request_id": log_request_id,
-                "trace_id": log_request_id,
+                "trace_id": trace_id,
                 "endpoint": log_endpoint_path(request.url.path),
+                "latency_ms": latency_ms,
                 "status": 500,
-                "error_code": "internal_error",
+                "error_code": "SERVER_ERROR",
                 "error_type": type(error).__name__,
             },
         )
@@ -124,19 +155,21 @@ async def request_logging(request: Request, call_next: Any) -> JSONResponse:
             content={"detail": "internal server error"},
         )
         error_response.headers["x-request-id"] = request_id
+        error_response.headers["x-trace-id"] = trace_id
         return error_response
     latency_ms = round((time.perf_counter() - started) * 1000, 3)
     response.headers["x-request-id"] = request_id
+    response.headers["x-trace-id"] = trace_id
     logger.info(
         "request_completed",
         extra={
             "request_id": log_request_id,
-            "trace_id": log_request_id,
+            "trace_id": trace_id,
             "endpoint": log_endpoint_path(request.url.path),
             "status": response.status_code,
             "latency_ms": latency_ms,
             "model_version": "n/a",
-            "error_code": "none",
+            "error_code": response_error_code(response.status_code),
         },
     )
     return response
@@ -147,10 +180,43 @@ async def healthz() -> HealthResponse:
     return HealthResponse(status="ok", service="pulse109-ml", version=__version__, model_versions=registry.model_versions())
 
 
-@app.get("/readyz", response_model=HealthResponse, tags=["health"])
+@app.get(
+    "/readyz",
+    response_model=HealthResponse,
+    responses={
+        503: {
+            "model": HealthResponse,
+            "description": "Model manifest or runtime is unavailable",
+        }
+    },
+    tags=["health"],
+)
 async def readyz() -> HealthResponse:
-    require_ready()
-    return HealthResponse(status="ready", service="pulse109-ml", version=__version__, model_versions=registry.model_versions())
+    manifest_ready = registry.manifest is not None
+    artifact_ready = registry.ready
+    manifest_error = None if manifest_ready else "MODEL_MANIFEST_UNAVAILABLE_OR_INVALID"
+    artifact_error = None if artifact_ready else registry.load_error or "MODEL_NOT_READY"
+    checks = {
+        "model_manifest": {
+            "status": "ready" if manifest_ready else "not_ready",
+            **({} if manifest_error is None else {"error_code": manifest_error}),
+        },
+        "model_artifact": {
+            "status": "ready" if artifact_ready else "not_ready",
+            **({} if artifact_error is None else {"error_code": artifact_error}),
+        },
+    }
+    health = HealthResponse(
+        status="ready" if artifact_ready else "not_ready",
+        service="pulse109-ml",
+        version=__version__,
+        model_versions=registry.model_versions(),
+        checks=checks,
+        detail=None if artifact_ready else "model runtime is not ready",
+    )
+    if artifact_ready:
+        return health
+    return JSONResponse(status_code=503, content=health.model_dump(exclude_none=True))
 
 
 @app.get("/", tags=["health"])

@@ -24,11 +24,17 @@ paths:
     get:
       tags:
       - health
-      summary: Readyz
+      summary: Model artifact and runtime readiness
       operationId: readyz_readyz_get
       responses:
         '200':
-          description: Successful Response
+          description: Model manifest and configured runtime are ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Model manifest or runtime is unavailable
           content:
             application/json:
               schema:
@@ -64,6 +70,7 @@ paths:
       - name: x-trace-id
         in: header
         required: false
+        description: Core sends the SHA-256 trace form; other incoming values are hashed before logging.
         schema:
           type: string
       requestBody:
@@ -100,6 +107,7 @@ paths:
       - name: x-trace-id
         in: header
         required: false
+        description: Core sends the SHA-256 trace form; other incoming values are hashed before logging.
         schema:
           type: string
       requestBody:
@@ -994,6 +1002,7 @@ components:
           enum:
           - ok
           - ready
+          - not_ready
           title: Status
         service:
           type: string
@@ -1006,6 +1015,18 @@ components:
             type: string
           type: object
           title: Model Versions
+        checks:
+          additionalProperties:
+            additionalProperties:
+              type: string
+            type: object
+          type: object
+          title: Checks
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
       additionalProperties: true
       type: object
       required:

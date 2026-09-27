@@ -135,6 +135,13 @@ feedback → `INSUFFICIENT_FEEDBACK`; candidate с critical regression нель�
 promote; rejected candidate не меняет production pointer; unauthorized role
 получает 401/403; malformed QueryIntent не выполняет SQL.
 
+Observability checks validate structured JSON fields, safe trace correlation,
+nonnegative finite `latency_ms`, and PII-free logs. Smoke reports nearest-rank
+p50/p95 grouped by service and endpoint without imposing an SLA threshold or
+using request/ticket/user IDs as metric labels. Readiness failures must include
+dependency status and a safe error code; demo-only dependencies are explicitly
+`not_applicable`.
+
 ## Acceptance evidence
 
 Каждый demo run сохраняет commit SHA, compose config, model/dataset versions,

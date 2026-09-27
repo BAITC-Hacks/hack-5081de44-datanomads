@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import math
 import asyncio
+import hashlib
+import math
 from io import StringIO
 
 import httpx
@@ -51,6 +52,13 @@ def test_health_and_readiness() -> None:
     assert health.json()["status"] == "ok"
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
+    assert ready.json()["checks"]["model_manifest"]["status"] == "ready"
+    assert ready.json()["checks"]["model_artifact"]["status"] == "ready"
+    ready_spec = app.openapi()["paths"]["/readyz"]["get"]["responses"]
+    assert "503" in ready_spec
+    assert ready_spec["503"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/HealthResponse"
+    )
 
 
 def test_unhandled_error_response_and_log_hide_exception_text(monkeypatch) -> None:
@@ -77,22 +85,36 @@ def test_unhandled_error_response_and_log_hide_exception_text(monkeypatch) -> No
 
     assert response.status_code == 500
     assert response.headers["x-request-id"] == sentinel
+    expected_trace_id = "trace-" + hashlib.sha256(sentinel.encode()).hexdigest()
+    assert response.headers["x-trace-id"] == expected_trace_id
     assert response.json() == {"detail": "internal server error"}
     assert sentinel not in response.text
     assert sentinel not in log_output
     assert '"error_type":"ValueError"' in log_output
+    assert '"error_code":"SERVER_ERROR"' in log_output
+    assert '"latency_ms":' in log_output
 
 
 def test_validation_error_does_not_echo_input_values() -> None:
     sentinel = "PII_SENTINEL_029"
-    response = client.post(
-        "/internal/v1/classify",
-        json={"text": "safe request", "top_k": sentinel},
-    )
+    handler = main.logger.handlers[0]
+    original_stream = handler.stream
+    captured_log = StringIO()
+    handler.setStream(captured_log)
+    try:
+        response = client.post(
+            "/internal/v1/classify",
+            json={"text": "safe request", "top_k": sentinel},
+        )
+        log_output = captured_log.getvalue()
+    finally:
+        handler.setStream(original_stream)
 
     assert response.status_code == 422
     assert response.json() == {"detail": "invalid request"}
     assert sentinel not in response.text
+    assert sentinel not in log_output
+    assert '"error_code":"VALIDATION_ERROR"' in log_output
 
 
 def test_unknown_job_identifier_is_omitted_from_response_and_logs() -> None:
@@ -111,6 +133,7 @@ def test_unknown_job_identifier_is_omitted_from_response_and_logs() -> None:
     assert sentinel not in response.text
     assert sentinel not in log_output
     assert '"endpoint":"/internal/v1/training"' in log_output
+    assert '"error_code":"NOT_FOUND"' in log_output
 
 
 def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:
@@ -160,6 +183,7 @@ def test_inference_trace_headers_are_documented_and_request_id_is_preserved() ->
     )
     assert response.status_code == 200
     assert response.headers["x-request-id"] == header_values["x-request-id"]
+    assert response.headers["x-trace-id"] == main.safe_trace_id(header_values["x-trace-id"])
 
     openapi = app.openapi()
     for path in ("/internal/v1/classify", "/internal/v1/embed"):

@@ -69,7 +69,10 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/HealthResponse' }
         '503':
-          description: Dependency is unavailable
+          description: A required dependency or model artifact is not ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResponse' }
   /api/v1/import:
     post:
       tags: [import]
@@ -118,6 +121,7 @@ paths:
         - name: x-trace-id
           in: header
           required: false
+          description: Upstream correlation value; Core returns and forwards its SHA-256 trace form.
           schema: { type: string }
       requestBody:
         required: true
@@ -1087,8 +1091,21 @@ components:
       type: object
       required: [status]
       properties:
-        status: { type: string, enum: [ok, ready, degraded] }
-        dependencies: { type: object, additionalProperties: { type: string } }
+        status: { type: string, enum: [ok, ready, not_ready] }
+        service: { type: string }
+        version: { type: string }
+        storage: { type: string, enum: [postgres, in_memory_demo] }
+        demo: { type: boolean }
+        checks:
+          type: object
+          additionalProperties:
+            type: object
+            required: [status]
+            properties:
+              status: { type: string, enum: [ready, not_ready, not_evaluated, not_applicable] }
+              error_code: { type: string }
+            additionalProperties: true
+      additionalProperties: true
     ImportRequest:
       type: object
       required: [source_system, is_synthetic]
@@ -1211,7 +1228,9 @@ components:
       required: [request_id, trace_id, status, needs_review, language, latency_ms, model_versions, stages]
       properties:
         request_id: { type: string }
-        trace_id: { type: string }
+        trace_id:
+          type: string
+          description: Stable SHA-256 trace form shared with downstream services.
         status: { type: string, enum: [complete, partial] }
         needs_review: { type: boolean }
         language: { type: string, enum: [RU, KZ, MIXED, UNKNOWN] }

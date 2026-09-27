@@ -45,7 +45,7 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 python -m contracts.validate --check-demo
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --no-access-log
 ```
 
 Документация OpenAPI доступна на `http://localhost:8000/docs`.

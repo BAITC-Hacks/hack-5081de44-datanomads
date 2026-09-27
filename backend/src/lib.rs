@@ -42,7 +42,7 @@ use tracing::info;
 mod anomaly;
 mod pg;
 pub use anomaly::AlertDetectorConfig;
-use pg::{default_qdrant_collection, PgRepository};
+use pg::{default_qdrant_collection, safe_trace_id, PgRepository};
 
 const SERVICE_NAME: &str = "pulse109-core";
 const API_VERSION: &str = "0.1.0";
@@ -774,6 +774,26 @@ fn trace_id_from_headers(headers: &HeaderMap) -> String {
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| request_id_from_headers(headers))
+}
+
+fn log_trace_id_from_headers(headers: &HeaderMap) -> String {
+    safe_trace_id(&trace_id_from_headers(headers))
+}
+
+fn response_error_code(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "BAD_REQUEST",
+        401 => "UNAUTHORIZED",
+        403 => "FORBIDDEN",
+        404 => "NOT_FOUND",
+        409 => "CONFLICT",
+        422 => "VALIDATION_ERROR",
+        429 => "RATE_LIMITED",
+        503 => "NOT_READY",
+        400..=499 => "CLIENT_ERROR",
+        500..=599 => "SERVER_ERROR",
+        _ => "none",
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1752,13 +1772,13 @@ async fn request_context(mut request: Request, next: Next) -> Response {
                 Utc::now().timestamp_nanos_opt().unwrap_or_default()
             )
         });
-    let trace_id = request
+    let incoming_trace_id = request
         .headers()
         .get("x-trace-id")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(&request_id)
-        .to_owned();
+        .unwrap_or(request_id.as_str());
+    let trace_id = safe_trace_id(incoming_trace_id);
     let started = Instant::now();
     let method = request.method().clone();
     let path = request
@@ -1793,16 +1813,17 @@ async fn request_context(mut request: Request, next: Next) -> Response {
     if let Ok(value) = HeaderValue::from_str(&trace_id) {
         response.headers_mut().insert("x-trace-id", value);
     }
+    let error_code = response_error_code(response.status());
     info!(
         service = SERVICE_NAME,
         request_id = %log_request_id,
-        trace_id = %log_request_id,
+        trace_id = %trace_id,
         endpoint = %path,
         method = %method,
         latency_ms,
         status = response.status().as_u16(),
         model_version = "n/a",
-        error_code = "none",
+        error_code,
         "request_completed"
     );
     response
@@ -1816,32 +1837,48 @@ async fn healthz() -> Json<Value> {
     }))
 }
 
-async fn readyz(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    if let Some(repository) = state.repository() {
-        let checks = repository
-            .readiness()
-            .await
-            .map_err(ApiError::Unavailable)?;
-        return Ok(Json(json!({
-            "status": "ready",
-            "service": SERVICE_NAME,
-            "storage": "postgres",
-            "demo": false,
-            "checks": checks,
-        })));
-    }
-    let store = state.read_store()?;
-    Ok(Json(json!({
-        "status": "ready",
+async fn readyz(State(state): State<AppState>) -> Response {
+    let (storage, demo, report) = if let Some(repository) = state.repository() {
+        ("postgres", false, repository.readiness().await)
+    } else {
+        let store = match state.read_store() {
+            Ok(store) => store,
+            Err(error) => return error.into_response(),
+        };
+        (
+            "in_memory_demo",
+            true,
+            json!({
+                "status": "ready",
+                "checks": {
+                    "store": { "status": "ready" },
+                    "postgres": { "status": "not_applicable" },
+                    "database_migrations": { "status": "not_applicable" },
+                    "qdrant": { "status": "not_applicable" },
+                    "qdrant_collection": { "status": "not_applicable" },
+                    "ml_service": { "status": "not_applicable" },
+                    "model_artifact": { "status": "not_applicable" },
+                    "ml_embedder": { "status": "not_applicable" }
+                },
+                "demo_ticket_count": store.tickets.len(),
+                "demo_model_count": store.models.len()
+            }),
+        )
+    };
+    let ready = report.get("status").and_then(Value::as_str) == Some("ready");
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = json!({
+        "status": if ready { "ready" } else { "not_ready" },
         "service": SERVICE_NAME,
-        "storage": "in_memory_demo",
-        "demo": true,
-        "checks": {
-            "store": true,
-            "tickets": store.tickets.len(),
-            "models": store.models.len(),
-        }
-    })))
+        "storage": storage,
+        "demo": demo,
+        "checks": report.get("checks").cloned().unwrap_or_else(|| json!({})),
+    });
+    (status, Json(body)).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2041,7 +2078,7 @@ async fn create_ticket(
             ticket_id = %response.ticket.id,
             model_version = %response.prediction.model_version,
             request_id = %log_request_id_from_headers(&headers),
-            trace_id = %log_request_id_from_headers(&headers),
+            trace_id = %log_trace_id_from_headers(&headers),
             endpoint = "/api/v1/tickets",
             latency_ms = 0.0_f64,
             status = 201_u16,
@@ -2178,7 +2215,7 @@ async fn import_tickets(
         imported_rows = response.imported_rows,
         quarantined_rows = response.quarantined_rows,
         request_id = %log_request_id_from_headers(&headers),
-        trace_id = %log_request_id_from_headers(&headers),
+        trace_id = %log_trace_id_from_headers(&headers),
         endpoint = "/api/v1/import",
         latency_ms = 0.0_f64,
         status = 201_u16,
@@ -3383,7 +3420,7 @@ async fn apply_decision(
             decision = %action,
             model_version = %response.prediction.model_version,
             request_id = %log_request_id_from_headers(&headers),
-            trace_id = %log_request_id_from_headers(&headers),
+            trace_id = %log_trace_id_from_headers(&headers),
             endpoint = "/api/v1/assist/decision",
             latency_ms = 0.0_f64,
             status = 200_u16,
@@ -7300,7 +7337,13 @@ async fn openapi() -> Json<Value> {
         },
         "paths": {
             "/healthz": { "get": { "summary": "Liveness" } },
-            "/readyz": { "get": { "summary": "Readiness" } },
+            "/readyz": { "get": {
+                "summary": "Dependency and model artifact readiness",
+                "responses": {
+                    "200": { "description": "Required dependencies are ready" },
+                    "503": { "description": "A dependency or model artifact is not ready" }
+                }
+            } },
             "/api/v1/openapi.json": { "get": { "summary": "Core OpenAPI route index" } },
             "/api/v1/docs": { "get": { "summary": "Core OpenAPI route index" } },
             "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
@@ -7424,12 +7467,19 @@ mod tests {
     #[tokio::test]
     async fn health_and_readiness_are_available_without_auth() {
         let app = app(AppState::demo());
+        let trace_input = "PULSE109_TRACE_SENTINEL";
         let response = app
             .clone()
-            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/healthz")
+                    .header("x-trace-id", trace_input)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-trace-id"], safe_trace_id(trace_input));
         assert_eq!(body_json(response).await["status"], "ok");
 
         let response = app
@@ -7437,7 +7487,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(body_json(response).await["status"], "ready");
+        let readiness = body_json(response).await;
+        assert_eq!(readiness["status"], "ready");
+        assert_eq!(readiness["checks"]["store"]["status"], "ready");
+        assert_eq!(readiness["checks"]["qdrant"]["status"], "not_applicable");
+    }
+
+    #[tokio::test]
+    async fn readiness_returns_safe_dependency_details_when_unavailable() {
+        let repository = PgRepository::connect_lazy_with_options(
+            "postgres://pulse:private-test-value@127.0.0.1:1/pulse",
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            "test_collection",
+            32,
+            "test_embedder",
+        )
+        .unwrap();
+        let mut state = AppState::demo();
+        state.repository = Some(Arc::new(repository));
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app(state).oneshot(Request::get("/readyz").body(Body::empty()).unwrap()),
+        )
+        .await
+        .expect("readiness should have bounded local failure time")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(response).await;
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["checks"]["postgres"]["status"], "not_ready");
+        assert_eq!(
+            body["checks"]["postgres"]["error_code"],
+            "POSTGRES_UNAVAILABLE"
+        );
+        assert_eq!(
+            body["checks"]["database_migrations"]["status"],
+            "not_evaluated"
+        );
+        assert!(!body.to_string().contains("private-test-value"));
     }
 
     #[tokio::test]
@@ -7597,6 +7685,7 @@ mod tests {
         assert!(value["paths"]["/api/v1/assist/preview"].is_object());
         assert!(value["paths"]["/api/v1/learning/{cycle_id}/feedback"].is_object());
         assert!(value["paths"]["/api/v1/models/{model_id}/promote"].is_object());
+        assert!(value["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert!(value["paths"]["/internal/v1/classify"].is_null());
     }
 

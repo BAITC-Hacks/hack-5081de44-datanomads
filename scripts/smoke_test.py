@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -33,7 +34,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -582,6 +583,26 @@ PII_SENTINELS = {
 }
 
 
+def nearest_rank_percentile(values: Sequence[float], percentile: int) -> float:
+    if not values:
+        raise ValueError("percentile requires at least one observation")
+    if not 1 <= percentile <= 100:
+        raise ValueError("percentile must be between 1 and 100")
+    ordered = sorted(values)
+    rank = math.ceil(percentile * len(ordered) / 100)
+    return ordered[rank - 1]
+
+
+def finite_latency_ms(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        latency = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return latency if math.isfinite(latency) and latency >= 0 else None
+
+
 def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bool) -> list[Check]:
     if not path.is_file():
         return [Check("PII log file exists", False, f"missing {path}")]
@@ -599,8 +620,15 @@ def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bo
         )
     )
     required = set(manifest["observability"]["required_log_fields"])
+    observability = manifest["observability"]
+    latency_groups = observability.get("latency_group_by", [])
+    allowed_latency_groups = {"service", "endpoint"}
+    safe_latency_groups = [field for field in latency_groups if field in allowed_latency_groups]
     missing: set[str] = set()
     non_json_lines = 0
+    valid_latencies = 0
+    invalid_latencies = 0
+    latency_samples: dict[tuple[str, ...], list[float]] = {}
     for line in content.splitlines():
         if not line.strip():
             continue
@@ -611,6 +639,19 @@ def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bo
             continue
         if isinstance(event, dict):
             missing.update(required - set(event))
+            if event.get("message") not in {"request_completed", "request_failed"}:
+                continue
+            latency = finite_latency_ms(event.get("latency_ms"))
+            if (
+                latency is not None
+                and safe_latency_groups
+                and all(isinstance(event.get(field), str) for field in safe_latency_groups)
+            ):
+                group = tuple(event[field] for field in safe_latency_groups)
+                latency_samples.setdefault(group, []).append(latency)
+                valid_latencies += 1
+            else:
+                invalid_latencies += 1
     if strict_schema:
         ok = bool(content.strip()) and non_json_lines == 0 and not missing
         detail = "structured JSON fields present" if ok else "logs contain non-JSON lines or missing required fields"
@@ -622,6 +663,38 @@ def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bo
             "missing " + ", ".join(sorted(missing)) if missing else "required fields observed"
         )
     checks.append(Check("structured JSON observability fields", ok, detail))
+    latency_ok = (
+        valid_latencies > 0
+        and invalid_latencies == 0
+        and safe_latency_groups == ["service", "endpoint"]
+        and observability.get("latency_percentiles") == [50, 95]
+    )
+    if latency_samples:
+        percentiles = observability.get("latency_percentiles", [50, 95])
+        summaries = []
+        for group, samples in sorted(latency_samples.items()):
+            labels = ",".join(
+                f"{field}={value}" for field, value in zip(safe_latency_groups, group)
+            )
+            values = ",".join(
+                f"p{percentile}={nearest_rank_percentile(samples, int(percentile)):.3f}ms"
+                for percentile in percentiles
+            )
+            summaries.append(f"{labels} n={len(samples)} {values}")
+        latency_detail = "; ".join(summaries)
+    else:
+        latency_detail = "no valid latency samples"
+    if invalid_latencies:
+        latency_detail += f"; invalid latency events={invalid_latencies}"
+    if not latency_ok:
+        latency_detail += "; grouping must use only service and endpoint"
+    checks.append(
+        Check(
+            "request latency p50/p95",
+            latency_ok if strict_schema else True,
+            latency_detail,
+        )
+    )
     return checks
 
 
@@ -634,16 +707,8 @@ def check_pii_probe(base_url: str, timeout: float) -> list[Check]:
 
     token = os.getenv("PULSE_OPERATOR_TOKEN")
     body = {
-        "external_ticket_id": "pulse109-pii-probe",
-        "text": PII_SENTINELS["full_ticket_text"],
-        "region_id": "region-01",
-        "available_metadata": {
-            "iin": PII_SENTINELS["iin"],
-            "phone": PII_SENTINELS["phone"],
-            "name": PII_SENTINELS["name"],
-            "full_address": PII_SENTINELS["full_address"],
-            "attachments": PII_SENTINELS["attachments"],
-        },
+        "text": " | ".join(PII_SENTINELS.values()),
+        "region_id": "R01",
     }
     result = http_request(
         base_url,
@@ -655,9 +720,7 @@ def check_pii_probe(base_url: str, timeout: float) -> list[Check]:
         request_id="pulse109-pii-probe",
         timeout=timeout,
     )
-    # 400/422 still prove that the gateway parsed the request; a 401/403 or
-    # 404 means the intended endpoint was not exercised.
-    ok = result.status is not None and result.status not in {401, 403, 404, 405}
+    ok = result.status == 200
     detail = f"HTTP {result.status}" if result.status is not None else (result.error or "no response")
     return [Check("synthetic PII probe reached assist endpoint", ok, detail)]
 

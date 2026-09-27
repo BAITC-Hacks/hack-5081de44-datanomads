@@ -89,6 +89,16 @@
       "name",
       "full_address",
       "attachments"
+    ],
+    "latency_percentiles": [50, 95],
+    "latency_group_by": ["service", "endpoint"],
+    "forbidden_metric_labels": [
+      "ticket_id",
+      "user_id",
+      "request_id",
+      "trace_id",
+      "region_id",
+      "topic_id"
     ]
   },
   "compose": {

@@ -3,6 +3,7 @@ use axum::{
     http::Request,
 };
 use pulse109_core::{app, AppState, ImportRequest};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
@@ -667,11 +668,9 @@ async fn assist_preview_preserves_language_states_and_correlated_context() {
         if let Some(request_id) = request_id {
             assert_eq!(response_request_id, request_id);
         }
-        if let Some(trace_id) = trace_id {
-            assert_eq!(response_trace_id, trace_id);
-        } else {
-            assert_eq!(response_request_id, response_trace_id);
-        }
+        let trace_source = trace_id.unwrap_or(response_request_id.as_str());
+        let expected_trace_id = format!("trace-{:x}", Sha256::digest(trace_source.as_bytes()));
+        assert_eq!(response_trace_id, expected_trace_id);
     }
 
     let unsupported_language = application

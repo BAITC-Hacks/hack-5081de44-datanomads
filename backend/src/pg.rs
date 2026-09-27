@@ -27,13 +27,20 @@ use reqwest::{Client, StatusCode as HttpStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row};
-use std::{env, time::Instant};
+use sqlx::{
+    migrate::Migrator, postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row,
+};
+use std::{
+    env,
+    time::{Duration, Instant},
+};
 
 const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
+const READINESS_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
+static MIGRATOR: Migrator = sqlx::migrate!("../migrations");
 
 fn production_runtime_mode(runtime_mode: &str) -> bool {
     matches!(
@@ -396,6 +403,186 @@ fn qdrant_distance_name(value: &str) -> Result<String, String> {
         "dot" => Ok("Dot".to_owned()),
         "euclid" | "euclidean" => Ok("Euclid".to_owned()),
         _ => Err("embedding distance must be cosine, dot, or euclidean".to_owned()),
+    }
+}
+
+pub(crate) fn safe_trace_id(value: &str) -> String {
+    const PREFIX: &str = "trace-";
+    if let Some(digest) = value.strip_prefix(PREFIX) {
+        if digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return value.to_owned();
+        }
+    }
+    format!("{PREFIX}{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn readiness_check(status: &str, error_code: Option<&str>) -> Value {
+    let mut check = json!({"status": status});
+    if let Some(error_code) = error_code {
+        check["error_code"] = json!(error_code);
+    }
+    check
+}
+
+fn migration_readiness(rows: &[(i64, bool)], expected_versions: &[i64]) -> Value {
+    let expected = expected_versions
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let applied = rows
+        .iter()
+        .filter_map(|(version, success)| success.then_some(*version))
+        .collect::<std::collections::BTreeSet<_>>();
+    let failed_migrations = rows.iter().filter(|(_, success)| !success).count();
+    let pending_migrations = expected.difference(&applied).count();
+    let unexpected_migrations = applied.difference(&expected).count();
+    let error_code = if failed_migrations > 0 {
+        Some("DATABASE_MIGRATION_FAILED")
+    } else if unexpected_migrations > 0 {
+        Some("DATABASE_MIGRATION_VERSION_MISMATCH")
+    } else if pending_migrations > 0 {
+        Some("DATABASE_MIGRATIONS_PENDING")
+    } else {
+        None
+    };
+    let status = if error_code.is_some() {
+        "not_ready"
+    } else {
+        "ready"
+    };
+    json!({
+        "status": status,
+        "error_code": error_code,
+        "applied_migrations": applied.len(),
+        "failed_migrations": failed_migrations,
+        "expected_migrations": expected.len(),
+        "pending_migrations": pending_migrations,
+        "unexpected_migrations": unexpected_migrations,
+        "latest_applied_version": applied.iter().next_back(),
+    })
+}
+
+fn readiness_checks_are_ready(checks: &serde_json::Map<String, Value>) -> bool {
+    !checks.is_empty()
+        && checks
+            .values()
+            .all(|check| check.get("status").and_then(Value::as_str) == Some("ready"))
+}
+
+fn qdrant_collection_error_code(error: &str) -> &'static str {
+    if error.contains("missing") {
+        "QDRANT_COLLECTION_MISSING"
+    } else if error.contains("does not match") || error.contains("config") {
+        "QDRANT_COLLECTION_MISMATCH"
+    } else {
+        "QDRANT_COLLECTION_UNAVAILABLE"
+    }
+}
+
+fn remote_model_check(body: &Value) -> Value {
+    let Some(check) = body
+        .get("checks")
+        .and_then(|checks| checks.get("model_artifact"))
+    else {
+        return readiness_check("not_ready", Some("ML_READINESS_CHECK_MISSING"));
+    };
+    let status = match check.get("status").and_then(Value::as_str) {
+        Some("ready") => "ready",
+        Some("not_ready") => "not_ready",
+        _ => return readiness_check("not_ready", Some("ML_READINESS_CHECK_INVALID")),
+    };
+    let error_code = check
+        .get("error_code")
+        .and_then(Value::as_str)
+        .filter(|code| {
+            matches!(
+                *code,
+                "MODEL_MANIFEST_UNAVAILABLE_OR_INVALID"
+                    | "MODEL_RUNTIME_ADAPTER_NOT_CONFIGURED"
+                    | "MODEL_MANIFEST_RUNTIME_MISMATCH"
+                    | "INVALID_PULSE_ENV"
+            )
+        });
+    readiness_check(status, error_code)
+}
+
+#[cfg(test)]
+mod observability_readiness_tests {
+    use super::{
+        migration_readiness, qdrant_collection_error_code, remote_model_check, safe_trace_id,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn trace_ids_are_pseudonymized_idempotently() {
+        let safe = safe_trace_id("user-provided-trace");
+        assert!(safe.starts_with("trace-"));
+        assert_eq!(safe.len(), "trace-".len() + 64);
+        assert_eq!(safe_trace_id(&safe), safe);
+        assert_ne!(safe, "user-provided-trace");
+    }
+
+    #[test]
+    fn migrations_must_match_the_embedded_version_set() {
+        let pending = migration_readiness(&[(1, true)], &[1, 2]);
+        assert_eq!(pending["status"], "not_ready");
+        assert_eq!(pending["error_code"], "DATABASE_MIGRATIONS_PENDING");
+
+        let failed = migration_readiness(&[(1, true), (2, false)], &[1, 2]);
+        assert_eq!(failed["error_code"], "DATABASE_MIGRATION_FAILED");
+
+        let unexpected = migration_readiness(&[(1, true), (3, true)], &[1, 2]);
+        assert_eq!(
+            unexpected["error_code"],
+            "DATABASE_MIGRATION_VERSION_MISMATCH"
+        );
+
+        let ready = migration_readiness(&[(1, true), (2, true)], &[1, 2]);
+        assert_eq!(
+            ready,
+            json!({
+                "status": "ready",
+                "error_code": null,
+                "applied_migrations": 2,
+                "failed_migrations": 0,
+                "expected_migrations": 2,
+                "pending_migrations": 0,
+                "unexpected_migrations": 0,
+                "latest_applied_version": 2
+            })
+        );
+    }
+
+    #[test]
+    fn dependency_errors_are_reduced_to_safe_codes() {
+        assert_eq!(
+            qdrant_collection_error_code(
+                "Qdrant collection dimension does not match active embedder"
+            ),
+            "QDRANT_COLLECTION_MISMATCH"
+        );
+        assert_eq!(
+            qdrant_collection_error_code("active Qdrant collection is missing"),
+            "QDRANT_COLLECTION_MISSING"
+        );
+        let model = remote_model_check(&json!({
+            "checks": {
+                "model_artifact": {
+                    "status": "not_ready",
+                    "error_code": "MODEL_RUNTIME_ADAPTER_NOT_CONFIGURED"
+                }
+            }
+        }));
+        assert_eq!(model["status"], "not_ready");
+        assert_eq!(model["error_code"], "MODEL_RUNTIME_ADAPTER_NOT_CONFIGURED");
+        assert_eq!(
+            remote_model_check(&json!({"detail": "do not expose this"}))["error_code"],
+            "ML_READINESS_CHECK_MISSING"
+        );
     }
 }
 
@@ -829,7 +1016,7 @@ impl PgRepository {
     }
 
     pub async fn initialize(&self) -> Result<(), String> {
-        sqlx::migrate!("../migrations")
+        MIGRATOR
             .run(&self.pool)
             .await
             .map_err(|error| format!("apply migrations: {error}"))?;
@@ -838,67 +1025,278 @@ impl PgRepository {
         self.ensure_qdrant_collection(&active_index, true).await
     }
 
-    pub async fn readiness(&self) -> Result<Value, String> {
-        sqlx::query("SELECT 1")
-            .execute(&self.pool)
+    pub async fn readiness(&self) -> Value {
+        let mut checks = serde_json::Map::new();
+        let postgres_ready = matches!(
+            tokio::time::timeout(
+                READINESS_DEPENDENCY_TIMEOUT,
+                sqlx::query("SELECT 1").fetch_one(&self.pool),
+            )
+            .await,
+            Ok(Ok(_))
+        );
+        checks.insert(
+            "postgres".to_owned(),
+            readiness_check(
+                if postgres_ready { "ready" } else { "not_ready" },
+                (!postgres_ready).then_some("POSTGRES_UNAVAILABLE"),
+            ),
+        );
+
+        let expected_versions = MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>();
+        if postgres_ready {
+            match tokio::time::timeout(
+                READINESS_DEPENDENCY_TIMEOUT,
+                sqlx::query_as::<_, (i64, bool)>(
+                    "SELECT version, success FROM _sqlx_migrations ORDER BY version",
+                )
+                .fetch_all(&self.pool),
+            )
             .await
-            .map_err(|error| format!("postgres: {error}"))?;
-        let active_index = self.active_vector_index().await?;
-        if active_index.embedder_version != self.embedder_version
-            || active_index.dimension() != self.embedding_dimension
-            || active_index.distance_metric != self.embedding_distance
-        {
-            return Err("active vector index does not match configured embedder".to_owned());
+            {
+                Ok(Ok(rows)) => {
+                    checks.insert(
+                        "database_migrations".to_owned(),
+                        migration_readiness(&rows, &expected_versions),
+                    );
+                }
+                _ => {
+                    checks.insert(
+                        "database_migrations".to_owned(),
+                        readiness_check("not_ready", Some("DATABASE_MIGRATION_STATUS_UNAVAILABLE")),
+                    );
+                }
+            }
+        } else {
+            checks.insert(
+                "database_migrations".to_owned(),
+                readiness_check("not_evaluated", Some("POSTGRES_UNAVAILABLE")),
+            );
         }
-        let qdrant = self
-            .client
-            .get(format!("{}/readyz", self.qdrant_url))
-            .send()
+
+        let active_index = if postgres_ready {
+            match tokio::time::timeout(
+                READINESS_DEPENDENCY_TIMEOUT,
+                self.active_vector_index_optional(),
+            )
             .await
-            .map_err(|error| format!("qdrant: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("qdrant: {error}"))?;
-        self.ensure_qdrant_collection(&active_index, false).await?;
-        let ml = self
-            .client
-            .get(format!("{}/readyz", self.ml_service_url))
-            .send()
-            .await
-            .map_err(|error| format!("ml service: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("ml service: {error}"))?;
-        let embedder = self
-            .client
-            .get(format!(
-                "{}/internal/v1/models/embedder",
-                self.ml_service_url
-            ))
-            .send()
-            .await
-            .map_err(|error| format!("ML embedder metadata: {error}"))?
-            .error_for_status()
-            .map_err(|error| format!("ML embedder metadata: {error}"))?
-            .json::<MlEmbedderMetadata>()
-            .await
-            .map_err(|error| format!("ML embedder metadata JSON: {error}"))?;
-        if embedder.model_version != active_index.embedder_version
-            || embedder.dimension != Some(active_index.dimension())
-            || embedder.distance_metric.as_deref()
-                != Some(ml_distance_name(&active_index.distance_metric)?)
+            {
+                Ok(Ok(Some(index))) => {
+                    let matches_configuration = index.embedder_version == self.embedder_version
+                        && index.dimension() == self.embedding_dimension
+                        && index.distance_metric == self.embedding_distance;
+                    checks.insert(
+                        "vector_index".to_owned(),
+                        readiness_check(
+                            if matches_configuration {
+                                "ready"
+                            } else {
+                                "not_ready"
+                            },
+                            (!matches_configuration)
+                                .then_some("VECTOR_INDEX_CONFIGURATION_MISMATCH"),
+                        ),
+                    );
+                    Some(index)
+                }
+                Ok(Ok(None)) => {
+                    checks.insert(
+                        "vector_index".to_owned(),
+                        readiness_check("not_ready", Some("VECTOR_INDEX_NOT_CONFIGURED")),
+                    );
+                    None
+                }
+                _ => {
+                    checks.insert(
+                        "vector_index".to_owned(),
+                        readiness_check("not_ready", Some("VECTOR_INDEX_UNAVAILABLE")),
+                    );
+                    None
+                }
+            }
+        } else {
+            checks.insert(
+                "vector_index".to_owned(),
+                readiness_check("not_evaluated", Some("POSTGRES_UNAVAILABLE")),
+            );
+            None
+        };
+
+        let qdrant_ready = match tokio::time::timeout(
+            READINESS_DEPENDENCY_TIMEOUT,
+            self.client
+                .get(format!("{}/readyz", self.qdrant_url))
+                .send(),
+        )
+        .await
         {
-            return Err("ML embedder metadata does not match active vector index".to_owned());
+            Ok(Ok(response)) if response.status().is_success() => {
+                checks.insert("qdrant".to_owned(), readiness_check("ready", None));
+                true
+            }
+            _ => {
+                checks.insert(
+                    "qdrant".to_owned(),
+                    readiness_check("not_ready", Some("QDRANT_UNAVAILABLE")),
+                );
+                false
+            }
+        };
+        match (active_index.as_ref(), qdrant_ready) {
+            (Some(index), true) => match tokio::time::timeout(
+                READINESS_DEPENDENCY_TIMEOUT,
+                self.ensure_qdrant_collection(index, false),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    checks.insert(
+                        "qdrant_collection".to_owned(),
+                        readiness_check("ready", None),
+                    );
+                }
+                Ok(Err(error)) => {
+                    let code = qdrant_collection_error_code(&error);
+                    checks.insert(
+                        "qdrant_collection".to_owned(),
+                        readiness_check("not_ready", Some(code)),
+                    );
+                }
+                Err(_) => {
+                    checks.insert(
+                        "qdrant_collection".to_owned(),
+                        readiness_check("not_ready", Some("QDRANT_COLLECTION_UNAVAILABLE")),
+                    );
+                }
+            },
+            (None, _) => {
+                checks.insert(
+                    "qdrant_collection".to_owned(),
+                    readiness_check("not_evaluated", Some("VECTOR_INDEX_UNAVAILABLE")),
+                );
+            }
+            (_, false) => {
+                checks.insert(
+                    "qdrant_collection".to_owned(),
+                    readiness_check("not_evaluated", Some("QDRANT_UNAVAILABLE")),
+                );
+            }
         }
-        Ok(json!({
-            "postgres": true,
-            "qdrant": qdrant.status().is_success(),
-            "ml_service": ml.status().is_success(),
-            "collection": active_index.collection_name,
-            "embedding_dimension": active_index.dimension(),
-            "embedding_distance": active_index.distance_metric,
-            "embedder_version": active_index.embedder_version,
-            "index_generation": active_index.generation,
-            "forecast_model_version": self.forecast_model_version,
-        }))
+
+        let ml_response = tokio::time::timeout(
+            READINESS_DEPENDENCY_TIMEOUT,
+            self.client
+                .get(format!("{}/readyz", self.ml_service_url))
+                .send(),
+        )
+        .await;
+        let mut ml_body = None;
+        let ml_ready = match ml_response {
+            Ok(Ok(response)) => {
+                let status_is_success = response.status().is_success();
+                match tokio::time::timeout(READINESS_DEPENDENCY_TIMEOUT, response.json::<Value>())
+                    .await
+                {
+                    Ok(Ok(body)) => {
+                        let status_is_ready =
+                            body.get("status").and_then(Value::as_str) == Some("ready");
+                        let ready = status_is_success && status_is_ready;
+                        checks.insert(
+                            "ml_service".to_owned(),
+                            readiness_check(
+                                if ready { "ready" } else { "not_ready" },
+                                (!ready).then_some("ML_SERVICE_NOT_READY"),
+                            ),
+                        );
+                        ml_body = Some(body);
+                        ready
+                    }
+                    _ => {
+                        checks.insert(
+                            "ml_service".to_owned(),
+                            readiness_check("not_ready", Some("ML_READINESS_RESPONSE_INVALID")),
+                        );
+                        false
+                    }
+                }
+            }
+            _ => {
+                checks.insert(
+                    "ml_service".to_owned(),
+                    readiness_check("not_ready", Some("ML_SERVICE_UNAVAILABLE")),
+                );
+                false
+            }
+        };
+        let model_artifact = ml_body
+            .as_ref()
+            .map(remote_model_check)
+            .unwrap_or_else(|| readiness_check("not_evaluated", Some("ML_SERVICE_UNAVAILABLE")));
+        checks.insert("model_artifact".to_owned(), model_artifact);
+
+        if let (Some(index), true) = (active_index.as_ref(), ml_ready) {
+            let metadata_response = tokio::time::timeout(
+                READINESS_DEPENDENCY_TIMEOUT,
+                self.client
+                    .get(format!(
+                        "{}/internal/v1/models/embedder",
+                        self.ml_service_url
+                    ))
+                    .send(),
+            )
+            .await;
+            match metadata_response {
+                Ok(Ok(response)) if response.status().is_success() => {
+                    match tokio::time::timeout(
+                        READINESS_DEPENDENCY_TIMEOUT,
+                        response.json::<MlEmbedderMetadata>(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(embedder)) => {
+                            let expected_distance =
+                                ml_distance_name(&index.distance_metric).unwrap_or_default();
+                            let matches_index = embedder.model_version == index.embedder_version
+                                && embedder.dimension == Some(index.dimension())
+                                && embedder.distance_metric.as_deref() == Some(expected_distance);
+                            checks.insert(
+                                "ml_embedder".to_owned(),
+                                readiness_check(
+                                    if matches_index { "ready" } else { "not_ready" },
+                                    (!matches_index)
+                                        .then_some("ML_EMBEDDER_CONFIGURATION_MISMATCH"),
+                                ),
+                            );
+                        }
+                        _ => {
+                            checks.insert(
+                                "ml_embedder".to_owned(),
+                                readiness_check("not_ready", Some("ML_EMBEDDER_METADATA_INVALID")),
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    checks.insert(
+                        "ml_embedder".to_owned(),
+                        readiness_check("not_ready", Some("ML_EMBEDDER_METADATA_UNAVAILABLE")),
+                    );
+                }
+            }
+        } else {
+            checks.insert(
+                "ml_embedder".to_owned(),
+                readiness_check("not_evaluated", Some("ML_SERVICE_NOT_READY")),
+            );
+        };
+
+        json!({
+            "status": if readiness_checks_are_ready(&checks) { "ready" } else { "not_ready" },
+            "checks": checks,
+        })
     }
 
     async fn initialize_vector_index_state(&self) -> Result<(), String> {
@@ -1067,7 +1465,7 @@ impl PgRepository {
             .client
             .post(format!("{}/internal/v1/classify", self.ml_service_url))
             .header("x-request-id", request_id)
-            .header("x-trace-id", trace_id)
+            .header("x-trace-id", safe_trace_id(trace_id))
             .json(&json!({
                 "text": text,
                 "language": language,
@@ -1138,7 +1536,7 @@ impl PgRepository {
             .client
             .post(format!("{}/internal/v1/embed", self.ml_service_url))
             .header("x-request-id", request_id)
-            .header("x-trace-id", trace_id)
+            .header("x-trace-id", safe_trace_id(trace_id))
             .json(&json!({
                 "text": text,
                 "dimension": index.dimension(),
@@ -1273,7 +1671,7 @@ impl PgRepository {
                 self.qdrant_url, index.collection_name
             ))
             .header("x-request-id", request_id)
-            .header("x-trace-id", trace_id)
+            .header("x-trace-id", safe_trace_id(trace_id))
             .json(&json!({
                 "vector": vector,
                 "limit": 5,

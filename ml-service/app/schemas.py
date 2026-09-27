@@ -18,10 +18,12 @@ class APIModel(BaseModel):
 
 
 class HealthResponse(APIModel):
-    status: Literal["ok", "ready"]
+    status: Literal["ok", "ready", "not_ready"]
     service: str
     version: str
     model_versions: dict[str, str] = Field(default_factory=dict)
+    checks: dict[str, dict[str, str]] = Field(default_factory=dict)
+    detail: str | None = None
 
 
 class Alternative(APIModel):
