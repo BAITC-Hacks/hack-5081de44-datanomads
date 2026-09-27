@@ -1,0 +1,47 @@
+{
+  "calendar_days": 1035,
+  "days_without_records": 2,
+  "first_date": "2023-01-01",
+  "invalid_csv_or_date_row_count": 0,
+  "last_date": "2025-10-31",
+  "method": "weekly_seasonal_naive",
+  "minimum_train_days": 365,
+  "origin_step_days": 30,
+  "record_count": 83385,
+  "results": [
+    {
+      "horizon_days": 30,
+      "mae": 42.9955,
+      "rmse": 87.2172,
+      "sample_count": 660,
+      "smape": 0.4307,
+      "status": "EVALUATED",
+      "wape": 0.4855,
+      "window_count": 22
+    },
+    {
+      "horizon_days": 60,
+      "mae": 42.5897,
+      "rmse": 85.9415,
+      "sample_count": 1260,
+      "smape": 0.4353,
+      "status": "EVALUATED",
+      "wape": 0.486,
+      "window_count": 21
+    },
+    {
+      "horizon_days": 90,
+      "mae": 41.6017,
+      "rmse": 81.5964,
+      "sample_count": 1800,
+      "smape": 0.4371,
+      "status": "EVALUATED",
+      "wape": 0.4867,
+      "window_count": 20
+    }
+  ],
+  "scope": "total_daily_appeals_in_one_export",
+  "season_length_days": 7,
+  "source_sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+  "status": "EVALUATED"
+}

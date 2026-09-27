@@ -1,0 +1,42 @@
+{
+  "by_year": {
+    "2023": 24169,
+    "2024": 33265,
+    "2025": 25951
+  },
+  "category_count": 29,
+  "duplicate_external_id_count": 0,
+  "format": "raw_109_csv",
+  "has_original_text_column": false,
+  "invalid_date_count": 0,
+  "largest_category_count": 55377,
+  "malformed_row_count": 0,
+  "missing_external_id_count": 0,
+  "nonempty_by_column": {
+    "applicant_number": 0,
+    "application_number": 83385,
+    "application_type": 83382,
+    "category": 83384,
+    "closing_date": 83362,
+    "com_exp": 1690,
+    "contractor": 77874,
+    "creation_date": 83385,
+    "district": 721,
+    "full_name": 6499,
+    "operator": 3,
+    "region": 83385,
+    "result": 83312,
+    "service": 83384,
+    "status": 83385,
+    "street": 22347,
+    "submittal_channel": 83385
+  },
+  "record_count": 83385,
+  "region_values_over_120_chars": 1,
+  "sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+  "time_range": {
+    "max": "2025-10-31T21:33:03",
+    "min": "2023-01-01T00:07:45"
+  },
+  "unknown_column_count": 0
+}

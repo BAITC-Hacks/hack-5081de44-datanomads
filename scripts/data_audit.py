@@ -246,7 +246,8 @@ def main() -> int:
     serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(serialized, encoding="utf-8")
+        with args.output.open("x", encoding="utf-8") as stream:
+            stream.write(serialized)
     else:
         print(serialized, end="")
     return 0

@@ -53,7 +53,7 @@ def daily_counts(path: Path) -> tuple[list[int], date, date, int, int, str]:
     return series, first_day, last_day, sum(counts.values()), invalid_rows, digest.hexdigest()
 
 
-def evaluate_horizon(series: list[int], horizon: int) -> dict[str, int | float]:
+def evaluate_horizon(series: list[int], horizon: int) -> dict[str, int | float | str | None]:
     absolute_error = squared_error = actual_total = smape_total = 0.0
     sample_count = window_count = smape_count = 0
     for origin in range(MIN_TRAIN_DAYS, len(series) - horizon + 1, ORIGIN_STEP_DAYS):
@@ -73,19 +73,34 @@ def evaluate_horizon(series: list[int], horizon: int) -> dict[str, int | float]:
         raise ValueError(f"at least {MIN_TRAIN_DAYS + horizon} calendar days required for horizon {horizon}")
     return {
         "horizon_days": horizon,
+        "status": "EVALUATED",
         "window_count": window_count,
         "sample_count": sample_count,
         "mae": round(absolute_error / sample_count, 4),
         "rmse": round(math.sqrt(squared_error / sample_count), 4),
-        "wape": round(absolute_error / actual_total, 4) if actual_total else 0.0,
+        "wape": round(absolute_error / actual_total, 4) if actual_total else None,
         "smape": round(smape_total / smape_count, 4) if smape_count else 0.0,
     }
 
 
 def build_report(path: Path) -> dict[str, object]:
     series, first_day, last_day, record_count, invalid_rows, digest = daily_counts(path)
+    results = [
+        evaluate_horizon(series, horizon) if len(series) >= MIN_TRAIN_DAYS + horizon else {
+            "horizon_days": horizon,
+            "status": "INSUFFICIENT_HISTORY",
+            "window_count": 0,
+            "sample_count": 0,
+            "required_calendar_days": MIN_TRAIN_DAYS + horizon,
+            "available_calendar_days": len(series),
+        }
+        for horizon in HORIZONS
+    ]
+    evaluated_count = sum(result["status"] == "EVALUATED" for result in results)
+    status = "EVALUATED" if evaluated_count == len(HORIZONS) else "PARTIAL" if evaluated_count else "INSUFFICIENT_HISTORY"
     return {
         "source_sha256": digest,
+        "status": status,
         "method": "weekly_seasonal_naive",
         "scope": "total_daily_appeals_in_one_export",
         "first_date": first_day.isoformat(),
@@ -97,7 +112,7 @@ def build_report(path: Path) -> dict[str, object]:
         "minimum_train_days": MIN_TRAIN_DAYS,
         "origin_step_days": ORIGIN_STEP_DAYS,
         "season_length_days": SEASON_LENGTH,
-        "results": [evaluate_horizon(series, horizon) for horizon in HORIZONS],
+        "results": results,
     }
 
 
@@ -110,7 +125,8 @@ def main() -> int:
     serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(serialized, encoding="utf-8")
+        with args.output.open("x", encoding="utf-8") as stream:
+            stream.write(serialized)
     else:
         print(serialized, end="")
     return 0

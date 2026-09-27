@@ -1,0 +1,34 @@
+{
+  "by_year": {
+    "2025": 19912
+  },
+  "category_count": 179,
+  "duplicate_external_id_count": 0,
+  "format": "raw_109_csv",
+  "has_original_text_column": false,
+  "invalid_date_count": 0,
+  "largest_category_count": 6912,
+  "malformed_row_count": 0,
+  "missing_external_id_count": 0,
+  "nonempty_by_column": {
+    "application_number": 19912,
+    "category": 19599,
+    "closing_date": 18152,
+    "com_exp": 6343,
+    "contractor": 8796,
+    "creation_date": 19912,
+    "result": 17881,
+    "service": 19841,
+    "status": 19686,
+    "status_1": 19857,
+    "submittal_channel": 19890
+  },
+  "record_count": 19912,
+  "region_values_over_120_chars": 0,
+  "sha256": "9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f",
+  "time_range": {
+    "max": "2025-11-11T15:30:16",
+    "min": "2025-01-01T00:28:18"
+  },
+  "unknown_column_count": 0
+}

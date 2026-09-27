@@ -9,8 +9,8 @@
 | Источник доказательства | Routing label | Priority label | Что известно |
 | --- | --- | --- | --- |
 | Synthetic exports семи source profiles | `UNSUITABLE` | `UNSUITABLE` | Данные вымышлены; поля проверяют import contract, а не решения операторов. |
-| CSV 109 ВКО, описанный в [аудите](vko-109-data-audit.md) | `UNVERIFIED` | `UNVERIFIED` | `service` и `contractor` не подтверждены как фактический конечный исполнитель или первоначальное назначение. История переназначений и policy для priority не проверены. |
-| CSV Алматинской области, описанный в [разборе taxonomy](almaty-2025-taxonomy-review.md) | `UNSUITABLE` для `service`; `UNVERIFIED` для `contractor` | `UNVERIFIED` | `service` обозначает тип вопроса, а не исполнителя. Семантика `contractor` и priority не подтверждена. |
+| CSV 109 ВКО, описанный в [аудите](vko-109-data-audit.md) | `UNVERIFIED` | `UNSUITABLE` | `service` и `contractor` не подтверждены как фактический конечный исполнитель или первоначальное назначение. История переназначений не проверена; явной колонки priority нет. |
+| CSV Алматинской области, описанный в [разборе taxonomy](almaty-2025-taxonomy-review.md) | `UNSUITABLE` для `service`; `UNVERIFIED` для `contractor` | `UNSUITABLE` | `service` обозначает тип вопроса, а не исполнителя. Семантика `contractor` не подтверждена; явной колонки priority нет. |
 
 Перед сменой статуса на `VERIFIED` владелец источника должен подтвердить
 для routing, является ли поле первоначальным назначением или фактическим

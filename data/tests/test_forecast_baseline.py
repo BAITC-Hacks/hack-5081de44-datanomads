@@ -36,6 +36,20 @@ class ForecastBaselineTests(unittest.TestCase):
         self.assertNotIn("Иван Иванов", json.dumps(report, ensure_ascii=False))
         self.assertNotIn(str(path), json.dumps(report, ensure_ascii=False))
 
+    def test_short_history_reports_insufficient_without_fake_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "short.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["creation_date"])
+                for offset in range(300):
+                    day = date(2025, 1, 1) + timedelta(days=offset)
+                    writer.writerow([f"{day:%d.%m.%Y} 12:00:00"])
+            report = build_report(path)
+        self.assertEqual(report["status"], "INSUFFICIENT_HISTORY")
+        self.assertTrue(all(result["status"] == "INSUFFICIENT_HISTORY" for result in report["results"]))
+        self.assertTrue(all("mae" not in result for result in report["results"]))
+
 
 if __name__ == "__main__":
     unittest.main()
