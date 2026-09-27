@@ -749,21 +749,208 @@ function CleanTimeSeriesPage({ timeSeries, onDrilldown }: { timeSeries: Dashboar
   return <div className="analytics-page"><section className="panel"><PanelHeading title="Временная динамика" /><DataChart option={option} label="Обращения и закрытые обращения по дням" /><div className="region-table region-table-full"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля закрытия</span></div>{timeSeries.map((point) => <button className="region-table-row region-table-row-full drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div></section></div>
 }
 
+function formatAlertNumber(value: number | undefined): string {
+  return value == null ? '—' : new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(value)
+}
+
+function formatAlertTime(value: string | undefined): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+}
+
+function alertPeriodLabel(alert: Alert): string {
+  if (alert.periodStart && alert.periodEnd) {
+    return `${formatAlertTime(alert.periodStart)} — ${formatAlertTime(alert.periodEnd)}`
+  }
+  return formatAlertTime(alert.createdAt ?? alert.detectedAt)
+}
+
+function alertChartOption(alert: Alert): EChartsOption | undefined {
+  const historicalCounts = [...(alert.historyCounts ?? [])].reverse()
+  if (!historicalCounts.length) return undefined
+
+  const periodDays = alert.periodDays ?? 7
+  const labels = [
+    ...historicalCounts.map((_, index) => `Неделя −${historicalCounts.length - index}`),
+    `Последние ${periodDays} дн.`,
+  ]
+  const counts = [...historicalCounts, alert.currentCount ?? alert.affectedTickets]
+  const series: NonNullable<EChartsOption['series']> = [
+    {
+      name: 'Обращения',
+      type: 'line',
+      data: counts,
+      showSymbol: true,
+      lineStyle: { width: 2 },
+      itemStyle: { color: '#8cf0c8' },
+    },
+  ]
+  if (alert.baseline != null) {
+    series.push({
+      name: 'Обычный уровень',
+      type: 'line',
+      data: counts.map(() => alert.baseline),
+      showSymbol: false,
+      lineStyle: { width: 1, type: 'dashed' },
+      itemStyle: { color: '#a7d9ff' },
+    })
+  }
+  return {
+    animation: false,
+    tooltip: { trigger: 'axis' },
+    legend: { data: series.map((item) => item.name).filter((name): name is string => Boolean(name)), top: 0, textStyle: { color: '#a9bbb2' } },
+    grid: { left: 42, right: 16, top: 42, bottom: 34 },
+    xAxis: { type: 'category', data: labels, axisLabel: { color: '#899c95' }, axisLine: { lineStyle: { color: '#40514b' } } },
+    yAxis: { type: 'value', min: 0, axisLabel: { color: '#899c95' }, splitLine: { lineStyle: { color: 'rgba(214,236,225,.1)' } } },
+    series,
+  }
+}
+
+function alertTriggerDescriptions(alert: Alert): string[] {
+  const reasons = alert.triggerReasons ?? []
+  if (!reasons.length) return ['Причина срабатывания не сохранена в evidence этого alert.']
+  return reasons.map((reason) => {
+    if (reason === 'ROBUST_Z_THRESHOLD') {
+      return `Robust z ${formatAlertNumber(alert.robustZ)} превысил порог ${formatAlertNumber(alert.robustZThreshold)}.`
+    }
+    if (reason === 'RATIO_THRESHOLD') {
+      return `Количество выше baseline в ${formatAlertNumber(alert.ratio)}× (порог ${formatAlertNumber(alert.ratioThreshold)}×).`
+    }
+    return reason
+  })
+}
+
 function CleanAlertsPage({ alerts, onToast, onDrilldown }: { alerts: Alert[]; onToast: (message: string) => void; onDrilldown: DrilldownHandler }) {
   const [items, setItems] = useState(alerts)
+  const [showHistory, setShowHistory] = useState(false)
+  const [selectedAlertId, setSelectedAlertId] = useState(alerts[0]?.id)
   useEffect(() => setItems(alerts), [alerts])
-  if (!items.length) return <div className="analytics-page"><NoData message="Нет подключённых оповещений." /></div>
+
+  const prioritized = [...items].sort((left, right) => {
+    const severityOrder = { critical: 0, watch: 1, info: 2 }
+    const severityDifference = severityOrder[left.severity] - severityOrder[right.severity]
+    if (severityDifference !== 0) return severityDifference
+    return Date.parse(right.createdAt ?? right.detectedAt) - Date.parse(left.createdAt ?? left.detectedAt)
+  })
+  const attentionItems = prioritized.filter((alert) => alert.status !== 'Закрыт')
+  const historyItems = prioritized.filter((alert) => alert.status === 'Закрыт')
+  const visibleItems = showHistory ? historyItems : attentionItems
+  const selectedAlert = visibleItems.find((alert) => alert.id === selectedAlertId) ?? visibleItems[0]
+
   const update = async (alert: Alert, action: 'ack' | 'close') => {
     try {
       const updated = action === 'ack' ? await acknowledgeAlert(alert.id) : await closeAlert(alert.id)
-      const status = updated.status.toLowerCase() === 'acknowledged' ? 'В работе' : updated.status.toLowerCase() === 'closed' ? 'Закрыт' : alert.status
+      const status = updated.status.toUpperCase() === 'ACKNOWLEDGED' ? 'В работе' : updated.status.toUpperCase() === 'CLOSED' ? 'Закрыт' : alert.status
       setItems((current) => current.map((item) => item.id === alert.id ? { ...item, status } : item))
       onToast(`Оповещение ${alert.id}: состояние подтверждено backend`)
     } catch (error) {
       onToast(`Не удалось обновить оповещение: ${error instanceof Error ? error.message : 'ошибка API'}`)
     }
   }
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Оповещения" /><div className="alerts-table">{items.map((alert) => <div className="alert-row" key={alert.id}><button className="alert-drilldown" onClick={() => onDrilldown('alert', alert.id, `Оповещение: ${alert.title}`)}><span className={"alert-dot alert-" + alert.severity} /><span className="alert-row-main"><strong>{alert.title}</strong><span>{alert.description}</span><small>{alert.detectedAt} · {alert.region}</small></span><span className="alert-count">{alert.affectedTickets}</span></button><span className="alert-actions">{alert.status === 'Новый' && <button className="text-button" onClick={() => update(alert, 'ack')}>Принять</button>}{alert.status !== 'Закрыт' && <button className="text-button" onClick={() => update(alert, 'close')}>Закрыть</button>}</span></div>)}</div></section></div>
+
+  const chart = selectedAlert ? alertChartOption(selectedAlert) : undefined
+  const sourceTicketIds = selectedAlert?.linkedTicketIds ?? []
+  const currentCount = selectedAlert?.currentCount ?? selectedAlert?.affectedTickets ?? 0
+  const periodDays = selectedAlert?.periodDays ?? 7
+
+  return (
+    <div className="analytics-page">
+      <div className="alerts-layout">
+        <section className="panel alert-list-panel">
+          <PanelHeading title="Требует внимания" />
+          <div className="alert-filter-row" role="group" aria-label="Фильтр истории оповещений">
+            <button className={`filter-chip ${!showHistory ? 'active' : ''}`} aria-pressed={!showHistory} onClick={() => setShowHistory(false)}>
+              Требуют внимания <span>{attentionItems.length}</span>
+            </button>
+            <button className={`filter-chip ${showHistory ? 'active' : ''}`} aria-pressed={showHistory} onClick={() => setShowHistory(true)}>
+              История <span>{historyItems.length}</span>
+            </button>
+          </div>
+          {visibleItems.length ? (
+            <div className="alerts-table">
+              {visibleItems.map((alert) => (
+                <div className={`alert-row ${selectedAlert?.id === alert.id ? 'alert-row-active' : ''}`} key={alert.id}>
+                  <button className="alert-drilldown" aria-pressed={selectedAlert?.id === alert.id} onClick={() => setSelectedAlertId(alert.id)}>
+                    <span className={`alert-dot alert-${alert.severity}`} />
+                    <span className="alert-row-main">
+                      <strong>{alert.title}</strong>
+                      <span>{alert.region} · {alert.topic}</span>
+                      <small>{alertPeriodLabel(alert)} · {alert.status}</small>
+                    </span>
+                    <span className="alert-count">{(alert.currentCount ?? alert.affectedTickets).toLocaleString('ru-RU')}<small>обращений</small></span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <NoData message={showHistory ? 'Закрытых оповещений пока нет.' : 'Нет сигналов, требующих внимания.'} />
+          )}
+        </section>
+
+        {selectedAlert ? (
+          <section className="panel alert-detail-panel signal-card" aria-label="Карточка сигнала">
+            <div className="signal-card-topline">
+              <span className={`alert-severity-badge alert-severity-${selectedAlert.severity}`}>
+                {selectedAlert.severity === 'critical' ? 'Высокий приоритет' : selectedAlert.severity === 'watch' ? 'Повышенный приоритет' : 'Обычный приоритет'}
+              </span>
+              <span className="signal-status">{selectedAlert.status}</span>
+            </div>
+            <h2>{selectedAlert.title}</h2>
+            <p>{selectedAlert.description}</p>
+            <div className="signal-location">
+              <span><small>Регион</small><strong>{selectedAlert.region}</strong></span>
+              <span><small>Тема</small><strong>{selectedAlert.topic}</strong></span>
+              <span><small>Период</small><strong>{alertPeriodLabel(selectedAlert)}</strong></span>
+            </div>
+
+            <div className="alert-facts">
+              <div><span>Текущий уровень · {periodDays} дн.</span><strong>{currentCount.toLocaleString('ru-RU')}</strong></div>
+              <div><span>Обычный уровень · {periodDays} дн.</span><strong>{formatAlertNumber(selectedAlert.baseline)}</strong></div>
+              <div><span>Отклонение от baseline</span><strong>{formatAlertNumber(selectedAlert.deviation)}</strong></div>
+              <div><span>Версия detector</span><strong>{selectedAlert.detectorVersion ?? 'не сохранена'}</strong></div>
+            </div>
+
+            {chart ? (
+              <div className="alert-detail-chart">
+                <div className="field-label">Динамика обращений и обычный уровень</div>
+                <DataChart option={chart} label={`Динамика обращений по теме ${selectedAlert.topic} в регионе ${selectedAlert.region}`} />
+              </div>
+            ) : (
+              <p className="signal-missing-evidence">Истории недостаточно для графика; сохранённое detector evidence не содержит периодных значений.</p>
+            )}
+
+            <div className="signal-reasons">
+              <div className="field-label">Почему сработал detector</div>
+              <ul>{alertTriggerDescriptions(selectedAlert).map((reason) => <li key={reason}>{reason}</li>)}</ul>
+              {selectedAlert.robustZ != null && <small>Robust z: {formatAlertNumber(selectedAlert.robustZ)} · отношение к baseline: {formatAlertNumber(selectedAlert.ratio)}×</small>}
+            </div>
+
+            <div className="signal-sources">
+              <div className="field-label">Исходные обращения · {sourceTicketIds.length}</div>
+              {sourceTicketIds.length ? (
+                <ul>{sourceTicketIds.slice(0, 5).map((ticketId) => <li key={ticketId}>№ {ticketId}</li>)}</ul>
+              ) : (
+                <p>Для этого alert не сохранены связанные обращения.</p>
+              )}
+              {sourceTicketIds.length > 5 && <small>И ещё {sourceTicketIds.length - 5}</small>}
+            </div>
+
+            <div className="signal-actions">
+              <button className="signal-open-tickets" disabled={!sourceTicketIds.length} onClick={() => onDrilldown('alert', selectedAlert.id, `Обращения по сигналу: ${selectedAlert.title}`)}>
+                Открыть обращения
+              </button>
+              {!showHistory && selectedAlert.status === 'Новый' && <button className="text-button" onClick={() => update(selectedAlert, 'ack')}>Принять</button>}
+              {!showHistory && selectedAlert.status !== 'Закрыт' && <button className="text-button" onClick={() => update(selectedAlert, 'close')}>Закрыть</button>}
+            </div>
+          </section>
+        ) : (
+          <section className="panel alert-detail-panel"><NoData message="Выберите сигнал или запись истории." /></section>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function CleanForecastPage({ forecast, status, modelVersion }: { forecast: ForecastPoint[]; status?: string; modelVersion?: string }) {

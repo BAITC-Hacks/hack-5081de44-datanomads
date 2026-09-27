@@ -175,8 +175,35 @@ interface BackendAnalytics {
 }
 
 interface BackendForecast { source?: string; status?: string; insufficient_history?: boolean; history?: Array<{ date: string; tickets: number; resolved: number }>; points: Array<{ date: string; tickets: number; resolved: number }>; model_version: string; model?: string; expected_peaks?: string[]; backtest?: Record<string, unknown> }
-interface BackendAlert { id: string; severity: string; status: string; title: string; description: string; region_id: string; topic_id: string; ticket_count: number; detected_at: string }
-interface BackendAlerts { source?: string; items: BackendAlert[] }
+interface BackendAlertDetail {
+  historical_counts?: number[]
+  trigger_reasons?: string[]
+  configuration?: { period_days?: number; robust_z_threshold?: number; ratio_threshold?: number }
+}
+interface BackendAlert {
+  id: string
+  incident_key: string
+  severity: string
+  status: string
+  title: string
+  description: string
+  region_id: string
+  topic_id: string
+  ticket_count: number
+  period_start?: string | null
+  period_end?: string | null
+  current_count?: number
+  baseline?: number | null
+  deviation?: number | null
+  robust_z?: number | null
+  ratio?: number | null
+  detector_version?: string | null
+  linked_ticket_ids?: string[]
+  created_at?: string
+  detected_at: string
+  detail?: BackendAlertDetail
+}
+interface BackendAlerts { source?: string; items: BackendAlert[]; total?: number }
 interface BackendLearningCycle { id: string; cycle_id: string; state: string; dataset_version: string; candidate_model_version: string; collect_started_at: string; collect_ends_at: string; evaluation_started_at: string | null; evaluation_ends_at: string | null; shadow_prediction_count: number; shadow_inference_failures: number; shadow_operator_decision_count: number; blind_ab_enabled: boolean; production_model_version: string | null; frozen_evaluation_dataset_version: string | null; candidate_dataset_checksum: string | null; min_feedback_count: number; promotion_policy_version: string; manual_close_enabled: boolean; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
 interface BackendLearning { source?: string; items?: BackendLearningCycle[]; active_cycle?: BackendLearningCycle; production_model?: { id: string; status: string }; controlled_loop?: Record<string, unknown> }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
@@ -413,7 +440,40 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   const tickets = ticketResponse.items.map((ticket, index) => mapBackendTicket(ticket, detailResults[index], ticketResponse.items, previewResults[index]))
   const regions: RegionMetric[] = analytics.by_region.map((region) => ({ id: region.id, name: region.label, tickets: region.tickets, previousTickets: region.change_abs == null ? undefined : Math.max(0, region.tickets - region.change_abs), changeAbs: region.change_abs, change: region.change_pct }))
   const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0 || (topic.change_abs != null && topic.change_abs < 0)).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), tickets: topic.tickets, previousTickets: topic.change_abs == null ? undefined : Math.max(0, topic.tickets - topic.change_abs), changeAbs: topic.change_abs, change: topic.change_pct, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
-  const alerts: Alert[] = alertsResponse.items.map((alert) => ({ id: alert.id, title: alert.title, description: alert.description, severity: alert.severity.toLowerCase() === 'critical' ? 'critical' : alert.severity.toLowerCase() === 'high' ? 'watch' : 'info', region: alert.region_id, topic: alert.topic_id, detectedAt: alert.detected_at, affectedTickets: alert.ticket_count, status: alert.status.toLowerCase() === 'acknowledged' ? 'В работе' : alert.status.toLowerCase() === 'closed' ? 'Закрыт' : 'Новый' }))
+  const alerts: Alert[] = alertsResponse.items.map((alert) => {
+    const region = taxonomy.regions.find((item) => item.id === alert.region_id)?.label ?? alert.region_id
+    const topic = taxonomy.topics.find((item) => item.id === alert.topic_id)?.label ?? alert.topic_id
+    const status = alert.status.toUpperCase()
+    const configuration = alert.detail?.configuration
+    const currentCount = alert.current_count ?? alert.ticket_count
+    return {
+      id: alert.id,
+      incidentKey: alert.incident_key,
+      title: alert.title,
+      description: alert.description,
+      severity: alert.severity.toLowerCase() === 'critical' ? 'critical' : alert.severity.toLowerCase() === 'high' ? 'watch' : 'info',
+      region,
+      topic,
+      detectedAt: alert.detected_at,
+      createdAt: alert.created_at ?? alert.detected_at,
+      periodStart: alert.period_start ?? undefined,
+      periodEnd: alert.period_end ?? undefined,
+      affectedTickets: currentCount,
+      currentCount,
+      baseline: alert.baseline ?? undefined,
+      deviation: alert.deviation ?? undefined,
+      robustZ: alert.robust_z ?? undefined,
+      ratio: alert.ratio ?? undefined,
+      detectorVersion: alert.detector_version ?? undefined,
+      linkedTicketIds: alert.linked_ticket_ids ?? [],
+      historyCounts: alert.detail?.historical_counts,
+      triggerReasons: alert.detail?.trigger_reasons,
+      robustZThreshold: configuration?.robust_z_threshold,
+      ratioThreshold: configuration?.ratio_threshold,
+      periodDays: configuration?.period_days,
+      status: status === 'ACKNOWLEDGED' ? 'В работе' : status === 'CLOSED' ? 'Закрыт' : 'Новый',
+    }
+  })
   const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date, forecast: point.tickets }))
   const cycle = learning.active_cycle ?? learning.items?.[0]
   const learningData: LearningCycle = cycle ? { id: cycle.id, stage: mapLearningStage(cycle.state), dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, collectStartedAt: cycle.collect_started_at, collectEndsAt: cycle.collect_ends_at, evaluationStartedAt: cycle.evaluation_started_at ?? undefined, evaluationEndsAt: cycle.evaluation_ends_at ?? undefined, shadowPredictionCount: cycle.shadow_prediction_count, shadowInferenceFailures: cycle.shadow_inference_failures, shadowOperatorDecisionCount: cycle.shadow_operator_decision_count, blindAbEnabled: cycle.blind_ab_enabled, productionModelVersion: cycle.production_model_version ?? undefined, frozenEvaluationDatasetVersion: cycle.frozen_evaluation_dataset_version ?? undefined, candidateDatasetChecksum: cycle.candidate_dataset_checksum ?? undefined, minFeedbackCount: cycle.min_feedback_count, promotionPolicyVersion: cycle.promotion_policy_version, manualCloseEnabled: cycle.manual_close_enabled, updatedAt: cycle.updated_at, decisionNote: cycle.decision_note } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', collectStartedAt: '', collectEndsAt: '', shadowPredictionCount: 0, shadowInferenceFailures: 0, shadowOperatorDecisionCount: 0, blindAbEnabled: false, minFeedbackCount: 0, promotionPolicyVersion: 'policy-v1', manualCloseEnabled: false, updatedAt: 'нет данных' }

@@ -124,13 +124,29 @@ export interface TopicMetric {
 
 export interface Alert {
   id: string
+  incidentKey?: string
   title: string
   description: string
   severity: 'critical' | 'watch' | 'info'
   region: string
   topic: string
   detectedAt: string
+  createdAt?: string
+  periodStart?: string
+  periodEnd?: string
   affectedTickets: number
+  currentCount?: number
+  baseline?: number
+  deviation?: number
+  robustZ?: number
+  ratio?: number
+  detectorVersion?: string
+  linkedTicketIds?: string[]
+  historyCounts?: number[]
+  triggerReasons?: string[]
+  robustZThreshold?: number
+  ratioThreshold?: number
+  periodDays?: number
   status: 'Новый' | 'В работе' | 'Закрыт'
 }
 
