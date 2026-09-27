@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sys
 
 
 HORIZONS = (30, 60, 90)
@@ -23,25 +24,28 @@ MISSING_DAY_POLICY = "fixed_calendar_origins_require_365_consecutive_observed_tr
 def daily_counts(path: Path) -> tuple[list[int | None], date, date, int, int, str]:
     counts: Counter[date] = Counter()
     invalid_rows = 0
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.reader(handle)
-        try:
-            header = next(reader)
-        except StopIteration as error:
-            raise ValueError("CSV is empty") from error
-        if "creation_date" not in header:
-            raise ValueError("CSV is missing creation_date")
-        date_index = header.index("creation_date")
-        for row in reader:
-            if len(row) != len(header):
-                invalid_rows += 1
-                continue
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle, strict=True)
             try:
-                day = datetime.strptime(row[date_index].strip(), "%d.%m.%Y %H:%M:%S").date()
-            except ValueError:
-                invalid_rows += 1
-                continue
-            counts[day] += 1
+                header = next(reader)
+            except StopIteration as error:
+                raise ValueError("CSV is empty") from error
+            if "creation_date" not in header:
+                raise ValueError("CSV is missing creation_date")
+            date_index = header.index("creation_date")
+            for row in reader:
+                if len(row) != len(header):
+                    invalid_rows += 1
+                    continue
+                try:
+                    day = datetime.strptime(row[date_index].strip(), "%d.%m.%Y %H:%M:%S").date()
+                except ValueError:
+                    invalid_rows += 1
+                    continue
+                counts[day] += 1
+    except csv.Error as error:
+        raise ValueError("CSV is malformed") from error
 
     if not counts:
         raise ValueError("CSV has no valid creation_date values")
@@ -162,14 +166,18 @@ def main() -> int:
     parser.add_argument("input", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    report = build_report(args.input)
-    serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open("x", encoding="utf-8") as stream:
-            stream.write(serialized)
-    else:
-        print(serialized, end="")
+    try:
+        report = build_report(args.input)
+        serialized = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("x", encoding="utf-8") as stream:
+                stream.write(serialized)
+        else:
+            print(serialized, end="")
+    except (OSError, ValueError) as error:
+        print(json.dumps({"error": type(error).__name__, "message": "forecast baseline evaluation failed"}), file=sys.stderr)
+        return 2
     return 0
 
 

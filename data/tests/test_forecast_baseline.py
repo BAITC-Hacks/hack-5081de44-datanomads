@@ -4,6 +4,8 @@ import csv
 from datetime import date, timedelta
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -72,6 +74,35 @@ class ForecastBaselineTests(unittest.TestCase):
         target_gap = [10] * 500
         target_gap[400] = None
         self.assertEqual(evaluate_horizon(target_gap, 30)["window_count"], 1)
+
+    def test_malformed_quoted_csv_fails_all_forecast_and_spike_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "malformed.csv"
+            source.write_text(
+                'creation_date,note\n01.01.2025 12:00:00,ok\n02.01.2025 12:00:00,"PRIVATE_SENTINEL\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "CSV is malformed"):
+                daily_counts(source)
+
+            scripts = Path(__file__).resolve().parents[2] / "scripts"
+            for name in (
+                "evaluate_forecast_csv.py",
+                "evaluate_forecast_candidates.py",
+                "evaluate_spike_csv.py",
+                "export_spike_review.py",
+            ):
+                with self.subTest(script=name):
+                    output = Path(directory) / f"{name}.json"
+                    result = subprocess.run(
+                        [sys.executable, str(scripts / name), str(source), "--output", str(output)],
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertFalse(output.exists())
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn("PRIVATE_SENTINEL", result.stderr)
+                    self.assertEqual(json.loads(result.stderr)["error"], "ValueError")
 
 
 if __name__ == "__main__":
