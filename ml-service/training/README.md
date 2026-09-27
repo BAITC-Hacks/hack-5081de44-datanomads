@@ -288,6 +288,41 @@ Recall/MRR/nDCG average queries with at least one relevant candidate;
 precision includes queries without one. The report emits IDs and scores for a
 blind top-3 expert review queue, with `PENDING` status and no ticket text.
 
+## Offline embedder candidate
+
+After a reviewed relation package and a saved E5 baseline report exist, train a
+candidate from a **local** base model directory. The directory checksum must
+match the baseline report. The declared `--base-model-id` is recorded with that
+checksum; it does not establish model identity by itself.
+
+```bash
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/train_embedder_candidate.py build \
+  --dataset data/processed/reviewed-v1 \
+  --base-model /path/to/local/multilingual-e5-base \
+  --base-model-id intfloat/multilingual-e5-base \
+  --baseline-report data/processed/reports/reviewed-v1-retrieval-baselines.json \
+  --model-version embedder-reviewed-v1 \
+  --output ml-service/artifacts/embedder-reviewed-v1
+HF_HUB_OFFLINE=1 .venv/bin/python scripts/train_embedder_candidate.py verify \
+  --artifact ml-service/artifacts/embedder-reviewed-v1
+```
+
+The trainer uses only the reviewed train split. Within each query, it ranks
+`DUPLICATE` above `SIMILAR_BUT_NOT_DUPLICATE`/`REPEAT`, and those above
+`UNRELATED`; the latter two grades provide hard negatives. It uses the E5
+`query: ` and `passage: ` prefixes, attention-mask mean pooling and L2
+normalization, following the
+[official model card](https://huggingface.co/intfloat/multilingual-e5-base).
+Checkpoint selection uses validation nDCG@5, MRR and Recall@1, in that order.
+The frozen test is scored once after selection. The immutable candidate
+directory contains weights, tokenizer, `manifest.json`, `metrics.json`,
+`training_config.json`, checksums and `MODEL_CARD.md`. `verify` checks every
+file and loads the model for a sanity vector. Top-3 review remains `PENDING`,
+and no production pointer or Qdrant collection changes. The current customer
+CSVs have no appeal text or reviewed relation labels, so this pipeline has only
+been exercised on a tiny synthetic test fixture; no customer-quality result or
+fine-tuned production embedder exists yet.
+
 ## Provisional duplicate threshold
 
 After relation review, evaluate an E5-compatible local model on the same

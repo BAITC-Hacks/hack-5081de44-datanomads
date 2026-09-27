@@ -56,6 +56,16 @@ def _dcg(rows: list[dict]) -> float:
                for index, row in enumerate(rows))
 
 
+def model_directory_checksum(model_path: Path) -> str:
+    artifact = hashlib.sha256()
+    files = sorted(item for item in model_path.rglob("*") if item.is_file())
+    if not files:
+        raise ValueError("local model directory is empty")
+    for path in files:
+        artifact.update(f"{path.relative_to(model_path).as_posix()}\0{checksum(path)}\n".encode("utf-8"))
+    return "sha256:" + artifact.hexdigest()
+
+
 def rank_metrics(rows: list[dict], scores: list[float]) -> dict:
     if len(rows) != len(scores):
         raise ValueError("retrieval scores do not match pair count")
@@ -143,10 +153,7 @@ def _e5_scores(rows: list[dict], model_path: Path, batch_size: int) -> tuple[lis
     query_vectors = encode(queries, "query: ")
     candidate_vectors = encode(candidates, "passage: ")
     scores = [float(torch.dot(query_vectors[row["query_id"]], candidate_vectors[row["candidate_id"]])) for row in rows]
-    artifact = hashlib.sha256()
-    for path in sorted(item for item in model_path.rglob("*") if item.is_file()):
-        artifact.update(f"{path.relative_to(model_path).as_posix()}\0{checksum(path)}\n".encode("utf-8"))
-    return scores, "sha256:" + artifact.hexdigest()
+    return scores, model_directory_checksum(model_path)
 
 
 def evaluate_retrieval_baselines(package: Path, e5_model: Path | None = None, batch_size: int = 16) -> dict:

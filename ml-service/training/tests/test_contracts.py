@@ -75,6 +75,11 @@ class ManifestTests(unittest.TestCase):
         embedder = EmbedderManifest(
             **common, embedding_dimension=768, pooling="mean", normalization="l2",
             retrieval_metrics={"recall_at_1": 0.5},
+            base_model_artifact_sha256=CHECKSUM, dataset_content_sha256=CHECKSUM,
+            frozen_evaluation_version="eval-v1", frozen_evaluation_sha256=CHECKSUM,
+            evaluation_report_sha256=CHECKSUM, artifact_uri="model",
+            created_at=datetime(2026, 9, 27, tzinfo=timezone.utc),
+            artifact_files={"model.safetensors": CHECKSUM}, bundle_files={"metrics.json": CHECKSUM},
         )
         self.assertEqual(embedder.model_type, "embedder")
         with self.assertRaises(ValidationError):

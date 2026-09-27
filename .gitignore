@@ -19,7 +19,7 @@ venv/
 data/processed/
 data/quarantine/*.jsonl
 data/sdg/generated/
-ml-service/artifacts/classifier-*/
+ml-service/artifacts/*/
 
 # Local logs and reports
 *.log
