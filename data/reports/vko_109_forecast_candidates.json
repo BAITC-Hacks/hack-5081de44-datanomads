@@ -2,6 +2,7 @@
   "calendar_days": 1035,
   "count_prediction_policy": "clip_negative_to_zero",
   "first_date": "2023-01-01",
+  "high_load_day_proxy_policy": "strictly_above_pre_origin_observed_history_p90_nearest_rank.v1",
   "interval_status": "NOT_EVALUATED",
   "invalid_csv_or_date_row_count": 0,
   "last_date": "2025-10-31",
@@ -19,10 +20,33 @@
   },
   "prophet_version": "1.4.0",
   "record_count": 83385,
-  "report_version": "forecast-candidates.v2",
+  "report_version": "forecast-candidates.v3",
   "results": [
     {
       "best_on_backtest": "prophet",
+      "high_load_day_proxy": {
+        "models": {
+          "prophet": {
+            "f1": 0.1159,
+            "fn": 57,
+            "fp": 65,
+            "precision": 0.1096,
+            "recall": 0.1231,
+            "tn": 500,
+            "tp": 8
+          },
+          "seasonal_naive": {
+            "f1": 0.1031,
+            "fn": 60,
+            "fp": 27,
+            "precision": 0.1562,
+            "recall": 0.0769,
+            "tn": 538,
+            "tp": 5
+          }
+        },
+        "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS"
+      },
       "horizon_days": 30,
       "models": {
         "prophet": {
@@ -47,6 +71,29 @@
     },
     {
       "best_on_backtest": "seasonal_naive",
+      "high_load_day_proxy": {
+        "models": {
+          "prophet": {
+            "f1": 0.0752,
+            "fn": 109,
+            "fp": 137,
+            "precision": 0.068,
+            "recall": 0.084,
+            "tn": 944,
+            "tp": 10
+          },
+          "seasonal_naive": {
+            "f1": 0.1075,
+            "fn": 109,
+            "fp": 57,
+            "precision": 0.1493,
+            "recall": 0.084,
+            "tn": 1024,
+            "tp": 10
+          }
+        },
+        "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS"
+      },
       "horizon_days": 60,
       "models": {
         "prophet": {
@@ -71,6 +118,29 @@
     },
     {
       "best_on_backtest": "seasonal_naive",
+      "high_load_day_proxy": {
+        "models": {
+          "prophet": {
+            "f1": 0.0657,
+            "fn": 149,
+            "fp": 221,
+            "precision": 0.0556,
+            "recall": 0.0802,
+            "tn": 1327,
+            "tp": 13
+          },
+          "seasonal_naive": {
+            "f1": 0.0956,
+            "fn": 150,
+            "fp": 77,
+            "precision": 0.1348,
+            "recall": 0.0741,
+            "tn": 1471,
+            "tp": 12
+          }
+        },
+        "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS"
+      },
       "horizon_days": 90,
       "models": {
         "prophet": {

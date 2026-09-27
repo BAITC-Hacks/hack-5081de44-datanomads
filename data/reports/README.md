@@ -26,7 +26,13 @@ naive values above. It wins only the 30-day horizon under the fixed WAPE rule;
 the 60- and 90-day baseline remains better. The
 [Almaty comparison](almaty_109_forecast_candidates.json) correctly records
 `INSUFFICIENT_HISTORY`. Neither report authorizes runtime promotion, and
-uncertainty intervals or peak-detection quality were not evaluated. The
+uncertainty intervals or detection quality against reviewed peak labels were
+not evaluated. The Eastern Kazakhstan v3 report includes a high-load-day proxy
+on the same rolling windows: Prophet precision is 0.1096/0.0680/0.0556 and
+weekly seasonal naive precision is 0.1562/0.1493/0.1348 for 30/60/90 days.
+These values compare predicted and observed daily totals above a threshold
+derived from pre-origin history; they do not measure confirmed incidents or
+staffing needs. The
 [spike exploration](vko_109_spike_exploration.json) excludes four days whose
 observations or same-weekday history are incomplete because of those two gaps;
 its alert counts remain exploratory without incident labels.
