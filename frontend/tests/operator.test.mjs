@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { combineRelatedCandidates, formatDecisionTime, formatRuntimeRate, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../src/operator.ts'
+import { buildContextPreviewText, combineRelatedCandidates, formatDecisionTime, formatRuntimeRate, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../src/operator.ts'
+
+test('builds a trimmed, transient context preview and rejects empty or overlong answers', () => {
+  assert.equal(
+    buildContextPreviewText('  Исходное обращение  ', '  Ответ заявителя  '),
+    'Исходное обращение\n\nОтвет заявителя: Ответ заявителя',
+  )
+  assert.throws(() => buildContextPreviewText('Исходное обращение', '  '), /Укажите ответ заявителя/)
+  assert.throws(() => buildContextPreviewText('x'.repeat(10_000), 'ответ'), /превышает лимит/)
+})
 
 test('maps recognized sources and makes unknown sources visible', () => {
   assert.equal(mapTicketChannel('mobile'), 'Мобильное приложение')

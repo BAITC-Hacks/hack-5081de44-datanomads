@@ -1143,7 +1143,7 @@ components:
         dataset_version_count: { type: integer, minimum: 0 }
     AssistPreviewRequest:
       type: object
-      description: Provide either ticket_id or text.
+      description: Provide either ticket_id or text. Text previews may include a clarification answer for a transient recommendation; they do not update the source ticket or send messages to the CRM.
       properties:
         ticket_id: { type: string }
         text: { type: string, minLength: 1, maxLength: 10000 }
@@ -1151,10 +1151,11 @@ components:
         region_id: { type: string }
     AssistPreviewResponse:
       type: object
-      required: [ticket, prediction, similar_tickets, duplicate_candidates, repeat_candidates, response_template, source, orchestration]
+      required: [ticket, prediction, actionable_context, similar_tickets, duplicate_candidates, repeat_candidates, response_template, source, orchestration]
       properties:
         ticket: { $ref: '#/components/schemas/Ticket' }
         prediction: { $ref: '#/components/schemas/Prediction' }
+        actionable_context: { $ref: '#/components/schemas/ActionableContext' }
         similar_tickets: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
         duplicate_candidates: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
         repeat_candidates: { type: array, items: { $ref: '#/components/schemas/SimilarTicket' } }
@@ -1172,6 +1173,30 @@ components:
             version: { type: integer, minimum: 1 }
         source: { type: string }
         orchestration: { $ref: '#/components/schemas/AssistOrchestration' }
+    ActionableContext:
+      type: object
+      description: A targeted question is suggested only when an uncertain topic changes the rule-derived service or priority. It never sends or persists the clarification answer.
+      required: [status, rule_id, reason, decision_critical_fields, options]
+      properties:
+        status: { type: string, enum: [suggested, not_needed, manual_review] }
+        rule_id: { type: string, description: Stable rule identifier explaining why a question is suggested or withheld. }
+        reason: { type: string }
+        missing_fact: { type: string, enum: [topic] }
+        question: { type: string }
+        decision_critical_fields:
+          type: array
+          items: { type: string, enum: [service, priority] }
+        options:
+          type: array
+          items: { $ref: '#/components/schemas/ActionableContextOption' }
+    ActionableContextOption:
+      type: object
+      required: [topic_id, topic_label, service, priority]
+      properties:
+        topic_id: { type: string }
+        topic_label: { type: string }
+        service: { type: string }
+        priority: { type: string }
     ResponseTemplateInput:
       type: object
       additionalProperties: false

@@ -38,6 +38,23 @@ export interface TicketAlternative {
   confidence: number
 }
 
+export interface ActionableContextOption {
+  topicId: string
+  topicLabel: string
+  service: string
+  priority: Priority
+}
+
+export interface ActionableContext {
+  status: 'suggested' | 'not_needed' | 'manual_review'
+  ruleId: string
+  reason: string
+  missingFact?: 'topic'
+  question?: string
+  decisionCriticalFields: Array<'service' | 'priority'>
+  options: ActionableContextOption[]
+}
+
 export interface RelationSuggestionSnapshot {
   score: number
   threshold: number
@@ -80,6 +97,7 @@ export interface Ticket {
   id: string
   originalText: string
   externalRef?: string
+  regionId?: string
   modelVersion?: string
   language: PreviewLanguage
   topic: string
@@ -108,6 +126,7 @@ export interface Ticket {
   responseTemplateId?: string
   responseTemplateKey?: string
   responseTemplateVersion?: number
+  actionableContext?: ActionableContext
   assistPreview?: AssistPreviewState
   channel: 'eGov' | 'Call-центр' | 'Мобильное приложение' | 'WhatsApp' | 'Не указан'
 }

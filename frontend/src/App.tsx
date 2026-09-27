@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
@@ -441,7 +441,12 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
 }
 
 function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[]) => void }) {
+  const contextRequestId = useRef(0)
   const [correctionOpen, setCorrectionOpen] = useState(false)
+  const [contextAnswer, setContextAnswer] = useState('')
+  const [contextResult, setContextResult] = useState<Ticket | null>(null)
+  const [contextLoading, setContextLoading] = useState(false)
+  const [contextError, setContextError] = useState('')
   const [replyDraftMode, setReplyDraftMode] = useState<'closed' | 'template' | 'manual'>('closed')
   const [replyDraft, setReplyDraft] = useState('')
   const [templateIgnored, setTemplateIgnored] = useState(false)
@@ -487,6 +492,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     return Array.from(new Map(options.map((option) => [option[1], option])).values())
   }, [taxonomy.services, ticket.service])
   useEffect(() => {
+    contextRequestId.current += 1
     setTopic(ticket.topic)
     setService(ticket.service)
     setPriority(ticket.priority)
@@ -494,7 +500,26 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     setReplyDraftMode('closed')
     setReplyDraft('')
     setTemplateIgnored(false)
-  }, [ticket.id, ticket.topic, ticket.service, ticket.priority, ticket.status, ticket.responseTemplateId, ticket.responseTemplateVersion, ticket.responseTemplateSource, ticket.responseTemplate, confidenceState])
+    setContextAnswer('')
+    setContextResult(null)
+    setContextLoading(false)
+    setContextError('')
+  }, [ticket.id, ticket.topic, ticket.service, ticket.priority, ticket.status, ticket.responseTemplateId, ticket.responseTemplateVersion, ticket.responseTemplateSource, ticket.responseTemplate, ticket.actionableContext?.question, confidenceState])
+
+  const recalculateContext = async () => {
+    const requestId = contextRequestId.current + 1
+    contextRequestId.current = requestId
+    setContextLoading(true)
+    setContextError('')
+    try {
+      const result = await previewTicketWithContext(ticket, contextAnswer)
+      if (contextRequestId.current === requestId) setContextResult(result)
+    } catch (error) {
+      if (contextRequestId.current === requestId) setContextError(error instanceof Error ? error.message : 'ошибка API')
+    } finally {
+      if (contextRequestId.current === requestId) setContextLoading(false)
+    }
+  }
 
   return <aside className={`ticket-detail ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
     <div className="detail-header"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено'}</div><h2>{ticket.id}</h2></div><button className="icon-button detail-close" aria-label="Закрыть детали" onClick={onClose}><Icon name="close" size={18} /></button></div>
@@ -586,6 +611,45 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
         </div>
         <p className="panel-note"><strong>Основание маршрутизации:</strong> {ticket.routingReason?.trim() || 'Не предоставлено; проверьте службу и приоритет вручную.'}</p>
       </div>
+      {ticket.actionableContext?.status === 'suggested' && ticket.actionableContext.question && (
+        <section className="actionable-context" aria-label="Уточнение для выбора темы">
+          <div className="field-label">Рекомендация зависит от уточнения</div>
+          <p className="actionable-context-question">{ticket.actionableContext.question}</p>
+          <p className="panel-note">Правило {ticket.actionableContext.ruleId}: меняются {ticket.actionableContext.decisionCriticalFields.map((field) => field === 'service' ? 'служба' : 'приоритет').join(' и ')}.</p>
+          <ul className="actionable-context-options">
+            {ticket.actionableContext.options.map((option) => (
+              <li key={option.topicId}><strong>{option.topicLabel}</strong><span>{option.service} · {option.priority}</span></li>
+            ))}
+          </ul>
+          <label className="field-label" htmlFor={`context-answer-${ticket.id}`}>Ответ заявителя, полученный вне Pulse</label>
+          <textarea
+            id={`context-answer-${ticket.id}`}
+            aria-label="Ответ заявителя для пересчёта"
+            value={contextAnswer}
+            onChange={(event) => setContextAnswer(event.target.value)}
+            maxLength={2_000}
+            rows={3}
+            placeholder="Внесите ответ, который оператор уже получил"
+          />
+          <p className="panel-note">Ответ используется только для временного пересчёта. Исходное обращение не меняется; отправки в CRM нет.</p>
+          <button className="button button-secondary" onClick={() => void recalculateContext()} disabled={contextLoading || !contextAnswer.trim()}>
+            {contextLoading ? 'Пересчитываем…' : 'Пересчитать рекомендацию'}
+          </button>
+          {contextError && <p className="actionable-context-error" role="alert">Не удалось пересчитать рекомендацию: {contextError}</p>}
+          {contextResult && (
+            <div className="actionable-context-result" role="status" aria-live="polite">
+              <strong>Временный результат после уточнения</strong>
+              <span>Тема: {contextResult.predictedTopic ?? contextResult.topic}</span>
+              <span>Служба: {contextResult.recommendedService ?? 'Не определена'}</span>
+              <span>Приоритет: {contextResult.recommendedPriority ?? 'Не определён'}</span>
+              {contextResult.actionableContext?.status === 'suggested' && contextResult.actionableContext.question && (
+                <span>Осталась неопределённость: {contextResult.actionableContext.question}</span>
+              )}
+              {contextResult.actionableContext?.status === 'manual_review' && <span>{contextResult.actionableContext.reason}</span>}
+            </div>
+          )}
+        </section>
+      )}
       {hasOperatorDecision && (
         <div className="detail-section">
           <div className="field-label">{ticket.status === 'corrected' ? 'Исправление оператора' : 'Подтверждённое решение оператора'}</div>

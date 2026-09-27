@@ -2426,12 +2426,173 @@ pub struct PreviewRequest {
 pub struct AssistPreviewResponse {
     pub ticket: Ticket,
     pub prediction: Prediction,
+    pub actionable_context: ActionableContext,
     pub similar_tickets: Vec<SimilarTicket>,
     pub duplicate_candidates: Vec<SimilarTicket>,
     pub repeat_candidates: Vec<SimilarTicket>,
     pub response_template: ResponseTemplate,
     pub source: String,
     pub orchestration: AssistOrchestration,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionableContextStatus {
+    Suggested,
+    NotNeeded,
+    ManualReview,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ActionableContextOption {
+    pub topic_id: String,
+    pub topic_label: String,
+    pub service: String,
+    pub priority: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ActionableContext {
+    pub status: ActionableContextStatus,
+    pub rule_id: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_fact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    pub decision_critical_fields: Vec<String>,
+    pub options: Vec<ActionableContextOption>,
+}
+
+pub(crate) fn actionable_context_needs_candidates(prediction: &Prediction) -> bool {
+    matches!(
+        prediction.confidence_state.to_ascii_uppercase().as_str(),
+        "UNCERTAIN" | "LOW_CONFIDENCE" | "LOW"
+    )
+}
+
+fn normalized_actionable_priority(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "critical" | "критический" | "критично" => "critical".to_owned(),
+        "high" | "высокий" | "высокая" => "high".to_owned(),
+        "low" | "низкий" | "низкая" => "low".to_owned(),
+        "medium" | "normal" | "средний" | "обычный" => "medium".to_owned(),
+        _ => value.trim().to_lowercase(),
+    }
+}
+
+pub(crate) fn actionable_context_for_candidates(
+    prediction: &Prediction,
+    alternatives: Vec<ActionableContextOption>,
+) -> ActionableContext {
+    if !actionable_context_needs_candidates(prediction) {
+        return ActionableContext {
+            status: ActionableContextStatus::NotNeeded,
+            rule_id: "CLASSIFICATION_CONFIDENT".to_owned(),
+            reason: "Классификатор не отметил тему для уточнения.".to_owned(),
+            missing_fact: None,
+            question: None,
+            decision_critical_fields: Vec::new(),
+            options: Vec::new(),
+        };
+    }
+
+    if prediction.model_version.eq_ignore_ascii_case("unavailable")
+        || prediction.topic_id.eq_ignore_ascii_case("unknown")
+    {
+        return ActionableContext {
+            status: ActionableContextStatus::ManualReview,
+            rule_id: "CLASSIFICATION_UNAVAILABLE".to_owned(),
+            reason: "Классификация недоступна; выберите тему вручную.".to_owned(),
+            missing_fact: None,
+            question: None,
+            decision_critical_fields: Vec::new(),
+            options: Vec::new(),
+        };
+    }
+
+    if alternatives.is_empty() {
+        return ActionableContext {
+            status: ActionableContextStatus::ManualReview,
+            rule_id: "TOPIC_ALTERNATIVES_UNAVAILABLE".to_owned(),
+            reason: "Нет вариантов темы для обоснованного уточняющего вопроса; проверьте классификацию вручную.".to_owned(),
+            missing_fact: None,
+            question: None,
+            decision_critical_fields: Vec::new(),
+            options: Vec::new(),
+        };
+    }
+
+    let mut options = vec![ActionableContextOption {
+        topic_id: prediction.topic_id.clone(),
+        topic_label: prediction.topic_label.clone(),
+        service: prediction.recommended_service.clone(),
+        priority: prediction.predicted_priority.clone(),
+    }];
+    for option in alternatives {
+        if !options
+            .iter()
+            .any(|existing| existing.topic_id == option.topic_id)
+        {
+            options.push(option);
+        }
+    }
+
+    let service_changes = options
+        .iter()
+        .any(|option| !option.service.eq_ignore_ascii_case(&options[0].service));
+    let priority_changes = options.iter().any(|option| {
+        normalized_actionable_priority(&option.priority)
+            != normalized_actionable_priority(&options[0].priority)
+    });
+    if !service_changes && !priority_changes {
+        return ActionableContext {
+            status: ActionableContextStatus::NotNeeded,
+            rule_id: "CANDIDATE_DECISIONS_EQUIVALENT".to_owned(),
+            reason: "Варианты темы ведут к одинаковым службе и приоритету; уточнение не меняет рекомендацию.".to_owned(),
+            missing_fact: None,
+            question: None,
+            decision_critical_fields: Vec::new(),
+            options,
+        };
+    }
+
+    let labels = options
+        .iter()
+        .map(|option| option.topic_label.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut decision_critical_fields = Vec::new();
+    if service_changes {
+        decision_critical_fields.push("service".to_owned());
+    }
+    if priority_changes {
+        decision_critical_fields.push("priority".to_owned());
+    }
+    ActionableContext {
+        status: ActionableContextStatus::Suggested,
+        rule_id: "TOPIC_CHANGES_ROUTING_OR_PRIORITY".to_owned(),
+        reason: "Правила для вариантов темы дают разные рекомендации; уточнение влияет на решение."
+            .to_owned(),
+        missing_fact: Some("topic".to_owned()),
+        question: Some(format!(
+            "Какая тема точнее описывает суть обращения: {labels}?"
+        )),
+        decision_critical_fields,
+        options,
+    }
+}
+
+pub(crate) fn actionable_context_manual_review(reason: impl Into<String>) -> ActionableContext {
+    ActionableContext {
+        status: ActionableContextStatus::ManualReview,
+        rule_id: "CANDIDATE_RULES_UNAVAILABLE".to_owned(),
+        reason: reason.into(),
+        missing_fact: None,
+        question: None,
+        decision_critical_fields: Vec::new(),
+        options: Vec::new(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -3236,10 +3397,24 @@ async fn assist_preview(
         || prediction.confidence < 0.85
         || !response_template.approved
         || partial;
+    let actionable_context = actionable_context_for_candidates(
+        &prediction,
+        prediction
+            .alternatives
+            .iter()
+            .map(|alternative| ActionableContextOption {
+                topic_id: alternative.topic_id.clone(),
+                topic_label: alternative.topic_label.clone(),
+                service: service_for_topic(&alternative.topic_id).to_owned(),
+                priority: priority_for_topic(&alternative.topic_id).to_owned(),
+            })
+            .collect(),
+    );
     Ok(Json(AssistPreviewResponse {
         response_template,
         ticket,
         prediction,
+        actionable_context,
         similar_tickets: related,
         duplicate_candidates,
         repeat_candidates,
@@ -7409,6 +7584,116 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    fn test_context_prediction(confidence_state: &str) -> Prediction {
+        Prediction {
+            ticket_id: "context-test".to_owned(),
+            model_version: "classifier-test".to_owned(),
+            topic_id: "TOPIC-WATER".to_owned(),
+            topic_label: "Водоснабжение".to_owned(),
+            confidence: 0.52,
+            confidence_state: confidence_state.to_owned(),
+            recommended_service: "Водоканал".to_owned(),
+            predicted_priority: "high".to_owned(),
+            routing_reason: "Тестовое правило".to_owned(),
+            service_provenance: RuleProvenance::manual("Тест"),
+            priority_provenance: RuleProvenance::manual("Тест"),
+            alternatives: Vec::new(),
+            created_at: DEMO_TIMESTAMP.to_owned(),
+        }
+    }
+
+    fn test_context_option(
+        topic_id: &str,
+        topic_label: &str,
+        service: &str,
+        priority: &str,
+    ) -> ActionableContextOption {
+        ActionableContextOption {
+            topic_id: topic_id.to_owned(),
+            topic_label: topic_label.to_owned(),
+            service: service.to_owned(),
+            priority: priority.to_owned(),
+        }
+    }
+
+    #[test]
+    fn actionable_context_asks_only_when_uncertain_topic_changes_a_decision() {
+        let context = actionable_context_for_candidates(
+            &test_context_prediction("uncertain"),
+            vec![test_context_option(
+                "TOPIC-SAFETY",
+                "Безопасность",
+                "Служба безопасности",
+                "critical",
+            )],
+        );
+
+        assert!(matches!(context.status, ActionableContextStatus::Suggested));
+        assert_eq!(context.rule_id, "TOPIC_CHANGES_ROUTING_OR_PRIORITY");
+        assert_eq!(context.missing_fact.as_deref(), Some("topic"));
+        assert!(context
+            .question
+            .as_deref()
+            .unwrap()
+            .contains("Водоснабжение; Безопасность"));
+        assert_eq!(context.decision_critical_fields, ["service", "priority"]);
+    }
+
+    #[test]
+    fn actionable_context_does_not_ask_when_candidate_decisions_are_equivalent() {
+        let context = actionable_context_for_candidates(
+            &test_context_prediction("low_confidence"),
+            vec![test_context_option(
+                "TOPIC-UTILITIES",
+                "Коммунальные услуги",
+                "Водоканал",
+                "HIGH",
+            )],
+        );
+
+        assert!(matches!(context.status, ActionableContextStatus::NotNeeded));
+        assert_eq!(context.rule_id, "CANDIDATE_DECISIONS_EQUIVALENT");
+        assert!(context.question.is_none());
+    }
+
+    #[test]
+    fn actionable_context_leaves_confident_predictions_without_questions() {
+        let context = actionable_context_for_candidates(
+            &test_context_prediction("confident"),
+            vec![test_context_option(
+                "TOPIC-SAFETY",
+                "Безопасность",
+                "Служба безопасности",
+                "critical",
+            )],
+        );
+
+        assert!(matches!(context.status, ActionableContextStatus::NotNeeded));
+        assert_eq!(context.rule_id, "CLASSIFICATION_CONFIDENT");
+        assert!(context.question.is_none());
+    }
+
+    #[test]
+    fn actionable_context_uses_manual_review_without_candidates() {
+        let context =
+            actionable_context_for_candidates(&test_context_prediction("uncertain"), Vec::new());
+
+        assert!(matches!(
+            context.status,
+            ActionableContextStatus::ManualReview
+        ));
+        assert_eq!(context.rule_id, "TOPIC_ALTERNATIVES_UNAVAILABLE");
+        assert!(context.question.is_none());
+    }
+
+    #[test]
+    fn actionable_context_treats_normal_and_medium_as_the_same_priority() {
+        assert_eq!(
+            normalized_actionable_priority("normal"),
+            normalized_actionable_priority("Средний")
+        );
+    }
+
     #[test]
     fn provenance_serializes_only_captured_routing_facts() {
         let empty = serde_json::to_value(RuleProvenance::manual("Ручная проверка")).unwrap();
@@ -7539,6 +7824,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let preview = body_json(response).await;
         assert_eq!(preview["prediction"]["topic_id"], "TOPIC-WATER");
+        assert!(preview["actionable_context"]["rule_id"].is_string());
 
         let request = Request::post("/api/v1/assist/ticket-001/correct")
             .header("content-type", "application/json")
@@ -7557,6 +7843,34 @@ mod tests {
             "TOPIC-UTILITIES"
         );
         assert_eq!(decision["prediction"]["topic_id"], "TOPIC-WATER");
+    }
+
+    #[tokio::test]
+    async fn clarification_preview_recomputes_without_creating_a_ticket() {
+        let state = AppState::demo();
+        let initial_ticket_count = state.read_store().unwrap().tickets.len();
+        let app = app(state.clone());
+        let request = Request::post("/api/v1/assist/preview")
+            .header("content-type", "application/json")
+            .header("x-pulse-role", "OPERATOR")
+            .body(Body::from(
+                r#"{"text":"В районе отключили воду. Ответ заявителя: авария на трубопроводе.","language":"RU","region_id":"R01"}"#,
+            ))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let preview = body_json(response).await;
+        assert_eq!(preview["ticket"]["status"], "preview");
+        assert!(preview["ticket"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Ответ заявителя"));
+        assert!(preview["actionable_context"]["rule_id"].is_string());
+        assert_eq!(
+            state.read_store().unwrap().tickets.len(),
+            initial_ticket_count
+        );
     }
 
     #[tokio::test]

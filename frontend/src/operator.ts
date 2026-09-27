@@ -23,10 +23,22 @@ type CandidateType = RelatedCandidate['candidateTypes'][number]
 
 const DEFAULT_RELATED_TICKET_LIMIT = 3
 const RELATED_CANDIDATE_THRESHOLD = 0.78
+const MAX_CONTEXT_PREVIEW_TEXT_LENGTH = 10_000
 const RELATION_PRIORITY: Record<'similar' | 'repeat' | 'duplicate', number> = {
   similar: 0,
   repeat: 1,
   duplicate: 2,
+}
+
+export function buildContextPreviewText(originalText: string, answer: string): string {
+  const normalizedAnswer = answer.trim()
+  if (!normalizedAnswer) throw new Error('Укажите ответ заявителя')
+
+  const text = `${originalText.trim()}\n\nОтвет заявителя: ${normalizedAnswer}`
+  if ([...text].length > MAX_CONTEXT_PREVIEW_TEXT_LENGTH) {
+    throw new Error('Текст с уточнением превышает лимит 10000 символов')
+  }
+  return text
 }
 
 function relationType(value: string): 'similar' | 'repeat' | 'duplicate' {

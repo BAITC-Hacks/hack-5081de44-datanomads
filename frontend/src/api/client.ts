@@ -1,9 +1,9 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
-import { combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, topRelatedCandidates } from '../operator'
+import { buildContextPreviewText, combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, topRelatedCandidates } from '../operator'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
 const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
@@ -106,6 +106,21 @@ interface BackendPrediction {
   alternatives: BackendAlternative[]
 }
 
+interface BackendActionableContext {
+  status: ActionableContext['status']
+  rule_id: string
+  reason: string
+  missing_fact?: 'topic'
+  question?: string
+  decision_critical_fields: ActionableContext['decisionCriticalFields']
+  options: Array<{
+    topic_id: string
+    topic_label: string
+    service: string
+    priority: string
+  }>
+}
+
 interface BackendSimilar {
   ticket_id: string
   score: number
@@ -124,7 +139,9 @@ interface BackendSimilar {
 }
 
 interface BackendAssistPreview {
+  ticket: BackendTicket
   prediction?: BackendPrediction
+  actionable_context: BackendActionableContext
   similar_tickets?: BackendSimilar[]
   duplicate_candidates?: BackendSimilar[]
   repeat_candidates?: BackendSimilar[]
@@ -395,6 +412,7 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     id: item.id,
     originalText: text,
     externalRef: item.external_ref?.trim() || undefined,
+    regionId: item.region_id?.trim() || undefined,
     modelVersion: prediction?.model_version === 'unavailable' ? undefined : prediction?.model_version,
     language: mapLanguage(preview?.orchestration?.language ?? item.language),
     topic,
@@ -437,6 +455,20 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
     responseTemplateId: preview?.response_template?.id,
     responseTemplateKey: preview?.response_template?.template_key,
     responseTemplateVersion: preview?.response_template?.version,
+    actionableContext: preview?.actionable_context ? {
+      status: preview.actionable_context.status,
+      ruleId: preview.actionable_context.rule_id,
+      reason: preview.actionable_context.reason,
+      missingFact: preview.actionable_context.missing_fact,
+      question: preview.actionable_context.question,
+      decisionCriticalFields: preview.actionable_context.decision_critical_fields,
+      options: preview.actionable_context.options.map((option) => ({
+        topicId: option.topic_id,
+        topicLabel: option.topic_label,
+        service: option.service,
+        priority: mapPriority(option.priority),
+      })),
+    } : undefined,
     assistPreview: preview?.orchestration,
     channel: mapTicketChannel(item.source),
   }
@@ -648,6 +680,20 @@ export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
       error: error instanceof Error ? error.message : 'API недоступен',
     }
   }
+}
+
+export async function previewTicketWithContext(ticket: Ticket, answer: string): Promise<Ticket> {
+  const text = buildContextPreviewText(ticket.originalText, answer)
+  const preview = await request<BackendAssistPreview>('/assist/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      text,
+      language: ticket.language,
+      region_id: ticket.regionId,
+    }),
+  })
+  return mapBackendTicket(preview.ticket, undefined, [preview.ticket], preview)
 }
 
 export async function submitDecision(ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }, taxonomy?: Pick<DashboardData['filterOptions'], 'topics' | 'services'>) {

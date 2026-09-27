@@ -9,18 +9,19 @@ use crate::anomaly::{
     evaluate_series, AlertDetectionRun, AlertDetectorConfig, AlertEvaluation, AlertSeriesInput,
 };
 use crate::{
-    build_query_intent_result, manual_response_template, metric_rate, query_analytics_filters,
-    related_ticket_candidate, render_template_body, validate_query_intent, Alert, AlertQuery,
-    AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsDrilldownResponse,
-    AnalyticsDrilldownTicket, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
-    AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
-    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
-    ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
-    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
-    ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
-    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
-    ResponseTemplatesResponse, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
-    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    actionable_context_for_candidates, actionable_context_manual_review,
+    actionable_context_needs_candidates, build_query_intent_result, manual_response_template,
+    metric_rate, query_analytics_filters, related_ticket_candidate, render_template_body,
+    validate_query_intent, ActionableContextOption, Alert, AlertQuery, AlternativePrediction,
+    AnalyticsDrilldownQuery, AnalyticsDrilldownResponse, AnalyticsDrilldownTicket, AnalyticsQuery,
+    AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
+    CloseLearningCycleRequest, Config, CreateLearningCycleRequest, DatasetProvenance,
+    DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse, ImportRequest,
+    ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics,
+    LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision, Prediction,
+    QueryIntentRequest, RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput,
+    ResponseTemplateRecord, ResponseTemplatesResponse, RuleProvenance, RuleSource, RuntimeMetrics,
+    Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -5641,10 +5642,47 @@ impl PgRepository {
             || matches!(language_state.as_str(), "MIXED" | "UNKNOWN")
             || latest_decision.is_none()
             || !response_template.approved;
+        let actionable_context = if actionable_context_needs_candidates(&prediction) {
+            let mut alternative_options = Vec::with_capacity(prediction.alternatives.len());
+            let mut rules_available = true;
+            for alternative in &prediction.alternatives {
+                match self
+                    .resolve_routing(
+                        &alternative.topic_id,
+                        &ticket.region_id,
+                        None,
+                        None,
+                        RuleSource::Manual,
+                    )
+                    .await
+                {
+                    Ok(routing) => alternative_options.push(ActionableContextOption {
+                        topic_id: alternative.topic_id.clone(),
+                        topic_label: alternative.topic_label.clone(),
+                        service: routing.service_name,
+                        priority: routing.priority,
+                    }),
+                    Err(_) => {
+                        rules_available = false;
+                        break;
+                    }
+                }
+            }
+            if rules_available {
+                actionable_context_for_candidates(&prediction, alternative_options)
+            } else {
+                actionable_context_manual_review(
+                    "Не удалось проверить правила для альтернативных тем; проверьте тему, службу и приоритет вручную.",
+                )
+            }
+        } else {
+            actionable_context_for_candidates(&prediction, Vec::new())
+        };
         Ok(AssistPreviewResponse {
             response_template,
             ticket,
             prediction,
+            actionable_context,
             similar_tickets: similar,
             duplicate_candidates,
             repeat_candidates,
