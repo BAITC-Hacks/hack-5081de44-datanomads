@@ -58,6 +58,9 @@ const DEFAULT_LEARNING_CYCLE_DURATION_HOURS: i32 = 168;
 const DEFAULT_LEARNING_MIN_FEEDBACK_COUNT: i32 = 1;
 const DEFAULT_LEARNING_PROMOTION_POLICY_VERSION: &str = "policy-v1";
 const MAX_LEARNING_CYCLE_DURATION_HOURS: i32 = 87_600;
+const AUDIT_LOG_DEFAULT_LIMIT: i64 = 50;
+const AUDIT_LOG_MAX_LIMIT: i64 = 100;
+const AUDIT_LOG_MAX_OFFSET: i64 = 1_000_000;
 static LOG_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn is_active_learning_cycle_state(state: &str) -> bool {
@@ -1626,6 +1629,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/openapi.json", get(openapi))
         .route("/api/v1/docs", get(openapi))
         .route("/api/v1/tickets", get(list_tickets).post(create_ticket))
+        .route("/api/v1/audit", get(audit_log))
         .route("/api/v1/import", post(import_tickets))
         .route("/api/v1/datasets/provenance", get(dataset_provenance))
         .route("/api/v1/tickets/{ticket_id}", get(get_ticket))
@@ -1864,7 +1868,7 @@ async fn list_tickets(
     headers: HeaderMap,
     Query(query): Query<TicketQuery>,
 ) -> Result<Json<TicketListResponse>, ApiError> {
-    require_role(
+    let actor = require_role(
         &headers,
         &state.config,
         &[Role::Operator, Role::Manager, Role::Admin],
@@ -1872,6 +1876,18 @@ async fn list_tickets(
     if let Some(repository) = state.repository() {
         let response = repository
             .list_tickets(&query)
+            .await
+            .map_err(ApiError::Internal)?;
+        repository
+            .audit(
+                &actor.user_id,
+                "READ_TICKET_LIST",
+                "ticket_collection",
+                None,
+                Some(&log_request_id_from_headers(&headers)),
+                Some("ticket list viewed"),
+                ticket_list_audit_metadata(&response),
+            )
             .await
             .map_err(ApiError::Internal)?;
         return Ok(Json(response));
@@ -1914,6 +1930,14 @@ async fn list_tickets(
         limit,
         offset,
     }))
+}
+
+fn ticket_list_audit_metadata(response: &TicketListResponse) -> Value {
+    json!({
+        "ticket_ids": response.items.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        "limit": response.limit,
+        "offset": response.offset,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2229,12 +2253,46 @@ async fn delete_ticket_vector(
     Ok(Json(response))
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct AuditLogQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn audit_log(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditLogQuery>,
+) -> Result<Json<pg::AuditLogPage>, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let limit = query.limit.unwrap_or(AUDIT_LOG_DEFAULT_LIMIT);
+    if !(1..=AUDIT_LOG_MAX_LIMIT).contains(&limit) {
+        return Err(ApiError::BadRequest(
+            "limit must be between 1 and 100".to_owned(),
+        ));
+    }
+    let offset = query.offset.unwrap_or(0);
+    if !(0..=AUDIT_LOG_MAX_OFFSET).contains(&offset) {
+        return Err(ApiError::BadRequest(
+            "offset must be between 0 and 1000000".to_owned(),
+        ));
+    }
+    let repository = state
+        .repository()
+        .ok_or_else(|| ApiError::Conflict("audit log requires PostgreSQL storage".to_owned()))?;
+    repository
+        .list_audit_log(limit, offset)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 async fn get_ticket(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(ticket_id): Path<String>,
 ) -> Result<Json<TicketDetailResponse>, ApiError> {
-    require_role(
+    let actor = require_role(
         &headers,
         &state.config,
         &[Role::Operator, Role::Manager, Role::Admin],
@@ -2247,6 +2305,18 @@ async fn get_ticket(
                 ApiError::Internal(error)
             }
         })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "READ_TICKET_DETAIL",
+                "ticket",
+                Some(&ticket_id),
+                Some(&log_request_id_from_headers(&headers)),
+                Some("ticket detail viewed"),
+                json!({}),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
         return Ok(Json(response));
     }
     let store = state.read_store()?;
@@ -2895,7 +2965,7 @@ async fn assist_preview(
                 "ASSIST_PREVIEW",
                 "ticket",
                 request.ticket_id.as_deref(),
-                Some(&request_id),
+                Some(&log_request_id_from_headers(&headers)),
                 None,
                 json!({"source": &response.source}),
             )
@@ -7234,6 +7304,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/openapi.json": { "get": { "summary": "Core OpenAPI route index" } },
             "/api/v1/docs": { "get": { "summary": "Core OpenAPI route index" } },
             "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
+            "/api/v1/audit": { "get": { "summary": "Privacy-safe audit log for managers and admins" } },
             "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
             "/api/v1/tickets/{ticket_id}/prediction": { "get": { "summary": "Get current ticket prediction" } },
             "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },
@@ -7440,6 +7511,75 @@ mod tests {
         assert_eq!(value["items"][0]["id"], "ticket-002");
     }
 
+    #[test]
+    fn audit_log_event_serializes_only_allowlisted_fields() {
+        let event = pg::AuditLogEvent {
+            id: 7,
+            actor_id: Some("operator-17".to_owned()),
+            action: "READ_TICKET_DETAIL".to_owned(),
+            entity_type: "ticket".to_owned(),
+            entity_id: Some("ticket-001".to_owned()),
+            request_id: Some("core-123-4".to_owned()),
+            created_at: DateTime::parse_from_rfc3339("2026-09-26T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let value = serde_json::to_value(event).unwrap();
+        let fields = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            fields,
+            [
+                "action",
+                "actor_id",
+                "created_at",
+                "entity_id",
+                "entity_type",
+                "id",
+                "request_id",
+            ]
+        );
+        assert!(value.get("reason").is_none());
+        assert!(value.get("metadata").is_none());
+    }
+
+    #[test]
+    fn audit_request_id_only_exposes_core_generated_identifiers() {
+        assert_eq!(
+            pg::safe_audit_request_id(Some("core-123-4".to_owned())),
+            Some("core-123-4".to_owned())
+        );
+        assert_eq!(
+            pg::safe_audit_request_id(Some("user-supplied-request".to_owned())),
+            None
+        );
+        assert_eq!(pg::safe_audit_request_id(None), None);
+    }
+
+    #[test]
+    fn ticket_list_audit_metadata_omits_ticket_text() {
+        let store = Store::demo();
+        let mut ticket = store.tickets.values().next().unwrap().clone();
+        ticket.text = "AUDIT_PRIVATE_TICKET_SENTINEL".to_owned();
+        let ticket_id = ticket.id.clone();
+        let metadata = ticket_list_audit_metadata(&TicketListResponse {
+            items: vec![ticket],
+            total: 1,
+            limit: 1,
+            offset: 0,
+        });
+
+        assert_eq!(metadata["ticket_ids"][0], ticket_id);
+        assert!(!metadata
+            .to_string()
+            .contains("AUDIT_PRIVATE_TICKET_SENTINEL"));
+    }
+
     #[tokio::test]
     async fn openapi_documents_core_routes() {
         let app = app(AppState::demo());
@@ -7453,6 +7593,7 @@ mod tests {
             .unwrap();
         let value = body_json(response).await;
         assert_eq!(value["openapi"], "3.1.0");
+        assert!(value["paths"]["/api/v1/audit"].is_object());
         assert!(value["paths"]["/api/v1/assist/preview"].is_object());
         assert!(value["paths"]["/api/v1/learning/{cycle_id}/feedback"].is_object());
         assert!(value["paths"]["/api/v1/models/{model_id}/promote"].is_object());

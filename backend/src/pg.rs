@@ -461,6 +461,35 @@ pub struct PgRepository {
     client: Client,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AuditLogEvent {
+    pub id: i64,
+    pub actor_id: Option<String>,
+    pub action: String,
+    pub entity_type: String,
+    pub entity_id: Option<String>,
+    pub request_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditLogPage {
+    pub items: Vec<AuditLogEvent>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+// Caller-provided request IDs may contain user data; only Core IDs are exposed in the audit API.
+pub(crate) fn safe_audit_request_id(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let suffix = value.strip_prefix("core-")?;
+    let (timestamp, sequence) = suffix.split_once('-')?;
+    let is_decimal =
+        |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    (is_decimal(timestamp) && is_decimal(sequence)).then_some(value)
+}
+
 #[derive(Debug, Deserialize)]
 struct MlClassifyResponse {
     model_version: String,
@@ -4661,6 +4690,56 @@ impl PgRepository {
             labels,
             created_at: created_at.to_rfc3339(),
             promoted_at: promoted_at.map(|value| value.to_rfc3339()),
+        })
+    }
+
+    pub async fn list_audit_log(&self, limit: i64, offset: i64) -> Result<AuditLogPage, String> {
+        let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("count audit log: {error}"))?;
+        let rows = sqlx::query(
+            "SELECT id, actor_id, action, entity_type, entity_id, request_id, created_at FROM audit_log ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list audit log: {error}"))?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            items.push(AuditLogEvent {
+                id: row
+                    .try_get("id")
+                    .map_err(|error| format!("audit id: {error}"))?,
+                actor_id: row
+                    .try_get("actor_id")
+                    .map_err(|error| format!("audit actor: {error}"))?,
+                action: row
+                    .try_get("action")
+                    .map_err(|error| format!("audit action: {error}"))?,
+                entity_type: row
+                    .try_get("entity_type")
+                    .map_err(|error| format!("audit entity type: {error}"))?,
+                entity_id: row
+                    .try_get("entity_id")
+                    .map_err(|error| format!("audit entity id: {error}"))?,
+                request_id: safe_audit_request_id(
+                    row.try_get("request_id")
+                        .map_err(|error| format!("audit request id: {error}"))?,
+                ),
+                created_at: row
+                    .try_get("created_at")
+                    .map_err(|error| format!("audit created at: {error}"))?,
+            });
+        }
+
+        Ok(AuditLogPage {
+            items,
+            total,
+            limit,
+            offset,
         })
     }
 

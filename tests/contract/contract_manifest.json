@@ -12,6 +12,7 @@
     ],
     "public_prefixes": [
       "/api/v1/tickets/",
+      "/api/v1/audit",
       "/api/v1/assist/",
       "/api/v1/analytics/",
       "/api/v1/alerts/",
@@ -21,6 +22,11 @@
       "/api/v1/models/"
     ],
     "required_operations": [
+      {
+        "method": "get",
+        "path": "/api/v1/audit",
+        "description": "Managers and administrators can review privacy-safe audit events"
+      },
       {
         "method": "post",
         "path": "/api/v1/assist/preview",

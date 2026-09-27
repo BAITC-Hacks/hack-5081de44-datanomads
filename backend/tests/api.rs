@@ -1117,6 +1117,50 @@ async fn operator_cannot_read_manager_analytics() {
 }
 
 #[tokio::test]
+async fn audit_log_is_manager_admin_only_and_requires_postgres_storage() {
+    let application = app(AppState::demo());
+
+    for role in ["OPERATOR", "ML_REVIEWER"] {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/audit")
+                    .header("x-pulse-role", role)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403, "{role} should not read audit log");
+    }
+
+    for role in ["MANAGER", "ADMIN"] {
+        let response = application
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/audit")
+                    .header("x-pulse-role", role)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 409, "{role} should pass RBAC");
+    }
+
+    let invalid_limit = application
+        .oneshot(
+            Request::get("/api/v1/audit?limit=101")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_limit.status(), 400);
+}
+
+#[tokio::test]
 async fn production_mode_ignores_demo_role_headers() {
     let mut state = AppState::demo();
     state.config.dev_auth = false;

@@ -8,6 +8,7 @@
   "paths": {
     "/healthz": { "get": { "summary": "Liveness" } },
     "/readyz": { "get": { "summary": "Readiness" } },
+    "/api/v1/audit": { "get": { "summary": "Privacy-safe audit log for managers and admins" } },
     "/api/v1/tickets": { "get": { "summary": "List tickets" }, "post": { "summary": "Create ticket" } },
     "/api/v1/tickets/{ticket_id}": { "get": { "summary": "Get ticket and prediction" } },
     "/api/v1/tickets/{ticket_id}/vector": { "delete": { "summary": "Delete one Qdrant vector" } },

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } 
 import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
+import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
 import type { EChartsOption } from 'echarts'
@@ -21,6 +22,7 @@ type Route =
   | '/situation/reports'
   | '/situation/learning'
   | '/situation/models'
+  | '/situation/audit'
 
 type IconName = 'inbox' | 'pulse' | 'grid' | 'map' | 'tag' | 'trend' | 'bell' | 'forecast' | 'file' | 'cycle' | 'model' | 'search' | 'settings' | 'help' | 'chevron' | 'arrow' | 'check' | 'edit' | 'external' | 'download' | 'more' | 'clock' | 'close'
 type DrilldownHandler = (dimension: DrilldownDimension, value: string | undefined, label: string) => void
@@ -104,6 +106,7 @@ const routeTitles: Record<Route, { eyebrow: string; title: string; description: 
   '/situation/reports': { eyebrow: 'Центр ситуации', title: 'Отчёты', description: 'Срезы для руководителей и рабочих встреч' },
   '/situation/learning': { eyebrow: 'Центр ситуации', title: 'Цикл обучения', description: 'Как обратная связь становится улучшением модели' },
   '/situation/models': { eyebrow: 'Центр ситуации', title: 'Статус моделей', description: 'Версии, метрики и решение о продвижении' },
+  '/situation/audit': { eyebrow: 'Администрирование', title: 'Журнал аудита', description: 'Кто, когда и с каким объектом выполнял действие' },
 }
 
 const operatorNav = [{ label: 'Входящие', route: '/operator' as Route, icon: 'inbox' as IconName }]
@@ -117,6 +120,7 @@ const situationNav = [
   { label: 'Отчёты', route: '/situation/reports' as Route, icon: 'file' as IconName },
   { label: 'Цикл обучения', route: '/situation/learning' as Route, icon: 'cycle' as IconName },
   { label: 'Статус моделей', route: '/situation/models' as Route, icon: 'model' as IconName },
+  { label: 'Журнал аудита', route: '/situation/audit' as Route, icon: 'clock' as IconName },
 ]
 
 function routeFromHash(): Route {
@@ -176,6 +180,7 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (route === '/situation/audit') return
     let active = true
     setLoading(true)
     loadDashboard(filters).then((result) => {
@@ -192,10 +197,10 @@ function App() {
       setLoading(false)
     })
     return () => { active = false }
-  }, [filters])
+  }, [filters, route])
 
   useEffect(() => {
-    if (!route.startsWith('/situation') || source !== 'api') return
+    if (!route.startsWith('/situation') || route === '/situation/audit' || source !== 'api') return
     let active = true
     const unsubscribe = subscribeToAlertChanges(() => {
       loadDashboard(filters).then((result) => {
@@ -239,17 +244,17 @@ function App() {
       <Sidebar route={route} mobileOpen={mobileNavOpen} onNavigate={(next) => { navigate(next); setMobileNavOpen(false) }} />
       <main className="main-shell">
         <Topbar onOpenNav={() => setMobileNavOpen(true)} onOpenAlerts={() => navigate('/situation/alerts')} hasAlerts={Boolean(data?.alerts.length)} />
-        {source === 'demo' && <div className="demo-banner"><span className="status-dot" /> Демо-данные · API подключится автоматически, когда backend будет доступен <span className="demo-banner-detail">{apiError ? `(${apiError})` : ''}</span></div>}
+        {source === 'demo' && route !== '/situation/audit' && <div className="demo-banner"><span className="status-dot" /> Демо-данные · API подключится автоматически, когда backend будет доступен <span className="demo-banner-detail">{apiError ? `(${apiError})` : ''}</span></div>}
         {provenanceNotice && (
           <div className="demo-banner">
             <span className="status-dot" />
             {provenanceNotice}
           </div>
         )}
-        {source === 'api' && apiError && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
+        {source === 'api' && apiError && route !== '/situation/audit' && <div className="error-banner"><span className="status-dot" /> API недоступен · {apiError}</div>}
         <div className="page-wrap">
           <PageHeader {...title} route={route} filters={filters} onFiltersChange={setFilters} filterOptions={data?.filterOptions} />
-          {loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onRefresh={refreshDashboard} onToast={showToast} filters={filters} onFiltersChange={setFilters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
+          {route === '/situation/audit' ? <AuditLogPage /> : loading ? <LoadingState /> : data ? <RouteContent route={route} data={data} onDataChange={setData} onRefresh={refreshDashboard} onToast={showToast} filters={filters} onFiltersChange={setFilters} onDrilldown={openDrilldown} drilldown={drilldown} drilldownLoading={drilldownLoading} /> : <ErrorState onRetry={() => window.location.reload()} />}
         </div>
       </main>
       {toast && <div role="status" aria-live="polite" className="toast"><span className="toast-check"><Icon name="check" size={15} /></span>{toast}<button aria-label="Закрыть уведомление" className="icon-button toast-close" onClick={() => setToast(null)}><Icon name="close" size={15} /></button></div>}
@@ -294,7 +299,7 @@ function PageHeader({ eyebrow, title, description, route, filters, onFiltersChan
   const showPeriodButtons = route !== '/situation/forecast'
   return <div className="page-header">
     <div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>
-    {route !== '/operator' && <div className="period-control">
+    {route !== '/operator' && route !== '/situation/audit' && <div className="period-control">
       {showPeriodButtons && <div className="period-buttons">{[['7d', '7 дней'], ['30d', '30 дней'], ['90d', '90 дней']].map(([value, label]) => <button key={value} className={`period-button ${filters.range === value ? 'active' : ''}`} onClick={() => onFiltersChange({ ...filters, range: value })}>{label}</button>)}</div>}
       {situation && filterOptions && <div className="analytics-filter-selects">
         <label><span>Регион</span><select value={filters.regionId ?? ''} onChange={(event) => onFiltersChange({ ...filters, regionId: event.target.value || undefined })}><option value="">Все регионы</option>{filterOptions.regions.map((option) => <option value={option.id} key={option.id}>{option.label}</option>)}</select></label>
@@ -308,7 +313,7 @@ function PageHeader({ eyebrow, title, description, route, filters, onFiltersChan
   </div>
 }
 
-function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, onFiltersChange, onDrilldown, drilldown, drilldownLoading }: { route: Route; data: DashboardData; onDataChange: (data: DashboardData) => void; onRefresh: () => Promise<void>; onToast: (message: string) => void; filters: DashboardFilters; onFiltersChange: (filters: DashboardFilters) => void; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
+function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, onFiltersChange, onDrilldown, drilldown, drilldownLoading }: { route: Exclude<Route, '/situation/audit'>; data: DashboardData; onDataChange: (data: DashboardData) => void; onRefresh: () => Promise<void>; onToast: (message: string) => void; filters: DashboardFilters; onFiltersChange: (filters: DashboardFilters) => void; onDrilldown: DrilldownHandler; drilldown: DrilldownState; drilldownLoading: boolean }) {
   let content: ReactElement
   switch (route) {
     case '/operator': content = <OperatorPage tickets={data.tickets} overview={data.overview} taxonomy={data.filterOptions} onDataChange={(tickets) => onDataChange({ ...data, tickets })} onToast={onToast} />; break

@@ -764,6 +764,28 @@ export async function loadAnalyticsDrilldown(dimension: DrilldownDimension, valu
   return request<{ items: AnalyticsDrilldownTicket[]; total: number; limit: number; offset: number }>(`/analytics/drilldown?${params.toString()}`)
 }
 
+export interface AuditLogEvent {
+  id: number
+  actor_id: string | null
+  action: string
+  entity_type: string
+  entity_id: string | null
+  request_id: string | null
+  created_at: string
+}
+
+export interface AuditLogPage {
+  items: AuditLogEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export async function loadAuditLog(limit = 50, offset = 0) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return request<AuditLogPage>(`/audit?${params.toString()}`)
+}
+
 export interface QueryIntentResult {
   intent: 'count' | 'trend' | 'compare_regions' | 'top_topics' | 'spikes' | 'forecast'
   summary: { label: string; value: number | null; text: string }
