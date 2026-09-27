@@ -472,6 +472,14 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         f"candidate rejection failed or did not persist its note: {rejected}",
     )
     candidate_model_version = str(rejected.get("candidate_model_version") or "")
+    candidate_dataset_version = str(rejected.get("dataset_version") or "")
+    expect(
+        candidate_model_version
+        and candidate_model_version == evaluation.get("candidate_model_version")
+        and candidate_dataset_version
+        and candidate_dataset_version == evaluation.get("candidate_dataset_version"),
+        f"candidate evaluation lineage does not match the rejected cycle: {evaluation}",
+    )
     status, _, rejected_model = json_request(
         base_url,
         "GET",
@@ -482,6 +490,17 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     expect(
         status == 200 and str(rejected_model.get("status", "")).upper() == "REJECTED",
         f"candidate model registry did not persist REJECTED status: {rejected_model}",
+    )
+    expect(
+        rejected_model.get("dataset_version") == candidate_dataset_version,
+        f"candidate model registry lost dataset lineage: {rejected_model}",
+    )
+    expected_model_family = (
+        "deterministic-demo-candidate" if fake_trainer else "multinomial-naive-bayes"
+    )
+    expect(
+        rejected_model.get("model_family") == expected_model_family,
+        f"candidate was not produced by the expected training adapter: {rejected_model}",
     )
     status, _, learning_after_rejection = json_request(
         base_url,
