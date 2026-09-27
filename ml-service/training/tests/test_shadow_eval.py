@@ -79,6 +79,14 @@ class ShadowEvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "versions, window or identity"):
                 evaluate()
 
+            input_path.write_text("", encoding="utf-8")
+            empty = evaluate_shadow(input_path, policy_path, cycle_id="cycle_1",
+                                    production_model_version="production_v1",
+                                    candidate_model_version="candidate_v1")
+            self.assertEqual(empty["status"], "INSUFFICIENT_EVIDENCE")
+            self.assertEqual(empty["sample_count"], 0)
+            self.assertIsNone(empty["candidate_agreement"])
+
 
 if __name__ == "__main__":
     unittest.main()

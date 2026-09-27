@@ -92,14 +92,13 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
             seen_feedback.add(row.feedback_id)
             seen_tickets.add(row.ticket_id)
             rows.append(row)
-    if not rows:
-        raise ValueError("shadow evaluation input is empty")
-
     per_topic: dict[str, list[ShadowRecord]] = defaultdict(list)
     for row in rows:
         per_topic[row.operator_confirmed_decision.topic_id].append(row)
 
-    def agreement(items: list[ShadowRecord], model: str) -> float:
+    def agreement(items: list[ShadowRecord], model: str) -> float | None:
+        if not items:
+            return None
         return round(sum(getattr(row, model).topic_id == row.operator_confirmed_decision.topic_id
                          for row in items) / len(items), 6)
 
@@ -127,8 +126,10 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
     sufficient = (len(rows) >= policy.min_samples and
                   origin_counts.get("real", 0) >= policy.min_real_samples and
                   not insufficient_topics)
-    correction_rate_delta = round(production_agreement - candidate_agreement, 6)
-    global_regression = correction_rate_delta > policy.max_correction_rate_increase
+    correction_rate_delta = (round(production_agreement - candidate_agreement, 6)
+                             if production_agreement is not None and candidate_agreement is not None else None)
+    global_regression = (correction_rate_delta is not None and
+                         correction_rate_delta > policy.max_correction_rate_increase)
     status = "VALID" if sufficient else "INSUFFICIENT_EVIDENCE"
     decision = ("INSUFFICIENT_EVIDENCE" if not sufficient else
                 "NO_GO_CRITICAL_REGRESSION" if regressions else
@@ -152,8 +153,8 @@ def evaluate_shadow(rows_path: Path, policy_path: Path, *, cycle_id: str,
         "origin_counts": origin_counts,
         "production_agreement": production_agreement,
         "candidate_agreement": candidate_agreement,
-        "production_correction_rate": round(1 - production_agreement, 6),
-        "candidate_correction_rate": round(1 - candidate_agreement, 6),
+        "production_correction_rate": round(1 - production_agreement, 6) if production_agreement is not None else None,
+        "candidate_correction_rate": round(1 - candidate_agreement, 6) if candidate_agreement is not None else None,
         "correction_rate_delta": correction_rate_delta,
         "global_regression": global_regression,
         "by_topic": by_topic,

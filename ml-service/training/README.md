@@ -266,9 +266,38 @@ report with a critical or global correction-rate regression gets a `NO_GO`
 decision. Only a `VALID` report without regressions can contribute to
 promotion evidence.
 Core and the offline worker capture candidate shadow predictions for fresh
-tickets when a trained candidate and offline report exist. A reviewed paired
-export and persistence of the final shadow report are still required; this
-evaluator does not manufacture that input from existing customer CSVs.
+tickets when a trained candidate and offline report exist. Export verified
+pairs from PostgreSQL after the policy window has closed:
+
+```bash
+DATABASE_URL="$DATABASE_URL" .venv/bin/python scripts/export_classifier_shadow.py \
+  --cycle-id cycle_1 --policy /path/to/approved-shadow-policy.json \
+  --review-links /path/to/approved-text-links.jsonl \
+  --output data/processed/reports/cycle_1-shadow-input.jsonl
+```
+
+The export requires one dataset link, valid source checksums, a production
+prediction before the candidate prediction, and exactly one later operator
+decision inside the same window. Real-origin rows also require an approved
+text checksum matching the ticket text; without review links they are excluded.
+The output contains no ticket text. Missing or ambiguous rows appear only in
+the rejected-count summary. An empty export reports `INSUFFICIENT_EVIDENCE`.
+
+To calculate and store the report in the candidate's `model_evaluations` row,
+run the combined command. It re-reads PostgreSQL and recomputes the export in
+one transaction, so it does not trust a supplied JSONL for promotion evidence:
+
+```bash
+DATABASE_URL="$DATABASE_URL" .venv/bin/python scripts/record_classifier_shadow_report.py \
+  --cycle-id cycle_1 --policy /path/to/approved-shadow-policy.json \
+  --review-links /path/to/approved-text-links.jsonl
+```
+
+The Core candidate-evaluation endpoint then exposes the stored offline and
+shadow reports to an ML reviewer. Valid matching offline and shadow reports
+set `READY_TO_REVIEW`; promotion still requires a separate human decision. The
+available customer CSVs have no original appeal text, so generated texts must
+not be approved as real-origin rows.
 
 ## Retrieval baselines
 
