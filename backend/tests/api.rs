@@ -32,6 +32,21 @@ async fn demo_api_supports_preview_and_manager_analytics() {
         .await
         .unwrap();
     assert_eq!(analytics.status(), 200);
+    let analytics: serde_json::Value =
+        serde_json::from_slice(&to_bytes(analytics.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(
+        analytics["runtime_metrics"]["operator_decision_time_samples"],
+        1
+    );
+    assert!(
+        analytics["runtime_metrics"]["operator_decision_time_minutes"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    assert!(analytics["runtime_metrics"]["similarity_usefulness"].is_null());
+    assert!(analytics["runtime_metrics"]["duplicate_precision"].is_null());
 }
 
 #[tokio::test]
@@ -337,6 +352,7 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
         .oneshot(
             Request::post("/api/v1/assist/ticket-001/correct")
                 .header("x-pulse-role", "OPERATOR")
+                .header("x-user-id", "operator-task-010")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"topic_id":"TOPIC-ROADS","service":"service_other","priority":"critical"}"#,
@@ -350,6 +366,24 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
         serde_json::from_slice(&to_bytes(corrected.into_body(), usize::MAX).await.unwrap())
             .unwrap();
     assert_eq!(corrected["prediction"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(corrected["decision"]["predicted_topic_id"], "TOPIC-WATER");
+    assert_eq!(
+        corrected["decision"]["model_version"],
+        corrected["prediction"]["model_version"]
+    );
+    assert!(!corrected["decision"]["predicted_service"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+    assert!(!corrected["decision"]["predicted_priority"]
+        .as_str()
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(corrected["decision"]["user_id"], "operator-task-010");
+    assert_eq!(
+        corrected["ticket"]["updated_at"],
+        corrected["decision"]["created_at"]
+    );
     assert_eq!(corrected["decision"]["priority"], "critical");
     assert_eq!(corrected["decision"]["service"], "Другая служба");
     assert_eq!(
@@ -377,7 +411,9 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
         .unwrap();
     let detail: serde_json::Value =
         serde_json::from_slice(&to_bytes(detail.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(detail["ticket"]["topic_id"], "TOPIC-ROADS");
+    assert_eq!(detail["ticket"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(detail["ticket"]["priority"], "high");
+    assert_eq!(detail["ticket"]["status"], "open");
     assert_eq!(detail["prediction"]["topic_id"], "TOPIC-WATER");
     assert_eq!(
         detail["prediction"]["service_provenance"]["source"],
@@ -388,6 +424,18 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
         "MANUAL"
     );
     assert_eq!(detail["latest_decision"]["priority"], "critical");
+    assert_eq!(
+        detail["latest_decision"]["confirmed_topic_id"],
+        "TOPIC-ROADS"
+    );
+    assert_eq!(
+        detail["latest_decision"]["confirmed_topic_label"],
+        "Дороги и благоустройство"
+    );
+    assert_eq!(
+        detail["latest_decision"]["model_version"],
+        detail["prediction"]["model_version"]
+    );
     assert_eq!(detail["latest_decision"]["service"], "Другая служба");
     assert_eq!(
         detail["latest_decision"]["priority_provenance"]["source"],
@@ -411,6 +459,112 @@ async fn corrected_decision_updates_template_without_rewriting_prediction() {
         preview["response_template"]["id"],
         "template-ru-topic-roads"
     );
+    assert_eq!(preview["ticket"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(preview["ticket"]["priority"], "high");
+    assert_eq!(preview["ticket"]["status"], "open");
+    assert_eq!(preview["prediction"]["topic_id"], "TOPIC-WATER");
+    let related_tickets = preview["similar_tickets"].as_array().unwrap();
+    assert!(!related_tickets.is_empty());
+    assert!(related_tickets
+        .iter()
+        .all(|candidate| candidate["topic_id"] == "TOPIC-ROADS"));
+}
+
+#[tokio::test]
+async fn analytics_aggregates_operator_corrections_and_human_relation_feedback() {
+    let application = app(AppState::demo());
+    let corrected = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/assist/ticket-001/correct")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"topic_id":"TOPIC-ROADS","service":"service_other","priority":"critical"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(corrected.status(), 200);
+
+    for (related_ticket_id, decision) in [("ticket-002", "CONFIRMED"), ("ticket-003", "REJECTED")] {
+        let body = serde_json::json!({
+            "related_ticket_id": related_ticket_id,
+            "relation": "DUPLICATE",
+            "decision": decision,
+        })
+        .to_string();
+        let feedback = application
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/tickets/ticket-001/relation-feedback")
+                    .header("x-pulse-role", "OPERATOR")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(feedback.status(), 201);
+    }
+
+    let response = application
+        .oneshot(
+            Request::get("/api/v1/analytics")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let analytics: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let metrics = &analytics["runtime_metrics"];
+
+    assert_eq!(metrics["operator_decision_time_samples"], 2);
+    assert!(metrics["operator_decision_time_minutes"].as_f64().unwrap() > 0.0);
+    assert_eq!(metrics["classification_decisions"], 2);
+    assert_eq!(metrics["classification_corrections"], 1);
+    assert_eq!(metrics["classification_correction_rate"], 0.5);
+    assert_eq!(metrics["routing_decisions"], 2);
+    assert_eq!(metrics["routing_corrections"], 1);
+    assert_eq!(metrics["routing_correction_rate"], 0.5);
+    assert_eq!(metrics["priority_decisions"], 2);
+    assert_eq!(metrics["priority_corrections"], 1);
+    assert_eq!(metrics["priority_correction_rate"], 0.5);
+    assert_eq!(metrics["similarity_feedback_count"], 2);
+    assert_eq!(metrics["similarity_usefulness"], 0.5);
+    assert_eq!(metrics["duplicate_feedback_count"], 2);
+    assert_eq!(metrics["duplicate_precision"], 0.5);
+}
+
+#[tokio::test]
+async fn topic_correction_recomputes_confirmed_routing_without_mutating_source_ticket() {
+    let response = app(AppState::demo())
+        .oneshot(
+            Request::post("/api/v1/assist/ticket-001/correct")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"topic_id":"TOPIC-ROADS"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let response: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    assert_eq!(response["prediction"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(response["prediction"]["recommended_service"], "Водоканал");
+    assert_eq!(response["prediction"]["predicted_priority"], "high");
+    assert_eq!(response["decision"]["confirmed_topic_id"], "TOPIC-ROADS");
+    assert_eq!(response["decision"]["service"], "Городская инфраструктура");
+    assert_eq!(response["decision"]["priority"], "medium");
+    assert_eq!(response["ticket"]["topic_id"], "TOPIC-WATER");
+    assert_eq!(response["ticket"]["priority"], "high");
+    assert_eq!(response["ticket"]["status"], "open");
 }
 
 #[tokio::test]

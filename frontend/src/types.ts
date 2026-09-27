@@ -162,6 +162,24 @@ export interface DatasetProvenance {
   dataset_version_count: number
 }
 
+export interface OperatorRuntimeMetrics {
+  operatorDecisionTimeMinutes: number | null
+  operatorDecisionTimeSamples: number
+  classificationCorrectionRate: number | null
+  classificationCorrections: number
+  classificationDecisions: number
+  routingCorrectionRate: number | null
+  routingCorrections: number
+  routingDecisions: number
+  priorityCorrectionRate: number | null
+  priorityCorrections: number
+  priorityDecisions: number
+  similarityUsefulness: number | null
+  similarityFeedbackCount: number
+  duplicatePrecision: number | null
+  duplicateFeedbackCount: number
+}
+
 export interface DashboardData {
   tickets: Ticket[]
   overview: {
@@ -176,6 +194,7 @@ export interface DashboardData {
     avgDecisionMinutes?: number
     changePct?: number
   }
+  operatorMetrics: OperatorRuntimeMetrics
   regions: RegionMetric[]
   topics: TopicMetric[]
   alerts: Alert[]

@@ -128,6 +128,20 @@ export function mapRelatedFactors(factors?: readonly string[]) {
   }))]
 }
 
+export function formatRuntimeRate(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value) || value < 0 || value > 1) return '—'
+  return `${Math.round(value * 100)}%`
+}
+
+export function formatDecisionTime(value: number | null | undefined, emptyLabel = '—') {
+  if (value == null || !Number.isFinite(value) || value < 0) return emptyLabel
+  const totalMinutes = Math.round(value)
+  if (totalMinutes < 60) return `${totalMinutes} мин`
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return minutes ? `${hours} ч ${minutes} мин` : `${hours} ч`
+}
+
 function isKnownIdentifier(value?: string) {
   const normalized = value?.trim().toLowerCase()
   return Boolean(normalized && normalized !== 'unknown' && normalized !== 'unavailable')

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../src/operator.ts'
+import { combineRelatedCandidates, formatDecisionTime, formatRuntimeRate, mapRelatedFactors, mapTicketChannel, matchingTicketFactors, topRelatedCandidates } from '../src/operator.ts'
 
 test('maps recognized sources and makes unknown sources visible', () => {
   assert.equal(mapTicketChannel('mobile'), 'Мобильное приложение')
@@ -85,4 +85,18 @@ test('maps only supported relation factors to operator-facing explanations', () 
     'Совпадает тема',
     'В пределах 30 дней',
   ])
+})
+
+test('formats runtime rates and leaves missing event metrics unknown', () => {
+  assert.equal(formatRuntimeRate(0.375), '38%')
+  assert.equal(formatRuntimeRate(0), '0%')
+  assert.equal(formatRuntimeRate(null), '—')
+  assert.equal(formatRuntimeRate(1.2), '—')
+})
+
+test('formats decision time without inventing a zero for missing samples', () => {
+  assert.equal(formatDecisionTime(42.4), '42 мин')
+  assert.equal(formatDecisionTime(91), '1 ч 31 мин')
+  assert.equal(formatDecisionTime(null), '—')
+  assert.equal(formatDecisionTime(undefined, 'нет решений'), 'нет решений')
 })

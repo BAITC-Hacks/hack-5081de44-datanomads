@@ -1002,13 +1002,17 @@ components:
         note: { type: string, maxLength: 2000 }
     OperatorDecision:
       type: object
-      required: [id, ticket_id, action, predicted_topic_id, confirmed_topic_id, service, priority, service_provenance, priority_provenance, note, user_id, created_at]
+      required: [id, ticket_id, action, predicted_topic_id, confirmed_topic_id, confirmed_topic_label, service, priority, service_provenance, priority_provenance, note, user_id, created_at]
       properties:
         id: { type: string }
         ticket_id: { type: string }
         action: { type: string, enum: [confirm, correct] }
         predicted_topic_id: { type: string }
+        predicted_service: { type: string, description: Original routing recommendation captured with this decision. }
+        predicted_priority: { type: string, description: Original priority recommendation captured with this decision. }
+        model_version: { type: string, description: Model version that produced the original prediction. }
         confirmed_topic_id: { type: string }
+        confirmed_topic_label: { type: string, description: Human-readable label for the operator-confirmed topic. }
         service: { type: string }
         priority: { type: string }
         service_provenance: { $ref: '#/components/schemas/RuleProvenance' }
@@ -1118,13 +1122,52 @@ components:
         created_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time, nullable: true }
         updated_at: { type: string, format: date-time }
+    RuntimeMetrics:
+      type: object
+      required: [operator_decision_time_minutes, operator_decision_time_samples, classification_correction_rate, classification_corrections, classification_decisions, routing_correction_rate, routing_corrections, routing_decisions, priority_correction_rate, priority_corrections, priority_decisions, similarity_usefulness, similarity_feedback_count, duplicate_precision, duplicate_feedback_count]
+      properties:
+        operator_decision_time_minutes: { type: number, nullable: true, minimum: 0, description: Average minutes from ticket creation to the first operator decision; null when there are no samples. }
+        operator_decision_time_samples: { type: integer, minimum: 0 }
+        classification_correction_rate: { type: number, nullable: true, minimum: 0, maximum: 1 }
+        classification_corrections: { type: integer, minimum: 0 }
+        classification_decisions: { type: integer, minimum: 0 }
+        routing_correction_rate: { type: number, nullable: true, minimum: 0, maximum: 1 }
+        routing_corrections: { type: integer, minimum: 0 }
+        routing_decisions: { type: integer, minimum: 0 }
+        priority_correction_rate: { type: number, nullable: true, minimum: 0, maximum: 1 }
+        priority_corrections: { type: integer, minimum: 0 }
+        priority_decisions: { type: integer, minimum: 0 }
+        similarity_usefulness: { type: number, nullable: true, minimum: 0, maximum: 1, description: Confirmed relation feedback divided by all reviewed relation suggestions. }
+        similarity_feedback_count: { type: integer, minimum: 0 }
+        duplicate_precision: { type: number, nullable: true, minimum: 0, maximum: 1, description: Human-confirmed duplicate suggestions divided by reviewed duplicate suggestions. }
+        duplicate_feedback_count: { type: integer, minimum: 0 }
     AnalyticsOverview:
       type: object
+      required: [generated_at, source, range, overview, runtime_metrics, by_region, by_topic, time_series]
       properties:
-        total_tickets: { type: integer }
+        generated_at: { type: string, format: date-time }
+        source: { type: string }
+        range: { type: string }
+        overview:
+          type: object
+          required: [total_tickets, open_tickets, resolved_tickets, high_priority_tickets, operator_decisions, confirmed_decisions, corrected_decisions, avg_decision_minutes, average_confidence]
+          properties:
+            total_tickets: { type: integer }
+            open_tickets: { type: integer }
+            resolved_tickets: { type: integer }
+            high_priority_tickets: { type: integer }
+            operator_decisions: { type: integer }
+            confirmed_decisions: { type: integer }
+            corrected_decisions: { type: integer }
+            avg_decision_minutes: { type: number, nullable: true, minimum: 0 }
+            average_confidence: { type: number }
+            previous_total_tickets: { type: integer }
+            change_abs: { type: integer }
+            change_pct: { type: number, nullable: true }
+        runtime_metrics: { $ref: '#/components/schemas/RuntimeMetrics' }
         by_region: { type: array, items: { type: object, additionalProperties: true } }
         by_topic: { type: array, items: { type: object, additionalProperties: true } }
-        series: { type: array, items: { type: object, additionalProperties: true } }
+        time_series: { type: array, items: { type: object, additionalProperties: true } }
     QueryIntent:
       type: object
       description: Provide either an allow-listed intent or a natural-language text question; Core infers and validates the same strict intent set.

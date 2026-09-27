@@ -6,6 +6,7 @@ import { DataChart } from './components/DataChart'
 import type { EChartsOption } from 'echarts'
 import { languageLabel, languageReviewNotice } from './language'
 import { confidenceStateLabel, confidenceStateNotice, normalizeConfidenceState } from './classification'
+import { formatDecisionTime, formatRuntimeRate } from './operator'
 
 type Route =
   | '/operator'
@@ -400,7 +401,7 @@ function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToast }: { 
   }
 
   const confirmationRate = overview.operatorDecisions ? Math.round((overview.confirmedDecisions / overview.operatorDecisions) * 100) : 0
-  const decisionLatency = overview.avgDecisionMinutes && overview.avgDecisionMinutes > 0 ? `${Math.round(overview.avgDecisionMinutes)} мин` : 'нет решений'
+  const decisionLatency = formatDecisionTime(overview.avgDecisionMinutes, 'нет решений')
   return <div className="operator-page">
     <div className="operator-summary"><div className="summary-item"><span className="summary-value">{filtered.length}</span><span className="summary-label">обращений в загруженной выборке</span><span className="summary-trend">по текущим фильтрам</span></div><div className="summary-item"><span className="summary-value">{confirmationRate}%</span><span className="summary-label">подтверждение без правок</span><span className="summary-trend">{overview.confirmedDecisions} из {overview.operatorDecisions}</span></div><div className="summary-item"><span className="summary-value">{decisionLatency}</span><span className="summary-label">среднее до решения</span><span className="summary-trend">по данным решений</span></div><div className="summary-item summary-signal"><span className="signal-wave"><i /><i /><i /><i /><i /></span><span><span className="summary-label">Система</span><span className="summary-sub">Рабочие данные доступны</span></span></div></div>
     <div className="workbench-grid">
@@ -825,6 +826,7 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
   const [queryLoading, setQueryLoading] = useState(false)
   const total = data.overview.totalTickets
   const highPriority = data.overview.highPriorityTickets
+  const metrics = data.operatorMetrics
   const queryRows = queryResult?.rows ?? queryResult?.result?.points ?? []
   const queryTitle = queryResult ? ({
     count: 'Количество обращений',
@@ -855,6 +857,18 @@ function OverviewPage({ data, filters, onNavigate, onDrilldown }: { data: Dashbo
       <MetricCard label="Решения оператора" value={String(data.overview.operatorDecisions)} change={`${data.overview.confirmedDecisions} подтверждено · ${data.overview.correctedDecisions} исправлено`} detail="по данным решений" tone="amber" icon="clock" />
       <MetricCard label="Аномальные сигналы" value={String(data.alerts.length)} change="обнаружено системой" detail="текущий срез" tone="blue" icon="bell" />
     </div>
+    <section className="panel runtime-metrics-panel" aria-label="Время решений и качество обратной связи">
+      <PanelHeading title="Время решений и качество обратной связи" />
+      <p className="panel-note">Метрики считаются по решениям и relation feedback операторов; «—» означает, что для показателя пока нет событий в выборке.</p>
+      <div className="runtime-metrics-grid">
+        <MetricCard label="Время до первого решения" value={formatDecisionTime(metrics.operatorDecisionTimeMinutes)} change={metrics.operatorDecisionTimeSamples ? `${metrics.operatorDecisionTimeSamples} решений` : 'нет решений'} detail="Среднее от создания обращения" tone="blue" icon="clock" />
+        <MetricCard label="Исправление темы" value={formatRuntimeRate(metrics.classificationCorrectionRate)} change={metrics.classificationDecisions ? `${metrics.classificationCorrections} / ${metrics.classificationDecisions}` : 'нет классификаций'} detail="Доля изменённых тем" tone="amber" icon="edit" />
+        <MetricCard label="Исправление маршрута" value={formatRuntimeRate(metrics.routingCorrectionRate)} change={metrics.routingDecisions ? `${metrics.routingCorrections} / ${metrics.routingDecisions}` : 'нет решений с маршрутом'} detail="Доля изменённых служб" tone="rose" icon="arrow" />
+        <MetricCard label="Исправление приоритета" value={formatRuntimeRate(metrics.priorityCorrectionRate)} change={metrics.priorityDecisions ? `${metrics.priorityCorrections} / ${metrics.priorityDecisions}` : 'нет решений с приоритетом'} detail="Доля изменённого приоритета" tone="amber" icon="pulse" />
+        <MetricCard label="Полезность сходства" value={formatRuntimeRate(metrics.similarityUsefulness)} change={metrics.similarityFeedbackCount ? `${metrics.similarityFeedbackCount} оценок` : 'нет оценок'} detail="Подтверждения среди оценок связи" tone="mint" icon="search" />
+        <MetricCard label="Precision дубликатов" value={formatRuntimeRate(metrics.duplicatePrecision)} change={metrics.duplicateFeedbackCount ? `${metrics.duplicateFeedbackCount} оценок` : 'нет оценок'} detail="Подтверждения среди проверок дубликата" tone="blue" icon="check" />
+      </div>
+    </section>
     <div className="analytics-grid overview-grid">
       <section className="panel span-two"><PanelHeading title="Поток обращений" action="Временная динамика" onClick={() => onNavigate('/situation/time-series')} />{data.timeSeries.length ? <div className="region-table"><div className="region-table-head"><span>Дата</span><span>Обращения</span><span>Закрыто</span><span>Доля</span></div>{data.timeSeries.slice(-7).map((point) => <button className="region-table-row drilldown-row" key={point.date} onClick={() => onDrilldown('date', point.date, `Дата: ${point.date}`)}><strong>{point.date}</strong><span>{point.tickets}</span><span>{point.resolved}</span><span>{point.tickets ? `${Math.round(point.resolved / point.tickets * 100)}%` : '—'}</span></button>)}</div> : <NoData message="За выбранный период нет обращений." />}</section>
       <section className="panel"><PanelHeading title="Темы" action="Все темы" onClick={() => onNavigate('/situation/topics')} />{data.topics.length ? <div className="topic-bars">{data.topics.slice(0, 5).map((topic) => <button className="topic-bar-row drilldown-row" key={topic.name} onClick={() => onDrilldown('topic', topic.id, `Тема: ${topic.name}`)}><div className="topic-bar-label"><span>{topic.name}</span><strong>{topic.value}%</strong></div><div className="bar-track"><span style={{ width: String(topic.value * 2.7) + '%', background: topic.color }} /></div></button>)}</div> : <NoData message="Нет данных по темам." />}</section>

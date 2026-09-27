@@ -311,7 +311,14 @@ pub struct OperatorDecision {
     pub ticket_id: String,
     pub action: String,
     pub predicted_topic_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicted_service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub predicted_priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
     pub confirmed_topic_id: String,
+    pub confirmed_topic_label: String,
     pub service: String,
     pub priority: String,
     pub service_provenance: RuleProvenance,
@@ -1123,6 +1130,14 @@ impl Store {
         .map(|model| (model.id.clone(), model))
         .collect();
 
+        let demo_confirmed_topic_label = topic_label(&topics, "TOPIC-ROADS");
+        let demo_decision_prediction = predictions.get("ticket-002");
+        let demo_predicted_service =
+            demo_decision_prediction.map(|prediction| prediction.recommended_service.clone());
+        let demo_predicted_priority =
+            demo_decision_prediction.map(|prediction| prediction.predicted_priority.clone());
+        let demo_model_version =
+            demo_decision_prediction.map(|prediction| prediction.model_version.clone());
         Self {
             regions,
             topics,
@@ -1133,7 +1148,11 @@ impl Store {
                 ticket_id: "ticket-002".to_owned(),
                 action: "correct".to_owned(),
                 predicted_topic_id: "TOPIC-ROADS".to_owned(),
+                predicted_service: demo_predicted_service,
+                predicted_priority: demo_predicted_priority,
+                model_version: demo_model_version,
                 confirmed_topic_id: "TOPIC-ROADS".to_owned(),
+                confirmed_topic_label: demo_confirmed_topic_label,
                 service: "Городская инфраструктура".to_owned(),
                 priority: "high".to_owned(),
                 service_provenance: RuleProvenance::manual("Демо-решение оператора"),
@@ -1941,11 +1960,7 @@ pub(crate) fn related_ticket_candidate(
 }
 
 // Offline fixture-only related-ticket behavior. Real mode uses Qdrant vector search.
-fn demo_related_tickets(
-    store: &Store,
-    ticket: &Ticket,
-    prediction: &Prediction,
-) -> Vec<SimilarTicket> {
+fn demo_related_tickets(store: &Store, ticket: &Ticket, topic_id: &str) -> Vec<SimilarTicket> {
     let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
         .ok()
         .map(|value| value.with_timezone(&Utc));
@@ -1953,7 +1968,7 @@ fn demo_related_tickets(
         .tickets
         .values()
         .filter(|candidate| candidate.id != ticket.id)
-        .filter(|candidate| candidate.topic_id == prediction.topic_id)
+        .filter(|candidate| candidate.topic_id == topic_id)
         .take(5)
         .enumerate()
         .filter_map(|(index, candidate)| {
@@ -1963,7 +1978,7 @@ fn demo_related_tickets(
             related_ticket_candidate(
                 candidate.id.clone(),
                 (0.91 - index as f32 * 0.11).max(0.5),
-                &ticket.topic_id,
+                topic_id,
                 &ticket.region_id,
                 current_created_at.as_ref(),
                 candidate.topic_id.clone(),
@@ -2118,11 +2133,19 @@ async fn assist_preview(
             .unwrap_or_else(|| prediction_for_ticket(&ticket, &store.topics))
     };
     let classification_latency_ms = classification_started.elapsed().as_secs_f64() * 1000.0;
+    let latest_decision = store
+        .decisions
+        .iter()
+        .rev()
+        .find(|decision| decision.ticket_id == ticket.id);
+    let downstream_topic_id = latest_decision
+        .map(|decision| decision.confirmed_topic_id.as_str())
+        .unwrap_or(&prediction.topic_id);
     let related_started = Instant::now();
     let related = if uncertain_language {
         Vec::new()
     } else {
-        demo_related_tickets(&store, &ticket, &prediction)
+        demo_related_tickets(&store, &ticket, downstream_topic_id)
     };
     let retrieval_latency_ms = related_started.elapsed().as_secs_f64() * 1000.0;
     let duplicate_candidates = related
@@ -2135,11 +2158,7 @@ async fn assist_preview(
         .filter(|item| item.relation == "repeat")
         .cloned()
         .collect();
-    let template_topic = store
-        .decisions
-        .iter()
-        .rev()
-        .find(|decision| decision.ticket_id == ticket.id)
+    let template_topic = latest_decision
         .map(|decision| decision.confirmed_topic_id.as_str())
         .unwrap_or(&prediction.topic_id);
     let template_started = Instant::now();
@@ -2153,10 +2172,7 @@ async fn assist_preview(
     if !uncertain_language {
         model_versions.insert("classifier".to_owned(), prediction.model_version.clone());
     }
-    let has_human_decision = store
-        .decisions
-        .iter()
-        .any(|decision| decision.ticket_id == ticket.id);
+    let has_human_decision = latest_decision.is_some();
     let stages = vec![
         AssistStage {
             name: "language".to_owned(),
@@ -2486,18 +2502,15 @@ async fn apply_decision(
         .unwrap_or_else(|| service_for_topic(&topic_id).to_owned());
     let priority = request
         .priority
-        .unwrap_or_else(|| prediction.predicted_priority.clone());
+        .unwrap_or_else(|| priority_for_topic(&topic_id).to_owned());
     let confirmed_topic_label = topic_label(&store.topics, &topic_id);
+    let decision_at = Utc::now().to_rfc3339();
     {
         let ticket = store
             .tickets
             .get_mut(&ticket_id)
             .ok_or_else(|| ApiError::NotFound(format!("ticket {ticket_id} not found")))?;
-        ticket.topic_id = topic_id.clone();
-        ticket.topic_label = confirmed_topic_label;
-        ticket.priority = priority.clone();
-        ticket.status = "triaged".to_owned();
-        ticket.updated_at = DEMO_TIMESTAMP.to_owned();
+        ticket.updated_at = decision_at.clone();
     }
     let note = request.note;
     let decision_id = format!("decision-{:03}", store.next_decision_number);
@@ -2507,7 +2520,11 @@ async fn apply_decision(
         ticket_id: ticket_id.clone(),
         action: action.to_owned(),
         predicted_topic_id: prediction.topic_id.clone(),
+        predicted_service: Some(prediction.recommended_service.clone()),
+        predicted_priority: Some(prediction.predicted_priority.clone()),
+        model_version: Some(prediction.model_version.clone()),
         confirmed_topic_id: topic_id,
+        confirmed_topic_label,
         service,
         priority,
         service_provenance: RuleProvenance::manual(if service_overridden {
@@ -2522,7 +2539,7 @@ async fn apply_decision(
         }),
         note,
         user_id: actor.user_id.clone(),
-        created_at: DEMO_TIMESTAMP.to_owned(),
+        created_at: decision_at.clone(),
     };
     store.decisions.push(decision.clone());
     if let Some(cycle_id) = store
@@ -2543,13 +2560,13 @@ async fn apply_decision(
             comment: decision.note.clone(),
             suggestion: None,
             user_id: decision.user_id.clone(),
-            created_at: DEMO_TIMESTAMP.to_owned(),
+            created_at: decision_at.clone(),
         };
         store.next_feedback_number += 1;
         store.learning_feedback.push(feedback);
         if let Some(cycle) = store.learning_cycles.get_mut(&cycle_id) {
             cycle.feedback_count += 1;
-            cycle.updated_at = DEMO_TIMESTAMP.to_owned();
+            cycle.updated_at = decision_at;
         }
     }
     let ticket = store
@@ -2626,9 +2643,33 @@ pub struct AnalyticsResponse {
     pub source: String,
     pub range: String,
     pub overview: Value,
+    pub runtime_metrics: RuntimeMetrics,
     pub by_region: Vec<MetricBucket>,
     pub by_topic: Vec<MetricBucket>,
     pub time_series: Vec<TimeSeriesPoint>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RuntimeMetrics {
+    pub operator_decision_time_minutes: Option<f64>,
+    pub operator_decision_time_samples: usize,
+    pub classification_correction_rate: Option<f64>,
+    pub classification_corrections: usize,
+    pub classification_decisions: usize,
+    pub routing_correction_rate: Option<f64>,
+    pub routing_corrections: usize,
+    pub routing_decisions: usize,
+    pub priority_correction_rate: Option<f64>,
+    pub priority_corrections: usize,
+    pub priority_decisions: usize,
+    pub similarity_usefulness: Option<f64>,
+    pub similarity_feedback_count: usize,
+    pub duplicate_precision: Option<f64>,
+    pub duplicate_feedback_count: usize,
+}
+
+pub(crate) fn metric_rate(numerator: usize, denominator: usize) -> Option<f64> {
+    (denominator > 0).then(|| numerator as f64 / denominator as f64)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2637,6 +2678,158 @@ struct ReportSlice {
     analytics: AnalyticsResponse,
     alerts: Vec<Alert>,
     forecast: ForecastResponse,
+}
+
+fn metric_value_is_known(value: &str) -> bool {
+    let normalized = value.trim();
+    !normalized.is_empty()
+        && !normalized.eq_ignore_ascii_case("unknown")
+        && !normalized.eq_ignore_ascii_case("unavailable")
+}
+
+fn same_metric_value(left: &str, right: &str) -> bool {
+    left.trim().to_lowercase() == right.trim().to_lowercase()
+}
+
+fn demo_runtime_metrics(store: &Store, filtered_tickets: &[&Ticket]) -> RuntimeMetrics {
+    let includes_ticket =
+        |ticket_id: &str| filtered_tickets.iter().any(|ticket| ticket.id == ticket_id);
+    let decisions = store
+        .decisions
+        .iter()
+        .filter(|decision| includes_ticket(&decision.ticket_id))
+        .collect::<Vec<_>>();
+
+    let mut first_decision_times = BTreeMap::<String, DateTime<Utc>>::new();
+    for decision in &decisions {
+        let Ok(decided_at) = DateTime::parse_from_rfc3339(&decision.created_at) else {
+            continue;
+        };
+        let decided_at = decided_at.with_timezone(&Utc);
+        first_decision_times
+            .entry(decision.ticket_id.clone())
+            .and_modify(|current| {
+                if decided_at < *current {
+                    *current = decided_at;
+                }
+            })
+            .or_insert(decided_at);
+    }
+    let decision_durations = first_decision_times
+        .iter()
+        .filter_map(|(ticket_id, decided_at)| {
+            let ticket = filtered_tickets
+                .iter()
+                .find(|ticket| ticket.id == *ticket_id)?;
+            let created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
+                .ok()?
+                .with_timezone(&Utc);
+            let milliseconds = decided_at
+                .signed_duration_since(created_at)
+                .num_milliseconds();
+            (milliseconds >= 0).then_some(milliseconds as f64 / 60_000.0)
+        })
+        .collect::<Vec<_>>();
+    let operator_decision_time_minutes = (!decision_durations.is_empty())
+        .then(|| decision_durations.iter().sum::<f64>() / decision_durations.len() as f64);
+
+    let classification_decisions = decisions
+        .iter()
+        .filter(|decision| metric_value_is_known(&decision.predicted_topic_id))
+        .count();
+    let classification_corrections = decisions
+        .iter()
+        .filter(|decision| {
+            metric_value_is_known(&decision.predicted_topic_id)
+                && !same_metric_value(&decision.predicted_topic_id, &decision.confirmed_topic_id)
+        })
+        .count();
+    let routing_decisions = decisions
+        .iter()
+        .filter(|decision| {
+            decision
+                .predicted_service
+                .as_deref()
+                .is_some_and(metric_value_is_known)
+        })
+        .count();
+    let routing_corrections = decisions
+        .iter()
+        .filter(|decision| {
+            decision
+                .predicted_service
+                .as_deref()
+                .is_some_and(|predicted| {
+                    metric_value_is_known(predicted)
+                        && !same_metric_value(predicted, &decision.service)
+                })
+        })
+        .count();
+    let priority_decisions = decisions
+        .iter()
+        .filter(|decision| {
+            decision
+                .predicted_priority
+                .as_deref()
+                .is_some_and(metric_value_is_known)
+        })
+        .count();
+    let priority_corrections = decisions
+        .iter()
+        .filter(|decision| {
+            decision
+                .predicted_priority
+                .as_deref()
+                .is_some_and(|predicted| {
+                    metric_value_is_known(predicted)
+                        && !same_metric_value(predicted, &decision.priority)
+                })
+        })
+        .count();
+
+    let relation_feedback = store
+        .learning_feedback
+        .iter()
+        .filter(|feedback| includes_ticket(&feedback.ticket_id))
+        .filter_map(|feedback| {
+            let (_, relation_decision) = feedback.feedback_type.split_once(':')?;
+            let (relation, decision) = relation_decision.rsplit_once(':')?;
+            matches!(decision, "CONFIRMED" | "REJECTED").then_some((relation, decision))
+        })
+        .collect::<Vec<_>>();
+    let similarity_confirmations = relation_feedback
+        .iter()
+        .filter(|(_, decision)| *decision == "CONFIRMED")
+        .count();
+    let duplicate_feedback = relation_feedback
+        .iter()
+        .filter(|(relation, _)| *relation == "DUPLICATE")
+        .collect::<Vec<_>>();
+    let duplicate_confirmations = duplicate_feedback
+        .iter()
+        .filter(|(_, decision)| *decision == "CONFIRMED")
+        .count();
+
+    RuntimeMetrics {
+        operator_decision_time_minutes,
+        operator_decision_time_samples: decision_durations.len(),
+        classification_correction_rate: metric_rate(
+            classification_corrections,
+            classification_decisions,
+        ),
+        classification_corrections,
+        classification_decisions,
+        routing_correction_rate: metric_rate(routing_corrections, routing_decisions),
+        routing_corrections,
+        routing_decisions,
+        priority_correction_rate: metric_rate(priority_corrections, priority_decisions),
+        priority_corrections,
+        priority_decisions,
+        similarity_usefulness: metric_rate(similarity_confirmations, relation_feedback.len()),
+        similarity_feedback_count: relation_feedback.len(),
+        duplicate_precision: metric_rate(duplicate_confirmations, duplicate_feedback.len()),
+        duplicate_feedback_count: duplicate_feedback.len(),
+    }
 }
 
 async fn analytics(
@@ -2689,6 +2882,7 @@ async fn analytics(
         .iter()
         .filter(|ticket| ticket.priority == "high")
         .count();
+    let runtime_metrics = demo_runtime_metrics(&store, &filtered);
     let overview = json!({
         "total_tickets": filtered.len(),
         "open_tickets": open_tickets,
@@ -2697,7 +2891,7 @@ async fn analytics(
         "operator_decisions": store.decisions.iter().filter(|decision| filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
         "confirmed_decisions": store.decisions.iter().filter(|decision| decision.action == "confirm" && filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
         "corrected_decisions": store.decisions.iter().filter(|decision| decision.action == "correct" && filtered.iter().any(|ticket| ticket.id == decision.ticket_id)).count(),
-        "avg_decision_minutes": 0,
+        "avg_decision_minutes": runtime_metrics.operator_decision_time_minutes,
         "average_confidence": avg_confidence,
     });
     let by_region = store
@@ -2739,6 +2933,7 @@ async fn analytics(
         source: "deterministic-demo".to_owned(),
         range: query.range.unwrap_or_else(|| "7d".to_owned()),
         overview,
+        runtime_metrics,
         by_region,
         by_topic,
         time_series: vec![

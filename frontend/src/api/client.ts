@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { Alert, AssistPreviewState, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -118,7 +118,12 @@ interface BackendTicketDetail {
   prediction: BackendPrediction
   latest_decision?: {
     action: string
+    predicted_topic_id?: string
+    predicted_service?: string
+    predicted_priority?: string
+    model_version?: string
     confirmed_topic_id: string
+    confirmed_topic_label?: string
     service: string
     priority: string
     service_provenance?: RuleProvenance
@@ -135,7 +140,24 @@ interface BackendDecisionResponse {
 
 interface BackendAnalytics {
   source?: string
-  overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number; operator_decisions?: number; confirmed_decisions?: number; corrected_decisions?: number; avg_decision_minutes?: number; change_abs?: number; change_pct?: number | null }
+  overview: { total_tickets: number; open_tickets: number; resolved_tickets: number; high_priority_tickets: number; operator_decisions?: number; confirmed_decisions?: number; corrected_decisions?: number; avg_decision_minutes?: number | null; change_abs?: number; change_pct?: number | null }
+  runtime_metrics?: {
+    operator_decision_time_minutes: number | null
+    operator_decision_time_samples: number
+    classification_correction_rate: number | null
+    classification_corrections: number
+    classification_decisions: number
+    routing_correction_rate: number | null
+    routing_corrections: number
+    routing_decisions: number
+    priority_correction_rate: number | null
+    priority_corrections: number
+    priority_decisions: number
+    similarity_usefulness: number | null
+    similarity_feedback_count: number
+    duplicate_precision: number | null
+    duplicate_feedback_count: number
+  }
   by_region: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number; change_abs?: number; change_pct?: number }>
   by_topic: Array<{ id: string; label: string; tickets: number; high_priority: number; avg_confidence: number; change_abs?: number; change_pct?: number }>
   time_series: Array<{ date: string; tickets: number; resolved: number }>
@@ -212,7 +234,10 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
   const prediction = detail?.prediction ?? preview?.prediction
   const latest = detail?.latest_decision
   const related = topRelatedCandidates(combineRelatedCandidates(preview?.similar_tickets, preview?.duplicate_candidates, preview?.repeat_candidates))
-  const topic = latest ? item.topic_label : prediction?.topic_label ?? 'Не определено'
+  const relationTopicId = latest?.confirmed_topic_id ?? item.topic_id
+  const topic = latest
+    ? latest.confirmed_topic_label ?? latest.confirmed_topic_id
+    : prediction?.topic_label ?? 'Не определено'
   const alternatives = prediction?.alternatives ?? []
   const confidenceAvailable = Boolean(prediction && prediction.model_version !== 'unavailable')
   const confidenceState = normalizeConfidenceState(prediction?.confidence_state, prediction?.confidence ?? 0, confidenceAvailable)
@@ -228,7 +253,7 @@ function mapBackendTicket(item: BackendTicket, detail?: BackendTicketDetail, kno
       candidateTypes: candidate.candidateTypes,
       matchedFactors: matchedFactors.length
         ? matchedFactors
-        : matchingTicketFactors(item.topic_id, item.region_id, candidate.topic_id, candidate.region_id),
+        : matchingTicketFactors(relationTopicId, item.region_id, candidate.topic_id, candidate.region_id),
       suggestion: candidate.suggestion ? {
         score: candidate.suggestion.score,
         threshold: candidate.suggestion.threshold,
@@ -339,6 +364,26 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
       updatedAt: model.created_at,
     }
   })
+  const runtime = analytics.runtime_metrics
+  const operatorMetrics: OperatorRuntimeMetrics = {
+    operatorDecisionTimeMinutes: runtime?.operator_decision_time_minutes
+      ?? analytics.overview.avg_decision_minutes
+      ?? null,
+    operatorDecisionTimeSamples: runtime?.operator_decision_time_samples ?? 0,
+    classificationCorrectionRate: runtime?.classification_correction_rate ?? null,
+    classificationCorrections: runtime?.classification_corrections ?? 0,
+    classificationDecisions: runtime?.classification_decisions ?? 0,
+    routingCorrectionRate: runtime?.routing_correction_rate ?? null,
+    routingCorrections: runtime?.routing_corrections ?? 0,
+    routingDecisions: runtime?.routing_decisions ?? 0,
+    priorityCorrectionRate: runtime?.priority_correction_rate ?? null,
+    priorityCorrections: runtime?.priority_corrections ?? 0,
+    priorityDecisions: runtime?.priority_decisions ?? 0,
+    similarityUsefulness: runtime?.similarity_usefulness ?? null,
+    similarityFeedbackCount: runtime?.similarity_feedback_count ?? 0,
+    duplicatePrecision: runtime?.duplicate_precision ?? null,
+    duplicateFeedbackCount: runtime?.duplicate_feedback_count ?? 0,
+  }
   return {
     tickets,
     overview: {
@@ -350,9 +395,10 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
       confirmedDecisions: analytics.overview.confirmed_decisions ?? 0,
       correctedDecisions: analytics.overview.corrected_decisions ?? 0,
       changeAbs: analytics.overview.change_abs ?? 0,
-      avgDecisionMinutes: analytics.overview.avg_decision_minutes ?? 0,
+      avgDecisionMinutes: analytics.overview.avg_decision_minutes ?? undefined,
       changePct: analytics.overview.change_pct ?? undefined,
     },
+    operatorMetrics,
     regions,
     topics,
     alerts,

@@ -6,14 +6,15 @@
 //! the vector index and the ML service owns classification/embedding.
 
 use crate::{
-    related_ticket_candidate, Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery,
-    AnalyticsQuery, AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
-    CloseLearningCycleRequest, CreateLearningCycleRequest, DatasetProvenance, DecisionRequest,
-    DecisionResponse, ForecastQuery, ForecastResponse, ImportRequest, ImportResponse,
-    LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview,
-    MetricBucket, ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
-    RelationSuggestionSnapshot, ResponseTemplate, RuleProvenance, RuleSource, Ticket,
-    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    metric_rate, related_ticket_candidate, Alert, AlertQuery, AlternativePrediction,
+    AnalyticsDrilldownQuery, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
+    AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, CreateLearningCycleRequest,
+    DatasetProvenance, DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse,
+    ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
+    LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
+    Prediction, QueryIntentRequest, RelationSuggestionSnapshot, ResponseTemplate, RuleProvenance,
+    RuleSource, RuntimeMetrics, Ticket, TicketDetailResponse, TicketListResponse, TicketQuery,
+    TimeSeriesPoint, Topic,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -223,6 +224,7 @@ struct DbDecision {
     decision: String,
     predicted_topic_id: Option<String>,
     confirmed_topic_id: Option<String>,
+    confirmed_topic_label: Option<String>,
     confirmed_priority: String,
     service: Option<String>,
     feedback: Value,
@@ -1929,11 +1931,13 @@ impl PgRepository {
             .push_bind(previous_since)
             .push(" AND t.created_at < ")
             .push_bind(current_since)
-            .push(")::bigint AS previous_total_tickets, COALESCE(AVG(EXTRACT(EPOCH FROM (d.created_at - t.created_at)) / 60.0) FILTER (WHERE t.created_at >= ")
+            .push(")::bigint AS previous_total_tickets, AVG(EXTRACT(EPOCH FROM (first_d.created_at - t.created_at)) / 60.0) FILTER (WHERE t.created_at >= ")
             .push_bind(current_since)
-            .push(" AND d.created_at >= t.created_at), 0)::float8 AS avg_decision_minutes, COALESCE(AVG(p.confidence) FILTER (WHERE t.created_at >= ")
+            .push(" AND first_d.created_at >= t.created_at)::float8 AS avg_decision_minutes, COUNT(*) FILTER (WHERE t.created_at >= ")
             .push_bind(current_since)
-            .push("), 0)::float8 AS average_confidence FROM tickets t LEFT JOIN LATERAL (SELECT confidence FROM ticket_predictions WHERE ticket_id = t.id ORDER BY created_at DESC LIMIT 1) p ON TRUE LEFT JOIN LATERAL (SELECT decision, created_at FROM operator_decisions WHERE ticket_id = t.id ORDER BY created_at DESC LIMIT 1) d ON TRUE WHERE t.created_at >= ")
+            .push(" AND first_d.created_at >= t.created_at)::bigint AS decision_time_samples, COALESCE(AVG(p.confidence) FILTER (WHERE t.created_at >= ")
+            .push_bind(current_since)
+            .push("), 0)::float8 AS average_confidence FROM tickets t LEFT JOIN LATERAL (SELECT confidence FROM ticket_predictions WHERE ticket_id = t.id ORDER BY created_at DESC LIMIT 1) p ON TRUE LEFT JOIN LATERAL (SELECT decision, created_at FROM operator_decisions WHERE ticket_id = t.id ORDER BY created_at DESC LIMIT 1) d ON TRUE LEFT JOIN LATERAL (SELECT created_at FROM operator_decisions WHERE ticket_id = t.id ORDER BY created_at ASC, id ASC LIMIT 1) first_d ON TRUE WHERE t.created_at >= ")
             .push_bind(previous_since)
             .push(" AND t.created_at <= now()");
         push_analytics_filters(&mut overview_query, query, "t");
@@ -1949,11 +1953,93 @@ impl PgRepository {
         let operator_decisions: i64 = overview_row.try_get("operator_decisions").unwrap_or(0);
         let confirmed_decisions: i64 = overview_row.try_get("confirmed_decisions").unwrap_or(0);
         let corrected_decisions: i64 = overview_row.try_get("corrected_decisions").unwrap_or(0);
-        let avg_decision_minutes: f64 = overview_row.try_get("avg_decision_minutes").unwrap_or(0.0);
+        let avg_decision_minutes: Option<f64> =
+            overview_row.try_get("avg_decision_minutes").unwrap_or(None);
+        let decision_time_samples: i64 = overview_row.try_get("decision_time_samples").unwrap_or(0);
         let previous_total: i64 = overview_row.try_get("previous_total_tickets").unwrap_or(0);
         let average_confidence: f64 = overview_row.try_get("average_confidence").unwrap_or(0.0);
         let total_change = total_tickets - previous_total;
         let total_change_pct = percent_change(total_tickets, previous_total);
+
+        let mut decision_metrics_query = QueryBuilder::<Postgres>::new(
+            "SELECT \
+                COUNT(*) FILTER (WHERE NULLIF(BTRIM(d.feedback->>'predicted_topic_id'), '') IS NOT NULL AND lower(BTRIM(d.feedback->>'predicted_topic_id')) NOT IN ('unknown', 'unavailable'))::bigint AS classification_decisions, \
+                COUNT(*) FILTER (WHERE NULLIF(BTRIM(d.feedback->>'predicted_topic_id'), '') IS NOT NULL AND lower(BTRIM(d.feedback->>'predicted_topic_id')) NOT IN ('unknown', 'unavailable') AND lower(BTRIM(d.feedback->>'predicted_topic_id')) IS DISTINCT FROM lower(BTRIM(d.confirmed_topic_id)))::bigint AS classification_corrections, \
+                COUNT(*) FILTER (WHERE NULLIF(BTRIM(d.feedback->>'predicted_service'), '') IS NOT NULL AND lower(BTRIM(d.feedback->>'predicted_service')) NOT IN ('unknown', 'unavailable'))::bigint AS routing_decisions, \
+                COUNT(*) FILTER (WHERE NULLIF(BTRIM(d.feedback->>'predicted_service'), '') IS NOT NULL AND lower(BTRIM(d.feedback->>'predicted_service')) NOT IN ('unknown', 'unavailable') AND lower(BTRIM(d.feedback->>'predicted_service')) IS DISTINCT FROM lower(BTRIM(d.feedback->>'confirmed_service')))::bigint AS routing_corrections, \
+                COUNT(*) FILTER (WHERE NULLIF(BTRIM(d.feedback->>'predicted_priority'), '') IS NOT NULL AND lower(BTRIM(d.feedback->>'predicted_priority')) NOT IN ('unknown', 'unavailable'))::bigint AS priority_decisions, \
+                COUNT(*) FILTER (WHERE NULLIF(BTRIM(d.feedback->>'predicted_priority'), '') IS NOT NULL AND lower(BTRIM(d.feedback->>'predicted_priority')) NOT IN ('unknown', 'unavailable') AND lower(BTRIM(d.feedback->>'predicted_priority')) IS DISTINCT FROM lower(BTRIM(d.confirmed_priority)))::bigint AS priority_corrections \
+             FROM operator_decisions d JOIN tickets t ON t.id = d.ticket_id WHERE t.created_at >= ",
+        );
+        decision_metrics_query
+            .push_bind(current_since)
+            .push(" AND t.created_at <= now()");
+        push_analytics_filters(&mut decision_metrics_query, query, "t");
+        let decision_metrics_row = decision_metrics_query
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("analytics decision metrics: {error}"))?;
+        let decision_metric_count = |column: &str| -> usize {
+            decision_metrics_row
+                .try_get::<i64, _>(column)
+                .unwrap_or(0)
+                .max(0) as usize
+        };
+        let classification_decisions = decision_metric_count("classification_decisions");
+        let classification_corrections = decision_metric_count("classification_corrections");
+        let routing_decisions = decision_metric_count("routing_decisions");
+        let routing_corrections = decision_metric_count("routing_corrections");
+        let priority_decisions = decision_metric_count("priority_decisions");
+        let priority_corrections = decision_metric_count("priority_corrections");
+
+        let mut relation_metrics_query = QueryBuilder::<Postgres>::new(
+            "SELECT \
+                COUNT(*)::bigint AS similarity_feedback_count, \
+                COUNT(*) FILTER (WHERE rf.decision = 'CONFIRMED')::bigint AS similarity_confirmations, \
+                COUNT(*) FILTER (WHERE rf.relation = 'DUPLICATE')::bigint AS duplicate_feedback_count, \
+                COUNT(*) FILTER (WHERE rf.relation = 'DUPLICATE' AND rf.decision = 'CONFIRMED')::bigint AS duplicate_confirmations \
+             FROM relation_feedback rf JOIN tickets t ON t.id = rf.ticket_id WHERE rf.created_at >= ",
+        );
+        relation_metrics_query
+            .push_bind(current_since)
+            .push(" AND rf.created_at <= now()");
+        push_analytics_filters(&mut relation_metrics_query, query, "t");
+        let relation_metrics_row = relation_metrics_query
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("analytics relation metrics: {error}"))?;
+        let relation_metric_count = |column: &str| -> usize {
+            relation_metrics_row
+                .try_get::<i64, _>(column)
+                .unwrap_or(0)
+                .max(0) as usize
+        };
+        let similarity_feedback_count = relation_metric_count("similarity_feedback_count");
+        let similarity_confirmations = relation_metric_count("similarity_confirmations");
+        let duplicate_feedback_count = relation_metric_count("duplicate_feedback_count");
+        let duplicate_confirmations = relation_metric_count("duplicate_confirmations");
+        let runtime_metrics = RuntimeMetrics {
+            operator_decision_time_minutes: avg_decision_minutes,
+            operator_decision_time_samples: decision_time_samples.max(0) as usize,
+            classification_correction_rate: metric_rate(
+                classification_corrections,
+                classification_decisions,
+            ),
+            classification_corrections,
+            classification_decisions,
+            routing_correction_rate: metric_rate(routing_corrections, routing_decisions),
+            routing_corrections,
+            routing_decisions,
+            priority_correction_rate: metric_rate(priority_corrections, priority_decisions),
+            priority_corrections,
+            priority_decisions,
+            similarity_usefulness: metric_rate(similarity_confirmations, similarity_feedback_count),
+            similarity_feedback_count,
+            duplicate_precision: metric_rate(duplicate_confirmations, duplicate_feedback_count),
+            duplicate_feedback_count,
+        };
 
         let mut region_query = QueryBuilder::<Postgres>::new(
             "SELECT r.id, COALESCE(r.name_ru, r.name_en, r.id) AS label, COUNT(t.id) FILTER (WHERE t.created_at >= ",
@@ -2094,12 +2180,13 @@ impl PgRepository {
                 "operator_decisions": operator_decisions.max(0),
                 "confirmed_decisions": confirmed_decisions.max(0),
                 "corrected_decisions": corrected_decisions.max(0),
-                "avg_decision_minutes": avg_decision_minutes.max(0.0),
+                "avg_decision_minutes": avg_decision_minutes,
                 "average_confidence": average_confidence,
                 "previous_total_tickets": previous_total.max(0),
                 "change_abs": total_change,
                 "change_pct": total_change_pct,
             }),
+            runtime_metrics,
             by_region,
             by_topic,
             time_series,
@@ -3477,6 +3564,10 @@ impl PgRepository {
             .search_assist_candidates(&ticket.text, exclude_id, request_id, trace_id)
             .await;
         let retrieval_latency_ms = retrieval_started.elapsed().as_secs_f64() * 1000.0;
+        let relation_topic_id = latest_decision
+            .as_ref()
+            .map(|decision| decision.confirmed_topic_id.as_str())
+            .unwrap_or(&prediction.topic_id);
         let current_created_at = DateTime::parse_from_rfc3339(&ticket.created_at)
             .ok()
             .map(|value| value.with_timezone(&Utc));
@@ -3500,7 +3591,7 @@ impl PgRepository {
                         related_ticket_candidate(
                             hit.id.to_string(),
                             similarity,
-                            &ticket.topic_id,
+                            relation_topic_id,
                             &ticket.region_id,
                             current_created_at.as_ref(),
                             hit.topic_id.clone(),
@@ -3674,15 +3765,13 @@ impl PgRepository {
             request.topic_id.as_deref().unwrap_or(&prediction.topic_id)
         };
         let confirmed_topic = normalize_topic_id(confirmed_topic);
-        let topic_exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM topics WHERE id = $1)")
+        let confirmed_topic_label: String =
+            sqlx::query_scalar("SELECT COALESCE(name_ru, name_kk, id) FROM topics WHERE id = $1")
                 .bind(&confirmed_topic)
-                .fetch_one(&self.pool)
+                .fetch_optional(&self.pool)
                 .await
-                .map_err(|error| format!("check topic: {error}"))?;
-        if !topic_exists {
-            return Err(format!("unknown topic_id: {confirmed_topic}"));
-        }
+                .map_err(|error| format!("resolve confirmed topic: {error}"))?
+                .ok_or_else(|| format!("unknown topic_id: {confirmed_topic}"))?;
         let routing = self
             .resolve_routing(
                 &confirmed_topic,
@@ -3756,8 +3845,8 @@ impl PgRepository {
             .begin()
             .await
             .map_err(|error| format!("begin decision transaction: {error}"))?;
-        let decision_id: i64 = sqlx::query_scalar(
-            "INSERT INTO operator_decisions (ticket_id, user_id, confirmed_topic_id, confirmed_service_id, confirmed_priority, decision, feedback) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        let (decision_id, decision_created_at): (i64, DateTime<Utc>) = sqlx::query_as(
+            "INSERT INTO operator_decisions (ticket_id, user_id, confirmed_topic_id, confirmed_service_id, confirmed_priority, decision, feedback) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at",
         )
         .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
         .bind(user_id)
@@ -3770,6 +3859,12 @@ impl PgRepository {
             "service": service,
             "action": action,
             "predicted_topic_id": prediction.topic_id,
+            "predicted_service": prediction.recommended_service,
+            "predicted_priority": prediction.predicted_priority,
+            "model_version": prediction.model_version,
+            "confirmed_topic_id": confirmed_topic,
+            "confirmed_service": service,
+            "confirmed_priority": priority,
             "routing_reason": routing.reason,
             "service_provenance": service_provenance,
             "priority_provenance": priority_provenance,
@@ -3780,17 +3875,17 @@ impl PgRepository {
         let confirmed_payload = json!({
             "action": action,
             "topic_id": confirmed_topic,
+            "confirmed_topic_label": confirmed_topic_label,
             "service": service,
             "priority": priority,
             "decision_id": decision_id.to_string(),
+            "model_version": prediction.model_version,
+            "user_id": user_id,
             "service_provenance": service_provenance,
             "priority_provenance": priority_provenance,
         });
-        sqlx::query("UPDATE tickets SET topic_id = $2, service_id = $3, priority = $4, status = 'TRIAGED', operator_confirmed_decision = $5, needs_review = false, updated_in_pulse_at = now() WHERE id = $1")
+        sqlx::query("UPDATE tickets SET operator_confirmed_decision = $2, needs_review = false, updated_in_pulse_at = now() WHERE id = $1")
             .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
-            .bind(&confirmed_topic)
-            .bind(&service_id)
-            .bind(&priority)
             .bind(&confirmed_payload)
             .execute(&mut *tx)
             .await
@@ -3805,7 +3900,14 @@ impl PgRepository {
             .bind(cycle_id)
             .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
             .bind(&prediction.model_version)
-            .bind(json!({"topic_id": prediction.topic_id, "confidence": prediction.confidence}))
+            .bind(json!({
+                "topic_id": prediction.topic_id,
+                "confidence": prediction.confidence,
+                "service": prediction.recommended_service,
+                "priority": prediction.predicted_priority,
+                "model_version": prediction.model_version,
+                "alternatives": prediction.alternatives,
+            }))
             .bind(&confirmed_payload)
             .bind(if action == "correct" { "CORRECTED" } else { "ACCEPTED" })
             .execute(&mut *tx)
@@ -3837,19 +3939,22 @@ impl PgRepository {
             ticket_id: ticket.id.clone(),
             action: action.to_owned(),
             predicted_topic_id: prediction.topic_id.clone(),
+            predicted_service: Some(prediction.recommended_service.clone()),
+            predicted_priority: Some(prediction.predicted_priority.clone()),
+            model_version: Some(prediction.model_version.clone()),
             confirmed_topic_id: confirmed_topic,
+            confirmed_topic_label,
             service,
             priority,
             service_provenance,
             priority_provenance,
             note: request.note.clone(),
             user_id: user_id.to_owned(),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: decision_created_at.to_rfc3339(),
         };
-        let mut ticket = self
+        let ticket = self
             .fetch_ticket_by_id(ticket.id.parse::<i64>().unwrap_or_default())
             .await?;
-        ticket.status = "triaged".to_owned();
         Ok(DecisionResponse {
             ticket,
             prediction,
@@ -3929,7 +4034,7 @@ impl PgRepository {
         ticket_id: i64,
     ) -> Result<Option<OperatorDecision>, String> {
         let row: Option<DbDecision> = sqlx::query_as(
-            "SELECT d.id, d.ticket_id, d.decision, COALESCE(d.feedback->>'predicted_topic_id', d.confirmed_topic_id) AS predicted_topic_id, d.confirmed_topic_id, COALESCE(d.confirmed_priority, 'normal') AS confirmed_priority, d.feedback->>'service' AS service, d.feedback, COALESCE(d.user_id, 'unknown') AS user_id, d.feedback->>'note' AS note, d.created_at FROM operator_decisions d WHERE d.ticket_id = $1 ORDER BY d.created_at DESC, d.id DESC LIMIT 1",
+            "SELECT d.id, d.ticket_id, d.decision, COALESCE(d.feedback->>'predicted_topic_id', d.confirmed_topic_id) AS predicted_topic_id, d.confirmed_topic_id, COALESCE(tp.name_ru, tp.name_kk, d.confirmed_topic_id) AS confirmed_topic_label, COALESCE(d.confirmed_priority, 'normal') AS confirmed_priority, d.feedback->>'service' AS service, d.feedback, COALESCE(d.user_id, 'unknown') AS user_id, d.feedback->>'note' AS note, d.created_at FROM operator_decisions d LEFT JOIN topics tp ON tp.id = d.confirmed_topic_id WHERE d.ticket_id = $1 ORDER BY d.created_at DESC, d.id DESC LIMIT 1",
         )
         .bind(ticket_id)
         .fetch_optional(&self.pool)
@@ -4106,6 +4211,12 @@ fn alternatives_json(classification: &MlClassification) -> Value {
 }
 
 fn decision_from_db(row: DbDecision) -> OperatorDecision {
+    let confirmed_topic_id = row
+        .confirmed_topic_id
+        .unwrap_or_else(|| "unknown".to_owned());
+    let confirmed_topic_label = row
+        .confirmed_topic_label
+        .unwrap_or_else(|| confirmed_topic_id.clone());
     OperatorDecision {
         id: format!("decision-{}", row.id),
         ticket_id: row.ticket_id.to_string(),
@@ -4119,9 +4230,23 @@ fn decision_from_db(row: DbDecision) -> OperatorDecision {
             .predicted_topic_id
             .clone()
             .unwrap_or_else(|| "unknown".to_owned()),
-        confirmed_topic_id: row
-            .confirmed_topic_id
-            .unwrap_or_else(|| "unknown".to_owned()),
+        predicted_service: row
+            .feedback
+            .get("predicted_service")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        predicted_priority: row
+            .feedback
+            .get("predicted_priority")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        model_version: row
+            .feedback
+            .get("model_version")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        confirmed_topic_id,
+        confirmed_topic_label,
         service: row.service.unwrap_or_else(|| "Другая служба".to_owned()),
         priority: row.confirmed_priority,
         service_provenance: rule_provenance_from_db(
