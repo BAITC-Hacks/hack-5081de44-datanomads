@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from training.classifier_baselines import load_verified_classifier_package
 from training.dataset_builder import checksum
 from training.feedback_dataset import load_verified_candidate
 from training.feedback_job import FeedbackJobError, train_classifier_job
@@ -84,6 +85,35 @@ class FeedbackJobTests(unittest.TestCase):
             }
             pool = FeedbackPool([feedback_row()])
 
+            policy_text = policy_path.read_text(encoding="utf-8")
+            policy_path.write_text(json.dumps({**json.loads(policy_text),
+                                               "critical_topics": ["unknown_topic"]}), encoding="utf-8")
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                with self.assertRaisesRegex(FeedbackJobError, "INVALID_CRITICAL_POLICY"):
+                    asyncio.run(train_classifier_job(pool, payload))
+                trainer.assert_not_called()
+            self.assertFalse((root / "exports").exists())
+            self.assertFalse((root / "datasets").exists())
+            self.assertFalse((root / "models").exists())
+            policy_path.write_text(policy_text, encoding="utf-8")
+
+            frozen_manifest, frozen_splits = load_verified_classifier_package(frozen)
+            missing_topic = next(topic for topic in dataset.topics if topic != "electricity")
+            incomplete_splits = {**frozen_splits,
+                                 "test": [row for row in frozen_splits["test"]
+                                          if row["topic_id"] != missing_topic]}
+            with (patch.dict(os.environ, environment),
+                  patch("training.feedback_job.load_verified_classifier_package",
+                        return_value=(frozen_manifest, incomplete_splits)),
+                  patch("training.feedback_job.train_feedback_candidate") as trainer):
+                with self.assertRaisesRegex(FeedbackJobError, "INVALID_PRODUCTION_ARTIFACT"):
+                    asyncio.run(train_classifier_job(pool, payload))
+                trainer.assert_not_called()
+            self.assertFalse((root / "exports").exists())
+            self.assertFalse((root / "datasets").exists())
+            self.assertFalse((root / "models").exists())
+
             def fake_trainer(package: Path, frozen_package: Path, model: Path, output: Path,
                              *, candidate_model_version: str) -> dict:
                 manifest, samples = load_verified_candidate(package, frozen_package)
@@ -135,7 +165,9 @@ class FeedbackJobTests(unittest.TestCase):
                 with self.assertRaisesRegex(FeedbackJobError, "INVALID_PRODUCTION_ARTIFACT"):
                     asyncio.run(train_classifier_job(pool, payload))
                 trainer.assert_not_called()
+            self.assertFalse((base / "invalid-private/exports").exists())
             self.assertFalse((base / "invalid-private/datasets").exists())
+            self.assertFalse((base / "invalid-private/models").exists())
 
     def test_insufficient_feedback_and_invalid_payload(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

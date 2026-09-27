@@ -72,6 +72,31 @@ async def train_classifier_job(pool: Any, payload: dict[str, Any]) -> dict:
                 raise FeedbackJobError("INVALID_JOB_PAYLOAD")
             rows = [dict(row) for row in await connection.fetch(FEEDBACK_QUERY, cycle_id)]
 
+    if rows:
+        try:
+            policy_text = policy_path.read_text(encoding="utf-8")
+            policy = CriticalRegressionPolicy.model_validate_json(policy_text)
+        except (OSError, ValueError, TypeError):
+            raise FeedbackJobError("INVALID_CRITICAL_POLICY") from None
+        try:
+            frozen_manifest, frozen_splits = load_verified_classifier_package(frozen)
+            production_manifest = ModelMetadata.model_validate_json(
+                (production / "manifest.json").read_text(encoding="utf-8")
+            )
+            train_labels = {row["topic_id"] for row in frozen_splits["train"]}
+            test_labels = {row["topic_id"] for row in frozen_splits["test"]}
+            if (production_manifest.model_version != production_version or
+                    (production_manifest.model_extra or {}).get("frozen_evaluation_version") !=
+                    frozen_manifest.frozen_evaluation_version or
+                    set(production_manifest.labels) != train_labels or
+                    test_labels != train_labels or
+                    production_manifest.artifact_checksum != checksum(production / "model.safetensors")):
+                raise ValueError("production artifact does not match frozen evaluation")
+        except (OSError, ValueError, KeyError, TypeError):
+            raise FeedbackJobError("INVALID_PRODUCTION_ARTIFACT") from None
+        if not set(policy.critical_topics).issubset(train_labels):
+            raise FeedbackJobError("INVALID_CRITICAL_POLICY")
+
     export_path = root / "exports" / f"{cycle_id}.jsonl"
     export_path.parent.mkdir(parents=True, exist_ok=True)
     export_report = export_feedback(rows, links, export_path, cycle_id=cycle_id,
@@ -80,24 +105,6 @@ async def train_classifier_job(pool: Any, payload: dict[str, Any]) -> dict:
         return {"state": "INSUFFICIENT_FEEDBACK", "cycle_id": cycle_id,
                 "sample_count": 0, "required_samples": minimum,
                 "rejected_counts": export_report["rejected_counts"]}
-    try:
-        policy_text = policy_path.read_text(encoding="utf-8")
-        CriticalRegressionPolicy.model_validate_json(policy_text)
-    except (OSError, ValueError, TypeError):
-        raise FeedbackJobError("INVALID_CRITICAL_POLICY") from None
-    try:
-        frozen_manifest, frozen_splits = load_verified_classifier_package(frozen)
-        production_manifest = ModelMetadata.model_validate_json(
-            (production / "manifest.json").read_text(encoding="utf-8")
-        )
-        if (production_manifest.model_version != production_version or
-                (production_manifest.model_extra or {}).get("frozen_evaluation_version") !=
-                frozen_manifest.frozen_evaluation_version or
-                set(production_manifest.labels) != {row["topic_id"] for row in frozen_splits["train"]} or
-                production_manifest.artifact_checksum != checksum(production / "model.safetensors")):
-            raise ValueError("production artifact does not match frozen evaluation")
-    except (OSError, ValueError, KeyError, TypeError):
-        raise FeedbackJobError("INVALID_PRODUCTION_ARTIFACT") from None
     dataset_report = build_candidate(
         export_path, frozen, root / "datasets", cycle_id=cycle_id,
         production_model_version=production_version, dataset_version=dataset_version,
