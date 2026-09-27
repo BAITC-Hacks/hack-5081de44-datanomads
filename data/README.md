@@ -43,9 +43,13 @@ manifest marks them `synthetic=true`; they are importer fixtures, not real
 source evidence or training data. A real export requires schema inspection and
 an explicit verified profile before its aliases can be trusted.
 
-The initial taxonomy has 20 Kazakhstan region IDs and 16 candidate topics. A
-raw direction is preserved in `topic_raw`; an unmapped direction gets
-`topic_id=unknown` until a reviewed source mapping is added.
+The initial taxonomy has 20 Kazakhstan region IDs and 16 candidate topics. The
+source direction stays in the restricted raw export; its PII-minimized form is
+preserved in `topic_raw`. An unmapped direction gets
+`topic_id=unknown` until a reviewed source mapping is added. Only exact
+canonical IDs, full RU/KZ topic names and the four explicit legacy IDs receive
+a topic hint automatically; generic words and partial matches remain unknown.
+A hint is not an approved training label.
 
 ## Bad rows and privacy
 

@@ -335,28 +335,27 @@ TOPIC_DEFINITIONS: Tuple[Mapping[str, str], ...] = (
     },
 )
 
-_TOPIC_ALIASES: Dict[str, str] = {}
+_TOPIC_ALIASES: Dict[str, set[str]] = {}
 for _topic in TOPIC_DEFINITIONS:
-    _TOPIC_ALIASES[_fold(_topic["id"])] = _topic["id"]
-    _TOPIC_ALIASES[_fold(_topic["name_ru"])] = _topic["id"]
-    _TOPIC_ALIASES[_fold(_topic["name_kk"])] = _topic["id"]
-    for _alias in _topic["aliases"].split():
-        _TOPIC_ALIASES[_fold(_alias)] = _topic["id"]
-    _TOPIC_ALIASES[_fold(_topic["aliases"])] = _topic["id"]
+    _TOPIC_ALIASES.setdefault(_fold(_topic["id"]), set()).add(_topic["id"])
+    _TOPIC_ALIASES.setdefault(_fold(_topic["name_ru"]), set()).add(_topic["id"])
+    _TOPIC_ALIASES.setdefault(_fold(_topic["name_kk"]), set()).add(_topic["id"])
+
+for _legacy_id, _canonical_id in {
+    "waste": "waste_management",
+    "ecology": "environment",
+    "sewerage": "wastewater",
+    "outdoor_lighting": "street_lighting",
+}.items():
+    _TOPIC_ALIASES.setdefault(_fold(_legacy_id), set()).add(_canonical_id)
 
 
 def canonical_topic_id(value: object) -> str:
-    """Map a raw direction to a canonical topic or ``unknown``."""
+    """Map an exact, unambiguous direction label to a canonical topic hint."""
 
     folded = _fold(value)
-    if not folded:
-        return "unknown"
-    if folded in _TOPIC_ALIASES:
-        return _TOPIC_ALIASES[folded]
-    for alias, topic_id in _TOPIC_ALIASES.items():
-        if len(alias) > 3 and (alias in folded or folded in alias):
-            return topic_id
-    return "unknown"
+    matches = _TOPIC_ALIASES.get(folded, set())
+    return next(iter(matches)) if len(matches) == 1 else "unknown"
 
 
 def canonical_language(value: object, text: str = "") -> str:

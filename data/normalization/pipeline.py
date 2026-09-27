@@ -182,7 +182,7 @@ def normalize_row(
                 "pulse_prediction": row.get("pulse_prediction"),
                 "operator_confirmed_decision": row.get("operator_confirmed_decision"),
                 "model_versions": row.get("model_versions") or {},
-                "needs_review": bool(row.get("needs_review", False)),
+                "needs_review": bool(row.get("needs_review", False)) or topic_id == "unknown",
                 "embedding_ref": row.get("embedding_ref"),
                 "duplicate_feedback": row.get("duplicate_feedback"),
                 "repeat_feedback": row.get("repeat_feedback"),

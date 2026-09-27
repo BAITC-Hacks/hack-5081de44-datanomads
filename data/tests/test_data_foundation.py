@@ -10,7 +10,7 @@ import unittest
 from data.importers import IKOMEK109Importer, get_importer
 from data.normalization import minimize_text, scan_pii
 from data.normalization.pipeline import normalize_row
-from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS
+from data.schemas.taxonomy import REGION_DEFINITIONS, TOPIC_DEFINITIONS, canonical_topic_id
 from data.schemas.unified_ticket import UnifiedTicket
 from scripts.data_audit import build_report, build_source_report
 from scripts.generate_synthetic_sources import SPECS, generate as generate_synthetic_sources
@@ -97,7 +97,8 @@ class UnifiedTicketTests(unittest.TestCase):
         self.assertNotIn("synthetic@example.invalid", encoded)
         self.assertNotIn("+7 700 000-00-00", encoded)
         self.assertNotIn("51.1", encoded)
-        self.assertEqual(result.ticket.topic_id, "water_supply")
+        self.assertEqual(result.ticket.topic_id, "unknown")
+        self.assertTrue(result.ticket.needs_review)
         self.assertGreaterEqual(result.ticket.text_redaction_count, 3)
 
 
@@ -227,6 +228,14 @@ class DemoFixtureTests(unittest.TestCase):
     def test_taxonomy_matches_fixture_contract(self) -> None:
         self.assertEqual(len(REGION_DEFINITIONS), 20)
         self.assertGreaterEqual(len(TOPIC_DEFINITIONS), 10)
+
+    def test_topic_aliases_are_exact_and_ambiguous_labels_need_review(self) -> None:
+        self.assertEqual(canonical_topic_id("waste"), "waste_management")
+        self.assertEqual(canonical_topic_id("ecology"), "environment")
+        self.assertEqual(canonical_topic_id("Наружное освещение"), "street_lighting")
+        self.assertEqual(canonical_topic_id("свет"), "unknown")
+        self.assertEqual(canonical_topic_id("вода"), "unknown")
+        self.assertEqual(canonical_topic_id("Наружное освещение или электроснабжение"), "unknown")
 
 
 class DataAuditTests(unittest.TestCase):

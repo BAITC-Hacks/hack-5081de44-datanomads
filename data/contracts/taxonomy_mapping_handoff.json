@@ -1,0 +1,25 @@
+{
+  "contract_version": "taxonomy-mapping-handoff.v1",
+  "producer": "data-ml",
+  "consumer": "runtime-platform",
+  "mapping_key_fields": ["source_system", "raw_direction", "raw_subdirection"],
+  "almaty_catalog_semantics": {
+    "raw_direction": "source_category",
+    "raw_subdirection": "source_service (issue type, not confirmed executor)",
+    "original_citizen_text_available": false,
+    "source_system_verified": false,
+    "approved_for_training": false,
+    "approved_for_routing": false
+  },
+  "runtime_gap": {
+    "table": "topic_source_mappings",
+    "current_key_fields": ["source_system", "raw_direction"],
+    "required_integration": "Preserve both original source fields in the mapping key or use a separately verified single source direction; do not collapse category/service into an invented direction string.",
+    "owner": "runtime-platform"
+  },
+  "topic_state_gap": {
+    "current_unified_ticket_fallback": "topic_id=unknown with needs_review=true",
+    "required_integration": "Keep an unverified source mapping distinct from a reviewed UNKNOWN/OTHER operator or model decision. Neither state is a confirmed training label.",
+    "owner": "runtime-platform"
+  }
+}
