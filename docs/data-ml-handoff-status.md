@@ -67,11 +67,11 @@
 | 30/60/90 rolling backtest package | Частично | [Отчёт ВКО](../data/reports/vko_109_forecast_candidates.json) содержит 21/20/19 окон на реальных агрегатных датах. Это proxy общей нагрузки области, без утверждённых `region × topic` labels; `runtime_eligible=false`. |
 | Baseline comparison | Частично | В том же отчёте Prophet сравнивается с weekly seasonal naive на одинаковых окнах; выбора production model нет. |
 | Honest insufficient-history behavior | Готово | [Отчёт Алматинской области](../data/reports/almaty_109_forecast_candidates.json): `INSUFFICIENT_HISTORY`, ноль допустимых окон. |
-| Spike threshold calibration package | Ожидает | [Exploration ВКО](../data/reports/vko_109_spike_exploration.json) и [Алматинской области](../data/reports/almaty_109_spike_exploration.json) имеют `NO_REVIEWED_INCIDENT_LABELS`; precision/recall и выбранного порога нет. |
+| Spike threshold calibration package | Ожидает | [Exploration ВКО](../data/reports/vko_109_spike_exploration.json) и [Алматинской области](../data/reports/almaty_109_spike_exploration.json) имеют `NO_REVIEWED_INCIDENT_LABELS`. Локально созданы полные очереди на 159 и 40 дат и detector-blind шаблоны на 975 и 259 оценённых дат; всё `PENDING`. Precision/recall и выбранного порога нет. |
 | Validation limitations clearly marked | Готово | [Описание spike evidence](spike-evidence.md) и forecast/spike reports явно отмечают proxy scope, пропущенные дни и отсутствие incident ground truth. |
 
 ## Входы для закрытия checklist
 
 Нужны подтверждённые профили полученных источников, исходные тексты обращений либо человечески проверенный synthetic corpus, решения по taxonomy/classifier/retrieval и независимый реестр инцидентов. Для Learning Loop дополнительно нужен approved feedback и сопоставимые production/candidate predictions в одном evaluation window. `com_exp` не используется как исходный текст: заказчик подтвердил, что это поле для задачи бесполезно.
 
-Проверено 2026-09-28: `generate_synthetic_sources.py --check` (7 источников), `generate_demo_data.py --check` (160 synthetic строк), SHA-256 обоих локальных CSV против source audit reports. Эти проверки не заменяют human review и не подтверждают качество моделей на реальных обращениях.
+Проверено 2026-09-28: `generate_synthetic_sources.py --check` (7 источников), `generate_demo_data.py --check` (160 synthetic строк), SHA-256 обоих локальных CSV против source audit reports. Созданы игнорируемые Git `data/reviews/{vko,almaty}_spike_review_2026-09-28.json` и соответствующие `*_incident_registry_template_2026-09-28.json`; шаблоны не содержат alert scores и не проходят evaluator до review. Эти проверки не заменяют human review и не подтверждают качество моделей на реальных обращениях.
