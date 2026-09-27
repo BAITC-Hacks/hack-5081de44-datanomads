@@ -94,6 +94,26 @@ class DriftTests(unittest.TestCase):
         report = compare_snapshots(earlier, later, policy())
         self.assertEqual(report["signals"]["model_token_length"]["status"], "DRIFT")
 
+    def test_thresholds_use_unrounded_scores(self) -> None:
+        earlier = DriftSnapshot.model_validate({**snapshot(START).model_dump(),
+                                                "ticket_count": 6,
+                                                "character_lengths": [2, 4, 0, 0, 0, 0],
+                                                "language_counts": {"RU": 6}})
+        later = DriftSnapshot.model_validate({**snapshot(START + timedelta(days=1)).model_dump(),
+                                              "ticket_count": 6,
+                                              "character_lengths": [4, 2, 0, 0, 0, 0],
+                                              "language_counts": {"RU": 6},
+                                              "corrected_count": 2})
+        threshold_policy = policy().model_copy(update={
+            "max_distribution_tv": 0.3333331,
+            "max_correction_rate_increase": 0.3333331,
+        })
+        report = compare_snapshots(earlier, later, threshold_policy)
+        self.assertEqual(report["signals"]["character_length"]["status"], "DRIFT")
+        self.assertEqual(report["signals"]["character_length"]["total_variation"], 0.333333)
+        self.assertEqual(report["signals"]["correction_rate"]["status"], "DRIFT")
+        self.assertEqual(report["signals"]["correction_rate"]["rate_increase"], 0.333333)
+
     def test_empty_windows_are_insufficient_instead_of_stable(self) -> None:
         empty = snapshot(START).model_copy(update={
             "ticket_count": 0, "character_lengths": [0] * 6,

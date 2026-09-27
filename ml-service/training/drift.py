@@ -88,11 +88,11 @@ def _distribution(baseline: list[int], recent: list[int], minimum: int,
     if min(baseline_count, recent_count) < minimum:
         return {"status": "INSUFFICIENT_EVIDENCE", "baseline_count": baseline_count,
                 "recent_count": recent_count, "total_variation": None}
-    distance = round(0.5 * sum(abs(left / baseline_count - right / recent_count)
-                               for left, right in zip(baseline, recent)), 6)
+    distance = 0.5 * sum(abs(left / baseline_count - right / recent_count)
+                         for left, right in zip(baseline, recent))
     return {"status": "DRIFT" if distance > maximum_tv else "STABLE",
             "baseline_count": baseline_count, "recent_count": recent_count,
-            "total_variation": distance}
+            "total_variation": round(distance, 6)}
 
 
 def _categories(baseline: dict[str, int], recent: dict[str, int], minimum: int,
@@ -142,12 +142,12 @@ def compare_snapshots(baseline: DriftSnapshot, recent: DriftSnapshot,
     else:
         baseline_rate = baseline.corrected_count / baseline.decision_count
         recent_rate = recent.corrected_count / recent.decision_count
-        increase = round(recent_rate - baseline_rate, 6)
+        increase = recent_rate - baseline_rate
         signals["correction_rate"] = {
             "status": "DRIFT" if increase > policy.max_correction_rate_increase else "STABLE",
             "baseline_count": baseline.decision_count, "recent_count": recent.decision_count,
             "baseline_rate": round(baseline_rate, 6), "recent_rate": round(recent_rate, 6),
-            "rate_increase": increase,
+            "rate_increase": round(increase, 6),
         }
     # The current schema records relation labels but not ranked candidates at
     # feedback time. Those labels alone cannot prove Recall@K or quality drift.
