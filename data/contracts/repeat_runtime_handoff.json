@@ -1,0 +1,35 @@
+{
+  "contract_version": "repeat-runtime-handoff.v1",
+  "producer": "data-ml",
+  "consumer": "runtime-platform",
+  "current_runtime_gap": {
+    "location": "backend/src/pg.rs",
+    "behavior": "A retrieved hit is called repeat at similarity >= 0.78 with the same topic and absolute creation-time distance <= 30 days.",
+    "missing_evidence": [
+      "candidate existed before query",
+      "same region and object",
+      "same issue but new episode",
+      "confirmed resolution of previous episode before query",
+      "validated repeat threshold and window"
+    ]
+  },
+  "data_ml_artifacts": {
+    "relation_review_contract": "scripts/review_retrieval_relations.py",
+    "temporal_window_evaluator": "scripts/evaluate_repeat_windows.py",
+    "empirical_repeat_window_status": "PENDING_REVIEWED_DATA",
+    "runtime_window_status": "NOT_APPROVED"
+  },
+  "required_integration": {
+    "owner": "runtime-platform",
+    "before_approval": "Do not present an unverified candidate as REPEAT; retain it as SIMILAR and allow operator relation feedback.",
+    "after_approval": "Load an approved versioned relation policy and a verified prior-resolution signal. Apply chronological and semantic checks before presenting REPEAT; preserve operator confirmation as a separate decision.",
+    "do_not": ["infer verified resolution from ticket status or closed_at alone", "auto-merge or auto-link tickets"]
+  },
+  "acceptance_evidence": [
+    "reviewed validation and frozen-test relation pairs include REPEAT and hard negatives",
+    "approved temporal source and review checksums match the evaluated package",
+    "separate repeat window report meets precommitted support and precision policy",
+    "runtime evidence source and policy version are recorded",
+    "runtime tests reject future candidates and unresolved previous episodes"
+  ]
+}
