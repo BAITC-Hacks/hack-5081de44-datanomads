@@ -132,17 +132,19 @@ impl Config {
                 )
             })
             .unwrap_or_else(|| !storage.eq_ignore_ascii_case("postgres"));
+        let dev_auth = resolve_dev_auth(
+            parse_optional_bool_env("PULSE_DEV_AUTH"),
+            default_dev_auth && defaults.dev_auth,
+            is_demo_environment,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         Self {
             host: env::var("PULSE_HOST").unwrap_or(defaults.host),
             port: env::var("PULSE_PORT")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(defaults.port),
-            dev_auth: env::var("PULSE_DEV_AUTH")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-                .unwrap_or(default_dev_auth && defaults.dev_auth),
+            dev_auth,
             storage,
             learning_cycle_duration_hours: parse_learning_cycle_duration_hours(
                 defaults.learning_cycle_duration_hours,
@@ -201,6 +203,18 @@ fn parse_optional_bool_env(name: &str) -> Option<bool> {
         "0" | "false" | "no" => Some(false),
         _ => panic!("{name} must be true or false"),
     }
+}
+
+fn resolve_dev_auth(
+    requested: Option<bool>,
+    default_enabled: bool,
+    is_demo_environment: bool,
+) -> Result<bool, &'static str> {
+    let enabled = requested.unwrap_or(default_enabled);
+    if enabled && !is_demo_environment {
+        return Err("PULSE_DEV_AUTH=true is only allowed in demo, test, or unit environments");
+    }
+    Ok(enabled)
 }
 
 /// Shared application state.
@@ -7395,6 +7409,17 @@ mod tests {
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn development_auth_cannot_be_enabled_outside_demo_environments() {
+        assert_eq!(resolve_dev_auth(Some(true), false, true), Ok(true));
+        assert_eq!(resolve_dev_auth(Some(false), true, false), Ok(false));
+        assert_eq!(resolve_dev_auth(None, false, false), Ok(false));
+        assert_eq!(
+            resolve_dev_auth(Some(true), false, false),
+            Err("PULSE_DEV_AUTH=true is only allowed in demo, test, or unit environments")
+        );
     }
 
     #[tokio::test]

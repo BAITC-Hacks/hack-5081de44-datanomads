@@ -48,7 +48,11 @@ docker run --rm -p 8080:8080 pulse109-core
 OPERATOR|MANAGER|ML_REVIEWER|ADMIN` и необязательный `x-user-id`. В normal
 режиме Core принимает только заголовки, выставленные доверенным auth gateway:
 `x-authenticated-role` и `x-authenticated-user`; `PULSE_DEV_AUTH=true` разрешён
-только для локального demo/test. Явно переданная роль всегда проверяется.
+только для `PULSE_ENV=demo|test|unit` и останавливает Core при включении в
+normal/production режиме. Core не проверяет JWT: внешний gateway обязан
+проверить identity token, удалить одноимённые заголовки от клиента и выставить
+доверенные `x-authenticated-*` перед пересылкой запроса. Явно переданная роль
+всегда проверяется.
 
 Structured JSON logs содержат `service`, `request_id`, `trace_id`, `endpoint`,
 `latency_ms`, `status` и не включают полный текст обращения. CORS разрешён для

@@ -1117,6 +1117,37 @@ async fn operator_cannot_read_manager_analytics() {
 }
 
 #[tokio::test]
+async fn production_mode_ignores_demo_role_headers() {
+    let mut state = AppState::demo();
+    state.config.dev_auth = false;
+    let application = app(state);
+
+    let demo_header = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/analytics")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(demo_header.status(), 401);
+
+    let gateway_headers = application
+        .oneshot(
+            Request::get("/api/v1/analytics")
+                .header("x-authenticated-role", "MANAGER")
+                .header("x-authenticated-user", "gateway-user-17")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gateway_headers.status(), 200);
+}
+
+#[tokio::test]
 async fn alert_events_stream_snapshot_and_changes() {
     let application = app(AppState::demo());
     let response = application
