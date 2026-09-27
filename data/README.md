@@ -84,7 +84,7 @@ python -m unittest discover -s data/tests -v
 
 `scripts/generate_synthetic_classifier.py` builds a separate classifier corpus
 from 160 manually written RU/KZ scenarios in `sdg/classifier_scenarios.tsv`:
-20,000 train, 2,000 validation and 4,000 test rows, balanced across 16 topics
+4,480 train, 640 validation and 1,280 test rows, balanced across 16 topics
 and both languages. Exact text duplicates and obvious PII patterns are rejected.
 All paraphrases of one scenario stay in one split.
 
@@ -92,12 +92,16 @@ All paraphrases of one scenario stay in one split.
 python3 scripts/generate_synthetic_classifier.py
 ```
 
-Files appear in ignored `data/sdg/generated/classifier_v1/`, with a manifest,
+Files appear in ignored `data/sdg/generated/classifier_v2/`, with a manifest,
 checksums and `review_status=PENDING`. This is a reproducible **synthetic
 candidate**, not a reviewed gold set or evidence of performance on real 109
-appeals. The 26,000 rows come from only 160 base situations; increasing their
+appeals. Generic openers and requests do not add an unsupported observation
+time or a service action. The previous `classifier_v1` generator added an
+unprovided time context and its local outputs must not be used as training
+evidence; the new version does not overwrite that directory. The 6,400 rows
+still come from only 160 base situations; increasing their
 number further without adding distinct situations is unlikely to help. Before
-choosing a model, compare 2k/5k/20k training subsets on the same held-out
+choosing a model, compare 1k/2k/4k training subsets on the same held-out
 scenario groups, review a sample of RU/KZ text and create an independent
 evaluation set. This corpus is for classification; retrieval training still
 needs separately defined positive and hard-negative pairs.
@@ -108,7 +112,7 @@ The same command also writes `challenges.jsonl` from the versioned
 an out-of-taxonomy situation, and a message without enough subject detail.
 They have `review_status=PENDING`, no confirmed `topic_id`, and
 `approved_for_training=false`. The manifest records their source/output
-checksums separately from the 26,000 class-labeled rows. These proposals
+checksums separately from the 6,400 class-labeled rows. These proposals
 require human review before they can serve as challenge evaluation evidence;
 they are never included in train, validation or test splits by this generator.
 

@@ -34,7 +34,8 @@
 ## Обученная модель для демо
 
 Корпус генерируется отдельно; файлы и веса остаются локальными и не попадают
-в Git. Для установленной RTX 3060:
+в Git. `classifier_v1` добавлял неподтверждённое время к части текстов;
+для нового обучения используйте только `classifier_v2`. Для установленной RTX 3060:
 
 ```bash
 uv venv --python 3.11 .venv
@@ -42,14 +43,14 @@ uv pip install --python .venv/bin/python torch==2.7.0 --index-url https://downlo
 uv pip install --python .venv/bin/python transformers==4.57.6 -r ml-service/requirements.txt
 .venv/bin/python scripts/generate_synthetic_classifier.py
 .venv/bin/python ml-service/train_classifier.py \
-  --demo-data-dir data/sdg/generated/classifier_v1 \
-  --output-dir ml-service/artifacts/classifier-synthetic-v1
+  --demo-data-dir data/sdg/generated/classifier_v2 \
+  --output-dir ml-service/artifacts/classifier-synthetic-v2
 ```
 
 Указывайте новый `--output-dir`: trainer не перезаписывает существующий artifact.
-Скрипт использует 20 000 train, 2 000 validation и 4 000 test примеров.
+Скрипт использует 4 480 train, 640 validation и 1 280 test примеров.
 Сценарии между выборками не пересекаются. Артефакт и метрики сохраняются в
-`ml-service/artifacts/classifier-synthetic-v1/`. `macro_f1` на test измеряет
+`ml-service/artifacts/classifier-synthetic-v2/`. `macro_f1` на test измеряет
 только обобщение на новые **синтетические** сценарии; это не оценка качества
 на реальных обращениях 109. Температура вероятностей подбирается на
 validation, но калибровка на реальных данных отсутствует. Поэтому все
@@ -58,22 +59,17 @@ validation, но калибровка на реальных данных отс�
 Локальный API с обученной моделью:
 
 ```bash
-PULSE_CLASSIFIER_MODEL_DIR=ml-service/artifacts/classifier-synthetic-v1 \
+PULSE_CLASSIFIER_MODEL_DIR=ml-service/artifacts/classifier-synthetic-v2 \
   .venv/bin/uvicorn app.main:app --app-dir ml-service --host 127.0.0.1 --port 8000
 ```
 
-Полный Docker demo с обученной моделью:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.ml.yml --profile demo up -d --build
-scripts/smoke
-```
-
-`docker-compose.ml.yml` ставит CPU PyTorch в ML image и монтирует
-локальный артефакт read-only. Без override основной compose продолжает
-использовать лёгкий baseline. Offline-обучение не меняет операторские решения
-и не включает online retraining. Feedback jobs в worker настраиваются отдельно,
-как описано в [learning-loop.md](../docs/learning-loop.md).
+`docker-compose.ml.yml` пока монтирует исторический артефакт `classifier-synthetic-v1`.
+Он не проверяет корпус `classifier_v2`; переключение Docker demo на новый
+артефакт относится к integration-task после его обучения и проверки. Без
+override основной compose использует лёгкий baseline. Offline-обучение не
+меняет операторские решения и не включает online retraining. Feedback jobs в
+worker настраиваются отдельно, как описано в
+[learning-loop.md](../docs/learning-loop.md).
 
 ## Локальный запуск
 

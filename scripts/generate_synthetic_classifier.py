@@ -25,9 +25,9 @@ from data.schemas.taxonomy import TOPIC_DEFINITIONS
 SEED = 109
 SCENARIO_BANK = ROOT / "data/sdg/classifier_scenarios.tsv"
 CHALLENGE_BANK = ROOT / "data/sdg/classifier_challenges.tsv"
-DEFAULT_OUTPUT = ROOT / "data/sdg/generated/classifier_v1"
+DEFAULT_OUTPUT = ROOT / "data/sdg/generated/classifier_v2"
 SPLITS = ("train",) * 7 + ("validation",) + ("test",) * 2
-TOPIC_INDEX = {topic["id"]: index for index, topic in enumerate(TOPIC_DEFINITIONS)}
+TOPIC_IDS = {topic["id"] for topic in TOPIC_DEFINITIONS}
 CHALLENGE_DECISIONS = {"UNKNOWN", "OTHER", "NEEDS_REVIEW"}
 CHALLENGE_LANGUAGES = {"RU", "KZ", "MIXED"}
 REQUIRED_BOUNDARIES = {
@@ -42,26 +42,16 @@ REQUIRED_BOUNDARIES = {
 PHRASES = {
     "RU": {
         "openers": ("", "Здравствуйте. ", "Добрый день. ", "Нужна помощь. ", "Пишу с проблемой. "),
-        "times": (
-            "", "Заметили это сегодня.", "Проблема сохраняется второй день.",
-            "Такое повторяется уже несколько дней.", "Сейчас ситуация не изменилась.",
-        ),
         "requests": (
             "", "Проверьте, пожалуйста.", "Когда это исправят?",
-            "Прошу разобраться.", "Можно уточнить срок решения?",
-            "Передайте обращение ответственной службе.",
+            "Прошу разобраться.",
         ),
     },
     "KZ": {
         "openers": ("", "Сәлеметсіз бе. ", "Қайырлы күн. ", "Көмек қажет. ", "Мәселе бойынша жазып отырмын. "),
-        "times": (
-            "", "Мұны бүгін байқадық.", "Мәселе екінші күн сақталып тұр.",
-            "Бұл жағдай бірнеше күннен бері қайталанып жүр.", "Қазір де жағдай өзгерген жоқ.",
-        ),
         "requests": (
             "", "Тексеріп беріңізші.", "Қашан түзетіледі?",
-            "Мәселені қарауыңызды сұраймын.", "Шешу мерзімін айта аласыз ба?",
-            "Өтінішті жауапты қызметке жолдаңызшы.",
+            "Мәселені қарауыңызды сұраймын.",
         ),
     },
 }
@@ -119,7 +109,7 @@ def read_challenges(path: Path) -> list[dict[str, object]]:
                     decision not in CHALLENGE_DECISIONS or language not in CHALLENGE_LANGUAGES or
                     not text or scan_pii(text).detected or text.casefold() in seen_texts or
                     (decision == "NEEDS_REVIEW" and (len(topics) != 2 or
-                     len(set(topics)) != 2 or any(topic not in TOPIC_INDEX for topic in topics))) or
+                     len(set(topics)) != 2 or any(topic not in TOPIC_IDS for topic in topics))) or
                     (decision != "NEEDS_REVIEW" and topics)):
                 raise ValueError(f"invalid challenge at line {line_number}")
             previous = groups.get(scenario_id)
@@ -152,14 +142,8 @@ def read_challenges(path: Path) -> list[dict[str, object]]:
 def render_variants(fact: str, language: str, scenario_id: str) -> list[str]:
     phrases = PHRASES[language]
     variants = set()
-    for opener, time, request, time_first in itertools.product(
-        phrases["openers"], phrases["times"], phrases["requests"], (False, True)
-    ):
-        if not time and time_first:
-            continue
-        parts = [time, fact] if time_first else [fact, time]
-        text = " ".join(part for part in parts if part)
-        text = f"{opener}{text}"
+    for opener, request in itertools.product(phrases["openers"], phrases["requests"]):
+        text = f"{opener}{fact}"
         if request:
             text += f" {request}"
         variants.add(text)
@@ -185,19 +169,9 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
             issue_index = int(scenario_id.rsplit("-", 1)[1]) - 1
             split = SPLITS[issue_index]
             groups[split].add(scenario_id)
-            # Four training scenarios get one extra row per topic: 1,250 per topic.
-            if split == "train":
-                quota = 179 if issue_index < 4 else 178
-            else:
-                quota = 125
             for language in ("RU", "KZ"):
-                language_quota = quota // 2
-                if quota % 2 and ((issue_index + TOPIC_INDEX[topic_id] + (language == "KZ")) % 2 == 0):
-                    language_quota += 1
                 variants = render_variants(scenario[language], language, scenario_id)
-                if len(variants) < language_quota:
-                    raise ValueError(f"not enough distinct variants for {scenario_id}/{language}")
-                for variant_index, text in enumerate(variants[:language_quota], start=1):
+                for variant_index, text in enumerate(variants, start=1):
                     if text in seen_texts or scan_pii(text).detected:
                         raise ValueError(f"duplicate or sensitive-looking generated text for {scenario_id}")
                     seen_texts.add(text)
@@ -221,7 +195,7 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
         for challenge in challenges:
             stream.write(json.dumps(challenge, ensure_ascii=False, sort_keys=True) + "\n")
     manifest = {
-        "dataset_version": "synthetic-classifier-v1",
+        "dataset_version": "synthetic-classifier-v2",
         "synthetic": True,
         "purpose": "local classifier demo; not evidence of quality on real 109 appeals",
         "review_status": "PENDING",

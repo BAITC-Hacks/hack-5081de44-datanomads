@@ -8,11 +8,21 @@ import unittest
 
 from scripts.generate_synthetic_classifier import (
     CHALLENGE_BANK, REQUIRED_BOUNDARIES, SCENARIO_BANK, generate, read_challenges,
-    read_scenarios, sha256,
+    read_scenarios, render_variants, sha256,
 )
 
 
 class SyntheticClassifierTests(unittest.TestCase):
+    def test_variants_do_not_invent_when_problem_started(self) -> None:
+        for language, fact, unsupported in (
+            ("RU", "В доме нет холодной воды.", "Проблема сохраняется второй день."),
+            ("KZ", "Үйде суық су жоқ.", "Мәселе екінші күн сақталып тұр."),
+        ):
+            with self.subTest(language=language):
+                variants = render_variants(fact, language, "water_supply-01")
+                self.assertEqual(len(variants), 20)
+                self.assertTrue(all(fact in text and unsupported not in text for text in variants))
+
     def test_scenarios_cover_every_topic(self) -> None:
         scenarios = read_scenarios(SCENARIO_BANK)
         self.assertEqual(len(scenarios), 160)
@@ -46,8 +56,9 @@ class SyntheticClassifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "classifier"
             manifest = generate(output)
-            self.assertEqual(manifest["split_counts"], {"train": 20000, "validation": 2000, "test": 4000})
-            self.assertEqual(manifest["language_counts"], {"RU": 13000, "KZ": 13000})
+            self.assertEqual(manifest["dataset_version"], "synthetic-classifier-v2")
+            self.assertEqual(manifest["split_counts"], {"train": 4480, "validation": 640, "test": 1280})
+            self.assertEqual(manifest["language_counts"], {"RU": 3200, "KZ": 3200})
             self.assertEqual(manifest["scenario_counts_by_split"], {"train": 112, "validation": 16, "test": 32})
             self.assertEqual(manifest["challenge_count"], 21)
             self.assertEqual(manifest["challenge_scenario_count"], 7)
@@ -63,14 +74,14 @@ class SyntheticClassifierTests(unittest.TestCase):
                     rows = [json.loads(line) for line in handle]
                 groups[split] = {row["scenario_id"] for row in rows}
                 by_topic_language = Counter((row["topic_id"], row["language"]) for row in rows)
-                expected_per_pair = {"train": {625}, "validation": {62, 63}, "test": {125}}
+                expected_per_pair = {"train": {140}, "validation": {20}, "test": {40}}
                 self.assertEqual(set(by_topic_language.values()), expected_per_pair[split])
                 self.assertTrue(all(row["synthetic"] and row["split"] == split for row in rows))
                 self.assertTrue(all(row["review_status"] == "PENDING" for row in rows))
                 self.assertEqual(len({row["text"] for row in rows}), len(rows))
                 texts.update(row["text"] for row in rows)
                 self.assertEqual(manifest["files"][split]["sha256"], sha256(output / f"{split}.jsonl"))
-            self.assertEqual(len(texts), 26000)
+            self.assertEqual(len(texts), 6400)
             self.assertFalse(groups["train"] & groups["validation"])
             self.assertFalse(groups["train"] & groups["test"])
             self.assertFalse(groups["validation"] & groups["test"])
