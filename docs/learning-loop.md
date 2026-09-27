@@ -78,7 +78,11 @@ critical_regressions, sample_size, decision, created_at
 Пока реальный trainer не подключён, обычный ML runtime возвращает
 `TRAINER_NOT_CONFIGURED` и не создаёт candidate. Тестовый fake trainer включается
 только через `PULSE_TEST_FAKE_TRAINER=true` для проверки state machine; его
-результат не является обученной моделью или валидной ML-метрикой.
+результат не является обученной моделью или валидной ML-метрикой. Само наличие
+candidate artifact больше не создаёт фиктивный `READY_TO_REVIEW`. Promotion
+требует сохранённые offline и shadow reports на тех же версиях моделей,
+достаточный sample size, отсутствие критичных регрессий и совпадение checksums;
+fake candidate не проходит этот gate.
 
 Операторское исправление никогда не вызывает serving replacement или
 автоматический retraining.

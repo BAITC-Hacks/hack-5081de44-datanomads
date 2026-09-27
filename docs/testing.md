@@ -102,6 +102,8 @@ idempotency, затем проверяет PostgreSQL/Qdrant preview, refetch р
 30/60/90, spike detector → ACK/CLOSE → SSE, PDF/XLSX, RBAC, Qdrant reindex и
 learning-cycle. В normal mode ожидается `TRAINER_NOT_CONFIGURED`; test-only
 fake trainer включается отдельно и не считается реальной ML-метрикой.
+Acceptance flow проверяет, что fake candidate без offline/shadow evidence
+получает `409` на promotion и может быть только отклонён.
 
 ## Data/PII safety tests
 

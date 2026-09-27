@@ -6,7 +6,7 @@ internals.  It is safe to run repeatedly: every run uses a unique source and
 the import is checked for idempotency.  The normal worker is expected to leave
 the learning candidate at ``TRAINER_NOT_CONFIGURED``; when
 ``PULSE_TEST_FAKE_TRAINER=true`` is enabled for an integration run, the same
-flow also verifies candidate promotion.
+flow verifies that a fake candidate cannot pass the promotion gate.
 """
 
 from __future__ import annotations
@@ -309,10 +309,13 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         status, _, evaluation = json_request(base_url, "GET", "/api/v1/learning/candidate/evaluation", role="ML_REVIEWER", timeout=timeout)
         if evaluation.get("state") != "TRAINING":
             break
-    if evaluation.get("decision") == "READY_TO_REVIEW":
-        status, _, promoted = json_request(base_url, "POST", "/api/v1/learning/candidate/promote", body={"note": "e2e fake trainer"}, role="ML_REVIEWER", timeout=timeout)
-        expect(status == 200 and promoted.get("state") == "PROMOTED", f"candidate promotion failed: {promoted}")
-        learning_result = "PROMOTED_TEST_CANDIDATE"
+    if evaluation.get("offline_metrics", {}).get("status") == "EVALUATION_PENDING":
+        expect(evaluation.get("decision") == "NOT_READY", f"unevaluated candidate appeared ready: {evaluation}")
+        status, _, promotion = json_request(base_url, "POST", "/api/v1/learning/candidate/promote", body={"note": "e2e fake trainer"}, role="ML_REVIEWER", timeout=timeout)
+        expect(status == 409, f"unevaluated candidate promotion was not rejected: {promotion}")
+        status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e fake candidate"}, role="ML_REVIEWER", timeout=timeout)
+        expect(status == 200 and rejected.get("state") == "REJECTED", f"fake candidate rejection failed: {rejected}")
+        learning_result = "FAKE_CANDIDATE_REJECTED_NO_EVIDENCE"
     else:
         expect(evaluation.get("offline_metrics", {}).get("status") == "TRAINER_NOT_CONFIGURED", f"unexpected normal-mode trainer result: {evaluation}")
         status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e normal mode"}, role="ML_REVIEWER", timeout=timeout)
