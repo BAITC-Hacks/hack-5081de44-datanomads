@@ -87,6 +87,8 @@ export interface RelatedTicketDetail {
   status: string
   channel: Ticket['channel']
   latestDecision?: ConfirmedDecisionSummary
+  outcomeVerification?: OutcomeVerificationSnapshot
+  outcomeVerificationError?: string
 }
 
 export interface ConfirmedDecisionSummary {

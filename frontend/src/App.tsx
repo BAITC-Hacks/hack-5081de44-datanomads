@@ -753,6 +753,11 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
   </aside>
 }
 
+function resolutionMemoryLabel(actionRecorded: boolean, outcomeState?: OutcomeVerificationState): string {
+  const action = actionRecorded ? 'Action recorded' : 'Action not recorded'
+  return outcomeState ? `${action}; outcome ${outcomeState}` : `${action}; outcome unavailable`
+}
+
 function OutcomeVerificationPanel({ ticket }: { ticket: Ticket }) {
   const [snapshot, setSnapshot] = useState<OutcomeVerificationSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
@@ -814,6 +819,7 @@ function OutcomeVerificationPanel({ ticket }: { ticket: Ticket }) {
         <div><dt>Официальный статус CRM</dt><dd>{snapshot.officialTicketStatus}</dd></div>
         <div><dt>Состояние результата в Pulse</dt><dd>{stateLabel(snapshot.state)}</dd></div>
       </dl>
+      <p className="resolution-memory-state" role="status">{resolutionMemoryLabel(Boolean(ticket.latestDecision), snapshot.state)}</p>
       {!snapshot.latest && <p className="panel-note">Сведений о результате нет. Молчание и отсутствие обратной связи остаются UNKNOWN, даже если официальная запись закрыта.</p>}
       {snapshot.latest && <p className="panel-note">Последняя запись: {snapshot.latest.sourceSystem} · {snapshot.latest.channel} · оператор {snapshot.latest.actorUserId} · {snapshot.latest.createdAt}</p>}
       <form className="routing-feedback-form" onSubmit={(event) => void saveVerification(event)}>
@@ -1065,6 +1071,9 @@ function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state
     : decision?.action.toLowerCase() === 'correct'
       ? 'Исправление темы оператором'
       : decision?.action
+  const memoryLabel = detail
+    ? resolutionMemoryLabel(Boolean(decision), detail.outcomeVerification?.state)
+    : ''
 
   return <div className="related-ticket-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
     <section className="related-ticket-panel" role="dialog" aria-modal="true" aria-labelledby="related-ticket-title">
@@ -1096,6 +1105,10 @@ function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state
             {decision.priority && <div><dt>Приоритет в решении</dt><dd>{decision.priority}</dd></div>}
             {decision.createdAt && <div><dt>Время действия</dt><dd>{decision.createdAt}</dd></div>}
           </dl> : <p className="panel-note">Операторское действие не зафиксировано. Исход обращения неизвестен.</p>}
+          <p className="resolution-memory-state" role="status">{memoryLabel}</p>
+          {detail.outcomeVerificationError
+            ? <p className="routing-feedback-error" role="alert">Не удалось загрузить outcome; закрытый статус нельзя трактовать как VERIFIED: {detail.outcomeVerificationError}</p>
+            : detail.outcomeVerification?.latest && <p className="panel-note">{detail.outcomeVerification.latest.sourceSystem} · {detail.outcomeVerification.latest.channel} · оператор {detail.outcomeVerification.latest.actorUserId} · {detail.outcomeVerification.latest.createdAt}</p>}
         </section>
         <section className="related-ticket-section">
           <div className="field-label">Проверяемые признаки сходства</div>

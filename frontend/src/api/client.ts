@@ -567,7 +567,12 @@ function mapConfirmedDecision(decision: NonNullable<BackendTicketDetail['latest_
 }
 
 export async function loadRelatedTicketDetail(ticketId: string): Promise<RelatedTicketDetail> {
-  const detail = await request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticketId)}`)
+  const [detail, outcomeResult] = await Promise.all([
+    request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticketId)}`),
+    loadOutcomeVerification(ticketId)
+      .then((snapshot) => ({ snapshot }))
+      .catch((error: unknown) => ({ error: error instanceof Error ? error.message : 'ошибка API' })),
+  ])
   const ticket = detail.ticket
   const decision = detail.latest_decision
   const decisionPriority = decision?.priority?.trim()
@@ -593,6 +598,8 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
       priority: decisionPriority && !['unknown', 'unavailable'].includes(decisionPriority.toLowerCase()) ? mapPriority(decisionPriority) : undefined,
       createdAt: decision.created_at?.trim() || undefined,
     } : undefined,
+    outcomeVerification: 'snapshot' in outcomeResult ? outcomeResult.snapshot : undefined,
+    outcomeVerificationError: 'error' in outcomeResult ? outcomeResult.error : undefined,
   }
 }
 
