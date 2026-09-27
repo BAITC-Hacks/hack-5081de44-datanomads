@@ -10,18 +10,20 @@ use crate::anomaly::{
 };
 use crate::{
     actionable_context_for_candidates, actionable_context_manual_review,
-    actionable_context_needs_candidates, build_query_intent_result, manual_response_template,
-    metric_rate, query_analytics_filters, related_ticket_candidate, render_template_body,
-    validate_query_intent, ActionableContextOption, Alert, AlertQuery, AlternativePrediction,
-    AnalyticsDrilldownQuery, AnalyticsDrilldownResponse, AnalyticsDrilldownTicket, AnalyticsQuery,
-    AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
-    CloseLearningCycleRequest, Config, CreateLearningCycleRequest, DatasetProvenance,
-    DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse, ImportRequest,
-    ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics,
-    LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision, Prediction,
-    QueryIntentRequest, RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput,
-    ResponseTemplateRecord, ResponseTemplatesResponse, RuleProvenance, RuleSource, RuntimeMetrics,
+    actionable_context_needs_candidates, build_query_intent_result, known_routing_value,
+    manual_response_template, metric_rate, query_analytics_filters, related_ticket_candidate,
+    render_template_body, validate_query_intent, ActionableContextOption, Alert, AlertQuery,
+    AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsDrilldownResponse,
+    AnalyticsDrilldownTicket, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
+    AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
+    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
+    ForecastQuery, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
+    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
+    ModelQuery, ModelVersion, OperatorDecision, Prediction, QueryIntentRequest,
+    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
+    ResponseTemplatesResponse, RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics,
     Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -787,6 +789,39 @@ struct DbDecision {
     user_id: String,
     note: Option<String>,
     created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
+struct DbRoutingFeedback {
+    id: i64,
+    ticket_id: i64,
+    operator_decision_id: i64,
+    original_route_recommendation: String,
+    operator_confirmed_route: String,
+    service_feedback: String,
+    corrected_target_service: Option<String>,
+    actor_user_id: String,
+    source_system: String,
+    evaluation_status: String,
+    created_at: DateTime<Utc>,
+}
+
+impl From<DbRoutingFeedback> for RoutingFeedbackRecord {
+    fn from(row: DbRoutingFeedback) -> Self {
+        Self {
+            id: row.id.to_string(),
+            ticket_id: row.ticket_id.to_string(),
+            operator_decision_id: format!("decision-{}", row.operator_decision_id),
+            original_route_recommendation: row.original_route_recommendation,
+            operator_confirmed_route: row.operator_confirmed_route,
+            service_feedback: row.service_feedback,
+            corrected_target_service: row.corrected_target_service,
+            actor_user_id: row.actor_user_id,
+            source_system: row.source_system,
+            evaluation_status: row.evaluation_status,
+            created_at: row.created_at.to_rfc3339(),
+        }
+    }
 }
 
 #[derive(Debug, FromRow)]
@@ -5975,6 +6010,105 @@ impl PgRepository {
             .await
             .map_err(|error| format!("insert relation feedback: {error}"))?;
         Ok(())
+    }
+
+    pub async fn list_routing_feedback(
+        &self,
+        ticket_id: &str,
+    ) -> Result<Vec<RoutingFeedbackRecord>, String> {
+        let ticket = self.fetch_ticket(ticket_id).await?;
+        let numeric_ticket_id = ticket
+            .id
+            .parse::<i64>()
+            .map_err(|_| "stored ticket has invalid database id".to_owned())?;
+        let rows: Vec<DbRoutingFeedback> = sqlx::query_as(
+            "SELECT id, ticket_id, operator_decision_id, original_route_recommendation, operator_confirmed_route, service_feedback, corrected_target_service, actor_user_id, source_system, evaluation_status, created_at FROM routing_feedback WHERE ticket_id = $1 ORDER BY created_at DESC, id DESC",
+        )
+        .bind(numeric_ticket_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list routing feedback: {error}"))?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn create_routing_feedback(
+        &self,
+        ticket_id: &str,
+        service_feedback: &str,
+        corrected_target_service: Option<&str>,
+        user_id: &str,
+    ) -> Result<RoutingFeedbackRecord, String> {
+        let ticket = self.fetch_ticket(ticket_id).await?;
+        let numeric_ticket_id = ticket
+            .id
+            .parse::<i64>()
+            .map_err(|_| "stored ticket has invalid database id".to_owned())?;
+        let decision = self
+            .fetch_latest_decision(numeric_ticket_id)
+            .await?
+            .ok_or_else(|| "an operator decision is required before service feedback".to_owned())?;
+        let original_route_recommendation = decision
+            .predicted_service
+            .as_deref()
+            .filter(|service| known_routing_value(service))
+            .ok_or_else(|| {
+                "original route recommendation is unavailable for this operator decision".to_owned()
+            })?
+            .to_owned();
+        if !known_routing_value(&decision.service) {
+            return Err("operator-confirmed route is unavailable for this ticket".to_owned());
+        }
+
+        let corrected_target = if let Some(target) = corrected_target_service {
+            let row = sqlx::query(
+                "SELECT id, name_ru FROM services WHERE active AND (id = $1 OR lower(name_ru) = lower($1) OR lower(name_kk) = lower($1)) LIMIT 1",
+            )
+            .bind(target.trim())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| format!("resolve corrected target service: {error}"))?
+            .ok_or_else(|| "unknown corrected target service".to_owned())?;
+            let service_id: String = row
+                .try_get("id")
+                .map_err(|error| format!("corrected target service id: {error}"))?;
+            let service_name: String = row
+                .try_get("name_ru")
+                .map_err(|error| format!("corrected target service name: {error}"))?;
+            if decision.confirmed_service_id.as_deref() == Some(service_id.as_str())
+                || service_name.eq_ignore_ascii_case(&decision.service)
+            {
+                return Err(
+                    "corrected target service must differ from the operator-confirmed route"
+                        .to_owned(),
+                );
+            }
+            Some((service_id, service_name))
+        } else {
+            None
+        };
+        let decision_id = decision
+            .id
+            .strip_prefix("decision-")
+            .unwrap_or(&decision.id)
+            .parse::<i64>()
+            .map_err(|_| "stored operator decision has invalid database id".to_owned())?;
+        let row: DbRoutingFeedback = sqlx::query_as(
+            "INSERT INTO routing_feedback (ticket_id, operator_decision_id, original_route_recommendation, operator_confirmed_route, service_feedback, corrected_target_service_id, corrected_target_service, actor_user_id, source_system, evaluation_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id, ticket_id, operator_decision_id, original_route_recommendation, operator_confirmed_route, service_feedback, corrected_target_service, actor_user_id, source_system, evaluation_status, created_at",
+        )
+        .bind(numeric_ticket_id)
+        .bind(decision_id)
+        .bind(&original_route_recommendation)
+        .bind(&decision.service)
+        .bind(service_feedback)
+        .bind(corrected_target.as_ref().map(|(id, _)| id.as_str()))
+        .bind(corrected_target.as_ref().map(|(_, name)| name.as_str()))
+        .bind(user_id)
+        .bind(ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM)
+        .bind(ROUTING_FEEDBACK_PENDING_STATUS)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("insert routing feedback: {error}"))?;
+        Ok(row.into())
     }
 
     async fn fetch_ticket(&self, ticket_id: &str) -> Result<Ticket, String> {

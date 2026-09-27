@@ -98,6 +98,20 @@ export interface ConfirmedDecisionSummary {
   createdAt?: string
 }
 
+export interface RoutingFeedbackRecord {
+  id: string
+  ticketId: string
+  operatorDecisionId: string
+  originalRouteRecommendation: string
+  operatorConfirmedRoute: string
+  serviceFeedback: 'ACCEPTED' | 'CORRECTED'
+  correctedTargetService?: string
+  actorUserId: string
+  sourceSystem: 'DEMO_SIMULATION'
+  evaluationStatus: 'PENDING_OFFLINE_REVIEW'
+  createdAt: string
+}
+
 export interface Ticket {
   id: string
   originalText: string

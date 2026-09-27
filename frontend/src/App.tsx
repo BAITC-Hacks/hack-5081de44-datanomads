@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, subscribeToAlertChanges } from './api/client'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadDashboard, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, submitDecision, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
@@ -678,6 +678,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
       {!hasOperatorDecision && ticket.status !== 'new' && (
         <p className="panel-note" role="status">Статус записи отмечен как разобранный, но данные подтверждённого решения не предоставлены.</p>
       )}
+      <RoutingFeedbackPanel ticket={ticket} taxonomy={taxonomy} />
       <div className="detail-section">
         <div className="field-label">Ответ оператору <span className="language-chip">{hasApprovedTemplate ? (ticket.responseTemplateVersion ? `Утверждённый · v${ticket.responseTemplateVersion}` : 'Утверждённый шаблон') : 'Ручной ответ'}</span></div>
         {hasApprovedTemplate && !templateIgnored && (
@@ -745,6 +746,107 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     </div>
     {!correctionOpen && <div className="detail-actions"><button className="button button-primary" onClick={() => onDecision(ticket.id, { status: 'confirmed' })}><Icon name="check" size={16} />Подтвердить</button><button className="button button-secondary" onClick={() => setCorrectionOpen(true)}><Icon name="edit" size={16} />Исправить</button></div>}
   </aside>
+}
+
+function RoutingFeedbackPanel({ ticket, taxonomy }: { ticket: Ticket; taxonomy: DashboardData['filterOptions'] }) {
+  const [items, setItems] = useState<RoutingFeedbackRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [serviceFeedback, setServiceFeedback] = useState<'ACCEPTED' | 'CORRECTED'>('ACCEPTED')
+  const [correctedTargetService, setCorrectedTargetService] = useState('')
+  const hasOperatorDecision = ticket.confirmedDecisionAvailable === true || ticket.latestDecision !== undefined
+  const serviceOptions = useMemo(
+    () => Array.from(new Map(taxonomy.services.map((item) => [item.id, item])).values()),
+    [taxonomy.services],
+  )
+  const correctedOptions = useMemo(
+    () => serviceOptions.filter((item) => item.label.toLocaleLowerCase() !== ticket.service.toLocaleLowerCase()),
+    [serviceOptions, ticket.service],
+  )
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setError('')
+    setNotice('')
+    loadRoutingFeedback(ticket.id)
+      .then((records) => { if (active) setItems(records) })
+      .catch((requestError: unknown) => {
+        if (active) setError(requestError instanceof Error ? requestError.message : 'ошибка API')
+      })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [ticket.id])
+
+  useEffect(() => {
+    if (!correctedTargetService || !correctedOptions.some((item) => item.id === correctedTargetService)) {
+      setCorrectedTargetService(correctedOptions[0]?.id ?? '')
+    }
+  }, [correctedOptions, correctedTargetService])
+
+  const saveFeedback = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!hasOperatorDecision) return
+    setSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      const record = await submitRoutingFeedback(
+        ticket.id,
+        serviceFeedback,
+        serviceFeedback === 'CORRECTED' ? correctedTargetService : undefined,
+      )
+      setItems((current) => [record, ...current])
+      setNotice('Симуляция сохранена для контролируемой офлайн-проверки. Правила маршрутизации не изменены.')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'ошибка API')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <section className="detail-section routing-feedback-panel" aria-label="Обратная связь по маршрутизации">
+    <div className="section-inline-heading">
+      <div className="field-label">Ответ службы</div>
+      <span className="routing-simulation-badge">DEMO SIMULATION</span>
+    </div>
+    <p className="panel-note">Внешний канал службы не подключён. Здесь сохраняется только демонстрационная симуляция, привязанная к решению оператора; она не меняет рабочие правила и не запускает обучение.</p>
+    <dl className="routing-feedback-routes">
+      <div><dt>Рекомендация Pulse</dt><dd>{ticket.recommendedService ?? 'Не предоставлена'}</dd></div>
+      <div><dt>Подтверждённая служба оператора</dt><dd>{hasOperatorDecision ? ticket.service : 'Сначала зафиксируйте решение оператора'}</dd></div>
+    </dl>
+    {hasOperatorDecision && <form className="routing-feedback-form" onSubmit={(event) => void saveFeedback(event)}>
+      <label>Симулированный ответ
+        <select value={serviceFeedback} onChange={(event) => setServiceFeedback(event.target.value as 'ACCEPTED' | 'CORRECTED')}>
+          <option value="ACCEPTED">Маршрут принят службой</option>
+          <option value="CORRECTED">Служба направила в другое подразделение</option>
+        </select>
+      </label>
+      {serviceFeedback === 'CORRECTED' && <label>Исправленный адресат
+        <select aria-label="Исправленный адресат службы" value={correctedTargetService} onChange={(event) => setCorrectedTargetService(event.target.value)} required>
+          {correctedOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+        </select>
+      </label>}
+      <button className="button button-secondary" type="submit" disabled={saving || (serviceFeedback === 'CORRECTED' && !correctedTargetService)}>
+        {saving ? 'Сохраняем…' : 'Сохранить симуляцию'}
+      </button>
+    </form>}
+    {!hasOperatorDecision && <p className="panel-note">Сначала подтвердите или исправьте службу в решении оператора. Служебная обратная связь без operator-confirmed route не принимается.</p>}
+    {loading && <p className="panel-note" role="status">Загружаю историю симуляций…</p>}
+    {error && <p className="routing-feedback-error" role="alert">Не удалось загрузить или сохранить обратную связь: {error}</p>}
+    {notice && <p className="routing-feedback-notice" role="status">{notice}</p>}
+    {!loading && !error && items.length === 0 && <p className="panel-note">Записей симуляции пока нет.</p>}
+    {items.length > 0 && <div className="routing-feedback-history" aria-label="История симуляций">
+      {items.map((item) => <article className="routing-feedback-record" key={item.id}>
+        <div><strong>{item.serviceFeedback === 'ACCEPTED' ? 'Маршрут принят' : 'Маршрут исправлен'}</strong><span>{item.sourceSystem} · {item.actorUserId} · {item.createdAt}</span></div>
+        <p>Рекомендация: {item.originalRouteRecommendation} · подтверждено оператором: {item.operatorConfirmedRoute}</p>
+        {item.correctedTargetService && <p>Исправленный адресат: {item.correctedTargetService}</p>}
+        <small>Статус: ожидает контролируемой офлайн-проверки. Production-правила не изменены.</small>
+      </article>)}
+    </div>}
+  </section>
 }
 
 function RelatedTicketDetailPanel({ state, taxonomy, onClose, onRetry }: { state: RelatedTicketPanelState; taxonomy: DashboardData['filterOptions']; onClose: () => void; onRetry: () => void }) {

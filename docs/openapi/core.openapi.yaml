@@ -300,6 +300,46 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/tickets/{ticket_id}/routing-feedback:
+    get:
+      tags: [tickets]
+      summary: List route feedback for a ticket
+      description: Includes demo service feedback explicitly marked as a simulation and pending controlled offline review.
+      security: [{ pulseRole: [] }, {}]
+      parameters:
+        - $ref: '#/components/parameters/TicketId'
+      responses:
+        '200':
+          description: Routing feedback records, newest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoutingFeedbackListResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [tickets]
+      summary: Record simulated service routing feedback
+      description: Creates a DEMO_SIMULATION record linked to the latest operator decision. It does not update production routing rules or start training.
+      security: [{ pulseRole: [] }, {}]
+      parameters:
+        - $ref: '#/components/parameters/TicketId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateRoutingFeedbackRequest' }
+      responses:
+        '201':
+          description: Simulated service feedback stored for controlled offline review
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoutingFeedbackRecord' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/analytics/overview:
     get:
       tags: [analytics]
@@ -1405,6 +1445,38 @@ components:
         user_id: { type: string }
         created_at: { type: string, format: date-time }
         suggestion: { $ref: '#/components/schemas/RelationSuggestionSnapshot' }
+    CreateRoutingFeedbackRequest:
+      type: object
+      additionalProperties: false
+      required: [service_feedback]
+      properties:
+        service_feedback: { type: string, enum: [ACCEPTED, CORRECTED] }
+        corrected_target_service:
+          type: string
+          maxLength: 128
+          description: Active service id or label; required only for CORRECTED feedback.
+    RoutingFeedbackRecord:
+      type: object
+      required: [id, ticket_id, operator_decision_id, original_route_recommendation, operator_confirmed_route, service_feedback, actor_user_id, source_system, evaluation_status, created_at]
+      properties:
+        id: { type: string }
+        ticket_id: { type: string }
+        operator_decision_id: { type: string }
+        original_route_recommendation: { type: string }
+        operator_confirmed_route: { type: string }
+        service_feedback: { type: string, enum: [ACCEPTED, CORRECTED] }
+        corrected_target_service: { type: string, nullable: true }
+        actor_user_id: { type: string }
+        source_system: { type: string, enum: [DEMO_SIMULATION] }
+        evaluation_status: { type: string, enum: [PENDING_OFFLINE_REVIEW] }
+        created_at: { type: string, format: date-time }
+    RoutingFeedbackListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/RoutingFeedbackRecord' }
     StoredResponse:
       type: object
       required: [status, request_id]

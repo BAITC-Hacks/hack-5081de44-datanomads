@@ -305,6 +305,23 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .comparison-fact-different { border-color: rgba(248,212,136,.2); }
 .comparison-fact-different small { color: #f8d488; }
 .comparison-fact-unavailable small { color: #a2aaa6; }
+.routing-feedback-panel { background: rgba(140,240,200,.025); }
+.routing-simulation-badge { padding: 4px 6px; border: 1px solid rgba(248,212,136,.22); border-radius: 4px; color: #f8d488; font-size: 8px; font-weight: 700; letter-spacing: .08em; }
+.routing-feedback-routes { display: grid; gap: 7px; margin: 10px 0; }
+.routing-feedback-routes > div { display: grid; gap: 3px; padding: 8px 10px; border: 1px solid rgba(214,236,225,.08); border-radius: 6px; background: rgba(6,17,14,.32); }
+.routing-feedback-routes dt { color: #8b9e95; font-size: 9px; }
+.routing-feedback-routes dd { margin: 0; color: #d2e2d9; font-size: 11px; overflow-wrap: anywhere; }
+.routing-feedback-form { display: grid; gap: 9px; margin-top: 10px; }
+.routing-feedback-form label { display: grid; gap: 5px; color: #9dafa6; font-size: 10px; }
+.routing-feedback-form select { width: 100%; color: #d9e6de; }
+.routing-feedback-history { display: grid; gap: 7px; margin-top: 10px; }
+.routing-feedback-record { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid rgba(214,236,225,.08); border-radius: 7px; background: rgba(6,17,14,.34); }
+.routing-feedback-record > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 12px; }
+.routing-feedback-record strong { color: #d2e2d9; font-size: 10px; }
+.routing-feedback-record span, .routing-feedback-record small { color: #8b9e95; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.routing-feedback-record p { margin: 0; color: #9fb2a9; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.routing-feedback-error { color: #ff9d9d; font-size: 10px; line-height: 1.45; }
+.routing-feedback-notice { color: #8cf0c8; font-size: 10px; line-height: 1.45; }
 .related-ticket-state { display: grid; justify-items: start; gap: 14px; padding: 24px 20px; color: #aabbb3; font-size: 12px; }
 @media (max-width: 720px) {
   .similar-main-column { width: 100%; }

@@ -879,6 +879,195 @@ async fn relation_feedback_keeps_rejected_relation_and_suggestion_snapshot() {
 }
 
 #[tokio::test]
+async fn routing_feedback_is_labeled_simulation_and_preserves_operator_decision() {
+    let application = app(AppState::demo());
+    let before = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.status(), 200);
+    let before: serde_json::Value =
+        serde_json::from_slice(&to_bytes(before.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let accepted = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"service_feedback":"ACCEPTED"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), 201);
+    let accepted: serde_json::Value =
+        serde_json::from_slice(&to_bytes(accepted.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(accepted["service_feedback"], "ACCEPTED");
+    assert!(accepted["corrected_target_service"].is_null());
+    assert_eq!(accepted["source_system"], "DEMO_SIMULATION");
+
+    let response = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("x-user-id", "routing-feedback-reviewer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"service_feedback":"CORRECTED","corrected_target_service":"Управление транспорта"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let record: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(record["service_feedback"], "CORRECTED");
+    assert_eq!(
+        record["original_route_recommendation"],
+        before["latest_decision"]["predicted_service"]
+    );
+    assert_eq!(
+        record["operator_confirmed_route"],
+        before["latest_decision"]["service"]
+    );
+    assert_eq!(
+        record["operator_decision_id"],
+        before["latest_decision"]["id"]
+    );
+    assert_eq!(record["corrected_target_service"], "Управление транспорта");
+    assert_eq!(record["actor_user_id"], "routing-feedback-reviewer");
+    assert_eq!(record["source_system"], "DEMO_SIMULATION");
+    assert_eq!(record["evaluation_status"], "PENDING_OFFLINE_REVIEW");
+    assert!(record["created_at"].as_str().is_some());
+    assert!(record.get("text").is_none());
+
+    let history = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(history.status(), 200);
+    let history: serde_json::Value =
+        serde_json::from_slice(&to_bytes(history.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(history["items"].as_array().unwrap().len(), 2);
+    assert!(history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"] == record["id"]));
+    assert!(history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["id"] == accepted["id"]));
+
+    let after = application
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002")
+                .header("x-pulse-role", "OPERATOR")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after: serde_json::Value =
+        serde_json::from_slice(&to_bytes(after.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        after["prediction"]["recommended_service"],
+        before["prediction"]["recommended_service"]
+    );
+    assert_eq!(
+        after["latest_decision"]["service"],
+        before["latest_decision"]["service"]
+    );
+}
+
+#[tokio::test]
+async fn routing_feedback_requires_a_confirmed_route_and_rejects_invalid_targets() {
+    let application = app(AppState::demo());
+    let missing_decision = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-001/routing-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"service_feedback":"ACCEPTED"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_decision.status(), 409);
+
+    let missing_target = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"service_feedback":"CORRECTED"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_target.status(), 400);
+
+    let unexpected_target = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"service_feedback":"ACCEPTED","corrected_target_service":"Управление транспорта"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unexpected_target.status(), 400);
+
+    let unchanged_target = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "OPERATOR")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"service_feedback":"CORRECTED","corrected_target_service":"Городская инфраструктура"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged_target.status(), 400);
+
+    let denied = application
+        .oneshot(
+            Request::get("/api/v1/tickets/ticket-002/routing-feedback")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
 async fn corrected_decision_updates_template_without_rewriting_prediction() {
     let application = app(AppState::demo());
     let corrected = application

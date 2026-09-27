@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -175,6 +175,24 @@ interface BackendTicketDetail {
     priority_provenance?: BackendRuleProvenance
     created_at?: string
   }
+}
+
+interface BackendRoutingFeedbackRecord {
+  id: string
+  ticket_id: string
+  operator_decision_id: string
+  original_route_recommendation: string
+  operator_confirmed_route: string
+  service_feedback: 'ACCEPTED' | 'CORRECTED'
+  corrected_target_service: string | null
+  actor_user_id: string
+  source_system: 'DEMO_SIMULATION'
+  evaluation_status: 'PENDING_OFFLINE_REVIEW'
+  created_at: string
+}
+
+interface BackendRoutingFeedbackListResponse {
+  items: BackendRoutingFeedbackRecord[]
 }
 
 interface BackendDecisionResponse {
@@ -774,6 +792,48 @@ export async function submitRelationFeedback(ticketId: string, relatedTicketId: 
       } : undefined,
     }),
   })
+}
+
+function mapRoutingFeedback(item: BackendRoutingFeedbackRecord): RoutingFeedbackRecord {
+  return {
+    id: item.id,
+    ticketId: item.ticket_id,
+    operatorDecisionId: item.operator_decision_id,
+    originalRouteRecommendation: item.original_route_recommendation,
+    operatorConfirmedRoute: item.operator_confirmed_route,
+    serviceFeedback: item.service_feedback,
+    correctedTargetService: item.corrected_target_service?.trim() || undefined,
+    actorUserId: item.actor_user_id,
+    sourceSystem: item.source_system,
+    evaluationStatus: item.evaluation_status,
+    createdAt: item.created_at,
+  }
+}
+
+export async function loadRoutingFeedback(ticketId: string): Promise<RoutingFeedbackRecord[]> {
+  const response = await request<BackendRoutingFeedbackListResponse>(
+    `/tickets/${encodeURIComponent(ticketId)}/routing-feedback`,
+  )
+  return response.items.map(mapRoutingFeedback)
+}
+
+export async function submitRoutingFeedback(
+  ticketId: string,
+  serviceFeedback: 'ACCEPTED' | 'CORRECTED',
+  correctedTargetService?: string,
+): Promise<RoutingFeedbackRecord> {
+  const response = await request<BackendRoutingFeedbackRecord>(
+    `/tickets/${encodeURIComponent(ticketId)}/routing-feedback`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        service_feedback: serviceFeedback,
+        ...(serviceFeedback === 'CORRECTED' ? { corrected_target_service: correctedTargetService } : {}),
+      }),
+    },
+  )
+  return mapRoutingFeedback(response)
 }
 
 export async function acknowledgeAlert(alertId: string): Promise<Pick<BackendAlert, 'id' | 'status'>> {

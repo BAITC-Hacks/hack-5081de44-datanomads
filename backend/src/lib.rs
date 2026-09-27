@@ -52,6 +52,8 @@ const FORECAST_SEASON_LENGTH_DAYS: usize = 7;
 pub(crate) const RELATED_CANDIDATE_THRESHOLD: f32 = 0.78;
 pub(crate) const DUPLICATE_CANDIDATE_THRESHOLD: f32 = 0.90;
 const RELATED_CANDIDATE_RULE_VERSION: &str = "related-ticket-rules.v1";
+pub(crate) const ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM: &str = "DEMO_SIMULATION";
+pub(crate) const ROUTING_FEEDBACK_PENDING_STATUS: &str = "PENDING_OFFLINE_REVIEW";
 const MAX_RESPONSE_TEMPLATE_BODY_CHARS: usize = 4_000;
 const MAX_RESPONSE_TEMPLATE_IMPORT_ITEMS: usize = 200;
 const DEFAULT_LEARNING_CYCLE_DURATION_HOURS: i32 = 168;
@@ -326,6 +328,7 @@ struct Store {
     tickets: BTreeMap<String, Ticket>,
     predictions: BTreeMap<String, Prediction>,
     decisions: Vec<OperatorDecision>,
+    routing_feedback: Vec<RoutingFeedbackRecord>,
     alerts: BTreeMap<String, Alert>,
     learning_cycles: BTreeMap<String, LearningCycle>,
     learning_feedback: Vec<LearningFeedback>,
@@ -334,6 +337,7 @@ struct Store {
     next_decision_number: u64,
     next_cycle_number: u64,
     next_feedback_number: u64,
+    next_routing_feedback_number: u64,
     next_response_template_number: u64,
 }
 
@@ -485,6 +489,26 @@ pub struct OperatorDecision {
     pub note: Option<String>,
     pub user_id: String,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RoutingFeedbackRecord {
+    pub id: String,
+    pub ticket_id: String,
+    pub operator_decision_id: String,
+    pub original_route_recommendation: String,
+    pub operator_confirmed_route: String,
+    pub service_feedback: String,
+    pub corrected_target_service: Option<String>,
+    pub actor_user_id: String,
+    pub source_system: String,
+    pub evaluation_status: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RoutingFeedbackListResponse {
+    pub items: Vec<RoutingFeedbackRecord>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1627,6 +1651,7 @@ impl Store {
                 user_id: "demo-operator".to_owned(),
                 created_at: "2026-09-20T08:30:00Z".to_owned(),
             }],
+            routing_feedback: Vec::new(),
             alerts,
             learning_cycles,
             learning_feedback: Vec::new(),
@@ -1635,6 +1660,7 @@ impl Store {
             next_decision_number: 2,
             next_cycle_number: 2,
             next_feedback_number: 1,
+            next_routing_feedback_number: 1,
             next_response_template_number: 1,
         }
     }
@@ -1741,6 +1767,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/tickets/{ticket_id}/relation-feedback",
             post(relation_feedback),
+        )
+        .route(
+            "/api/v1/tickets/{ticket_id}/routing-feedback",
+            get(list_routing_feedback).post(create_routing_feedback),
         )
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/{model_id}", get(get_model))
@@ -6826,6 +6856,220 @@ pub struct RelationFeedbackRequest {
     pub suggestion: Option<RelationSuggestionSnapshot>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRoutingFeedbackRequest {
+    pub service_feedback: String,
+    pub corrected_target_service: Option<String>,
+}
+
+fn normalize_routing_feedback_request(
+    request: CreateRoutingFeedbackRequest,
+) -> Result<(String, Option<String>), ApiError> {
+    let service_feedback = request.service_feedback.trim().to_ascii_uppercase();
+    if !matches!(service_feedback.as_str(), "ACCEPTED" | "CORRECTED") {
+        return Err(ApiError::BadRequest(
+            "service_feedback must be ACCEPTED or CORRECTED".to_owned(),
+        ));
+    }
+    let corrected_target_service = request
+        .corrected_target_service
+        .map(|value| value.trim().to_owned());
+    if corrected_target_service
+        .as_ref()
+        .is_some_and(|value| value.is_empty() || value.chars().count() > 128)
+    {
+        return Err(ApiError::BadRequest(
+            "corrected_target_service must contain 1 to 128 characters".to_owned(),
+        ));
+    }
+    match (
+        service_feedback.as_str(),
+        corrected_target_service.is_some(),
+    ) {
+        ("ACCEPTED", true) => Err(ApiError::BadRequest(
+            "corrected_target_service is only valid for CORRECTED feedback".to_owned(),
+        )),
+        ("CORRECTED", false) => Err(ApiError::BadRequest(
+            "corrected_target_service is required for CORRECTED feedback".to_owned(),
+        )),
+        _ => Ok((service_feedback, corrected_target_service)),
+    }
+}
+
+fn known_routing_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    !normalized.is_empty()
+        && ![
+            "unknown",
+            "unavailable",
+            "не определена",
+            "не указана",
+            "неизвестна",
+        ]
+        .contains(&normalized.as_str())
+}
+
+async fn list_routing_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+) -> Result<Json<RoutingFeedbackListResponse>, ApiError> {
+    require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    if let Some(repository) = state.repository() {
+        let items = repository
+            .list_routing_feedback(&ticket_id)
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        return Ok(Json(RoutingFeedbackListResponse { items }));
+    }
+    let store = state.read_store()?;
+    if !store.tickets.contains_key(&ticket_id) {
+        return Err(ApiError::NotFound(format!("ticket {ticket_id} not found")));
+    }
+    let items = store
+        .routing_feedback
+        .iter()
+        .filter(|item| item.ticket_id == ticket_id)
+        .rev()
+        .cloned()
+        .collect();
+    Ok(Json(RoutingFeedbackListResponse { items }))
+}
+
+async fn create_routing_feedback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(ticket_id): Path<String>,
+    Json(request): Json<CreateRoutingFeedbackRequest>,
+) -> Result<(StatusCode, Json<RoutingFeedbackRecord>), ApiError> {
+    let actor = require_role(
+        &headers,
+        &state.config,
+        &[Role::Operator, Role::Manager, Role::Admin],
+    )?;
+    let (service_feedback, corrected_target_service) = normalize_routing_feedback_request(request)?;
+
+    if let Some(repository) = state.repository() {
+        let record = repository
+            .create_routing_feedback(
+                &ticket_id,
+                &service_feedback,
+                corrected_target_service.as_deref(),
+                &actor.user_id,
+            )
+            .await
+            .map_err(|error| {
+                if error.contains("not found") {
+                    ApiError::NotFound(error)
+                } else if error.contains("operator decision is required")
+                    || error.contains("route recommendation is unavailable")
+                    || error.contains("operator-confirmed route is unavailable")
+                {
+                    ApiError::Conflict(error)
+                } else if error.contains("corrected target service") {
+                    ApiError::BadRequest(error)
+                } else {
+                    ApiError::Internal(error)
+                }
+            })?;
+        repository
+            .audit(
+                &actor.user_id,
+                "ROUTING_FEEDBACK_RECORDED",
+                "routing_feedback",
+                Some(&record.id),
+                Some(&request_id_from_headers(&headers)),
+                Some(&record.service_feedback),
+                json!({
+                    "ticket_id": &record.ticket_id,
+                    "source_system": &record.source_system,
+                    "corrected_target_service": &record.corrected_target_service,
+                    "evaluation_status": &record.evaluation_status,
+                }),
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok((StatusCode::CREATED, Json(record)));
+    }
+
+    let mut store = state.write_store()?;
+    if !store.tickets.contains_key(&ticket_id) {
+        return Err(ApiError::NotFound(format!("ticket {ticket_id} not found")));
+    }
+    let decision = store
+        .decisions
+        .iter()
+        .rev()
+        .find(|item| item.ticket_id == ticket_id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "an operator decision is required before service feedback".to_owned(),
+            )
+        })?;
+    let original_route_recommendation = decision
+        .predicted_service
+        .as_deref()
+        .filter(|service| known_routing_value(service))
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "original route recommendation is unavailable for this operator decision"
+                    .to_owned(),
+            )
+        })?
+        .to_owned();
+    if !known_routing_value(&decision.service) {
+        return Err(ApiError::Conflict(
+            "operator-confirmed route is unavailable for this ticket".to_owned(),
+        ));
+    }
+    let corrected_target_service = if let Some(target) = corrected_target_service {
+        let canonical = store
+            .topics
+            .iter()
+            .map(|topic| service_for_topic(&topic.id))
+            .find(|service| service.eq_ignore_ascii_case(&target))
+            .ok_or_else(|| ApiError::BadRequest("unknown corrected target service".to_owned()))?
+            .to_owned();
+        if canonical.eq_ignore_ascii_case(&decision.service) {
+            return Err(ApiError::BadRequest(
+                "corrected target service must differ from the operator-confirmed route".to_owned(),
+            ));
+        }
+        Some(canonical)
+    } else {
+        None
+    };
+    let created_at = Utc::now().to_rfc3339();
+    let record = RoutingFeedbackRecord {
+        id: format!("routing-feedback-{:03}", store.next_routing_feedback_number),
+        ticket_id: ticket_id.clone(),
+        operator_decision_id: decision.id,
+        original_route_recommendation,
+        operator_confirmed_route: decision.service,
+        service_feedback,
+        corrected_target_service,
+        actor_user_id: actor.user_id,
+        source_system: ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM.to_owned(),
+        evaluation_status: ROUTING_FEEDBACK_PENDING_STATUS.to_owned(),
+        created_at,
+    };
+    store.next_routing_feedback_number += 1;
+    store.routing_feedback.push(record.clone());
+    Ok((StatusCode::CREATED, Json(record)))
+}
+
 fn validate_relation_suggestion(suggestion: &RelationSuggestionSnapshot) -> Result<(), ApiError> {
     let valid_score = |value: f32| value.is_finite() && (0.0..=1.0).contains(&value);
     if !valid_score(suggestion.score) || !valid_score(suggestion.threshold) {
@@ -7568,6 +7812,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/learning/candidate/promote": { "post": { "summary": "Promote candidate" } },
             "/api/v1/learning/candidate/reject": { "post": { "summary": "Reject candidate" } },
             "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Collect relation feedback" } },
+            "/api/v1/tickets/{ticket_id}/routing-feedback": { "get": { "summary": "List simulated service routing feedback" }, "post": { "summary": "Record simulated service routing feedback" } },
             "/api/v1/models": { "get": { "summary": "List model versions" } },
             "/api/v1/models/{model_id}": { "get": { "summary": "Get model version" } },
             "/api/v1/models/{model_id}/promote": { "post": { "summary": "Promote a model version outside controlled learning cycles" } }
@@ -7843,6 +8088,68 @@ mod tests {
             "TOPIC-UTILITIES"
         );
         assert_eq!(decision["prediction"]["topic_id"], "TOPIC-WATER");
+    }
+
+    #[tokio::test]
+    async fn routing_feedback_uses_the_operator_decision_recommendation_snapshot() {
+        let state = AppState::demo();
+        let original_recommendation = state
+            .read_store()
+            .unwrap()
+            .decisions
+            .iter()
+            .find(|decision| decision.ticket_id == "ticket-002")
+            .and_then(|decision| decision.predicted_service.clone())
+            .unwrap();
+        state
+            .write_store()
+            .unwrap()
+            .predictions
+            .get_mut("ticket-002")
+            .unwrap()
+            .recommended_service = "Обновлённая рекомендация модели".to_owned();
+
+        let response = app(state)
+            .oneshot(
+                Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                    .header("x-pulse-role", "OPERATOR")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"service_feedback":"ACCEPTED"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let feedback = body_json(response).await;
+        assert_eq!(
+            feedback["original_route_recommendation"],
+            original_recommendation
+        );
+        assert_ne!(
+            feedback["original_route_recommendation"],
+            "Обновлённая рекомендация модели"
+        );
+
+        let state = AppState::demo();
+        state
+            .write_store()
+            .unwrap()
+            .decisions
+            .iter_mut()
+            .find(|decision| decision.ticket_id == "ticket-002")
+            .unwrap()
+            .predicted_service = None;
+        let response = app(state)
+            .oneshot(
+                Request::post("/api/v1/tickets/ticket-002/routing-feedback")
+                    .header("x-pulse-role", "OPERATOR")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"service_feedback":"ACCEPTED"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
