@@ -4,16 +4,27 @@
   "title": "Pulse 109 CandidateEvaluation v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "cycle_id", "candidate_model_version", "production_model_version", "candidate_dataset_version", "evaluation_version", "policy_version", "offline_evaluation", "shadow_evaluation", "decision", "evaluated_at", "synthetic"],
+  "required": ["schema_version", "status", "cycle_id", "candidate_model_version", "production_model_version", "candidate_dataset_version", "evaluation_version", "policy_version", "promotion_policy", "offline_evaluation", "baseline_evaluation", "shadow_evaluation", "gates", "decision", "evaluated_at", "synthetic"],
   "properties": {
     "schema_version": {"const": "candidate-evaluation.v1"},
+    "status": {"enum": ["PENDING", "COMPLETED", "FAILED"]},
     "cycle_id": {"type": "string", "minLength": 1, "maxLength": 200},
     "candidate_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
     "production_model_version": {"type": "string", "minLength": 1, "maxLength": 200},
     "candidate_dataset_version": {"type": "string", "minLength": 1, "maxLength": 200},
     "evaluation_version": {"type": "string", "minLength": 1, "maxLength": 200},
     "policy_version": {"type": "string", "minLength": 1, "maxLength": 200},
+    "promotion_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "thresholds"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1, "maxLength": 200},
+        "thresholds": {"type": "object", "additionalProperties": {"type": "number"}}
+      }
+    },
     "offline_evaluation": {"$ref": "https://pulse109.local/schema/model-evaluation.v1.json"},
+    "baseline_evaluation": {"$ref": "https://pulse109.local/schema/model-evaluation.v1.json"},
     "shadow_evaluation": {
       "type": "object",
       "additionalProperties": false,
@@ -25,6 +36,21 @@
         "critical_regressions": {"type": "array", "items": {"type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_.:-]{0,199}$"}},
         "metrics": {"type": "object", "additionalProperties": {"$ref": "https://pulse109.local/schema/model-evaluation.v1.json#/$defs/metricValue"}},
         "blind_ab": {"enum": ["DISABLED", "ENABLED"]}
+      }
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "status"],
+        "properties": {
+          "key": {"type": "string", "minLength": 1, "maxLength": 200},
+          "status": {"enum": ["PASSED", "FAILED", "INSUFFICIENT_EVIDENCE", "PENDING"]},
+          "observed": {"type": ["number", "null"]},
+          "threshold": {"type": ["number", "null"]},
+          "reason": {"type": "string", "maxLength": 200}
+        }
       }
     },
     "decision": {"enum": ["PENDING_HUMAN_DECISION", "PASS", "FAIL", "INSUFFICIENT_EVIDENCE"]},

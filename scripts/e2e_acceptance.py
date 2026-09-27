@@ -6,8 +6,8 @@ internals. It is safe to run repeatedly: every run uses a unique source and
 the import is checked for idempotency. The normal worker trains and
 shadow-serves a candidate during its evaluation window while production
 remains the operator recommendation. When ``PULSE_TEST_FAKE_TRAINER=true`` is
-enabled in demo/test mode, the same flow also verifies candidate promotion
-using explicitly test-only evidence.
+enabled in demo/test mode, the same flow verifies that synthetic evidence
+cannot be promoted.
 """
 
 from __future__ import annotations
@@ -421,29 +421,44 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         and closed_evaluation.get("production_model_unchanged") is True,
         f"evaluation window did not close without changing production: {closed_evaluation}",
     )
-    status, _, evaluation = json_request(
-        base_url,
-        "GET",
-        "/api/v1/learning/candidate/evaluation",
-        role="ML_REVIEWER",
-        timeout=timeout,
-    )
-    expect(status == 200 and evaluation.get("state") == "DECISION", f"closed candidate evaluation is unavailable: {evaluation}")
-    if fake_trainer and evaluation.get("decision") == "READY_TO_REVIEW":
-        status, _, promoted = json_request(base_url, "POST", "/api/v1/learning/candidate/promote", body={"note": "e2e fake trainer"}, role="ML_REVIEWER", timeout=timeout)
-        expect(status == 200 and promoted.get("state") == "PROMOTED", f"candidate promotion failed: {promoted}")
-        learning_result = "PROMOTED_TEST_CANDIDATE"
-    else:
-        if not fake_trainer:
-            expect(evaluation.get("offline_metrics", {}).get("status") == "EVALUATION_NOT_AVAILABLE", f"normal worker produced unexpected evaluation evidence: {evaluation}")
-        status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e evaluation pending"}, role="ML_REVIEWER", timeout=timeout)
-        expect(
-            status == 200
-            and rejected.get("state") == "REJECTED"
-            and rejected.get("production_model_version") == cycle.get("production_model_version"),
-            f"candidate rejection failed or changed production: {rejected}",
+    evaluation: dict[str, Any] = {}
+    status = 0
+    for _ in range(40):
+        status, _, evaluation = json_request(
+            base_url,
+            "GET",
+            "/api/v1/learning/candidate/evaluation",
+            role="ML_REVIEWER",
+            timeout=timeout,
         )
-        learning_result = "SHADOW_EVALUATION_VERIFIED_AND_REJECTED" if not fake_trainer else "FAKE_CANDIDATE_REJECTED"
+        expect(status == 200, f"closed candidate evaluation is unavailable: {evaluation}")
+        if evaluation.get("status") != "PENDING":
+            break
+        time.sleep(0.5)
+    expect(
+        evaluation.get("cycle_id") == cycle_id
+        and evaluation.get("status") in {"COMPLETED", "FAILED"},
+        f"candidate evaluation job did not produce a terminal result: {evaluation}",
+    )
+    if fake_trainer:
+        expect(
+            evaluation.get("synthetic") is True
+            and evaluation.get("decision") == "INSUFFICIENT_EVIDENCE",
+            f"fake trainer evidence must remain ineligible for promotion: {evaluation}",
+        )
+    else:
+        expect(
+            evaluation.get("decision") != "PENDING_HUMAN_DECISION",
+            f"candidate without complete verified evidence must not be promotable: {evaluation}",
+        )
+    status, _, rejected = json_request(base_url, "POST", "/api/v1/learning/candidate/reject", body={"note": "e2e evaluation reviewed"}, role="ML_REVIEWER", timeout=timeout)
+    expect(
+        status == 200
+        and rejected.get("state") == "REJECTED"
+        and rejected.get("production_model_version") == cycle.get("production_model_version"),
+        f"candidate rejection failed or changed production: {rejected}",
+    )
+    learning_result = "FAKE_CANDIDATE_REJECTED" if fake_trainer else "CANDIDATE_EVIDENCE_VERIFIED_AND_REJECTED"
 
     return {
         "source_system": source,

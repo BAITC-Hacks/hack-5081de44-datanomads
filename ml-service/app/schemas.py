@@ -313,6 +313,42 @@ class EvaluationResponse(APIModel):
     model_version: str
 
 
+class CandidateOfflineSample(APIModel):
+    ticket_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1)
+    label: str = Field(min_length=1, max_length=200)
+    language: str = "UNKNOWN"
+
+
+class CandidateShadowSample(APIModel):
+    production_topic_id: str | None = None
+    candidate_topic_id: str | None = None
+    confirmed_topic_id: str = Field(min_length=1, max_length=200)
+    candidate_inference_status: Literal["COMPLETED", "FAILED"]
+
+
+class CandidateEvaluationRequest(APIModel):
+    cycle_id: str = Field(min_length=1, max_length=200)
+    candidate_model_version: str = Field(min_length=1, max_length=200)
+    candidate_artifact_checksum: str | None = Field(
+        default=None, pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+    production_model_version: str = Field(min_length=1, max_length=200)
+    production_baseline_available: bool = True
+    production_baseline_is_synthetic: bool = False
+    production_artifact_checksum: str | None = Field(
+        default=None, pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+    candidate_dataset_version: str = Field(min_length=1, max_length=200)
+    frozen_evaluation_dataset_version: str = Field(min_length=1, max_length=200)
+    promotion_policy_version: str = Field(min_length=1, max_length=200)
+    offline_samples: list[CandidateOfflineSample] = Field(default_factory=list)
+    shadow_samples: list[CandidateShadowSample] = Field(default_factory=list)
+    shadow_inference_failures: int = Field(default=0, ge=0)
+    synthetic: bool = False
+    blind_ab_enabled: bool = False
+
+
 class ModelMetadata(APIModel):
     schema_version: Literal["model-metadata.v1", "classifier-manifest.v1", "embedder-manifest.v1"]
     model_version: str

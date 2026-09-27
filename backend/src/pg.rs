@@ -30,21 +30,6 @@ const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
 
-fn test_fake_trainer_enabled() -> bool {
-    let enabled = env::var("PULSE_TEST_FAKE_TRAINER")
-        .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
-    let runtime_mode = env::var("PULSE_ENV").unwrap_or_else(|_| "demo".to_owned());
-    enabled && test_runtime_mode(&runtime_mode)
-}
-
-fn test_runtime_mode(runtime_mode: &str) -> bool {
-    matches!(
-        runtime_mode.trim().to_ascii_lowercase().as_str(),
-        "demo" | "development" | "test" | "unit"
-    )
-}
-
 fn production_runtime_mode(runtime_mode: &str) -> bool {
     matches!(
         runtime_mode.trim().to_ascii_lowercase().as_str(),
@@ -56,15 +41,262 @@ fn synthetic_candidate_can_be_promoted(is_synthetic: bool, runtime_mode: &str) -
     !is_synthetic || !production_runtime_mode(runtime_mode)
 }
 
+fn candidate_evaluation_is_promotable(
+    evaluation: &Value,
+    cycle_id: &str,
+    candidate_model_version: &str,
+    production_model_version: &str,
+    candidate_dataset_version: &str,
+    frozen_evaluation_dataset_version: &str,
+    policy_version: &str,
+) -> bool {
+    let expected_thresholds = match policy_version {
+        "policy-v1" => json!({
+            "minimum_offline_samples": 30,
+            "minimum_shadow_samples": 20,
+            "maximum_macro_f1_regression": 0.02,
+            "maximum_class_f1_regression": 0.05,
+            "maximum_shadow_correction_rate_delta": 0.05,
+            "maximum_shadow_inference_failures": 0
+        }),
+        _ => return false,
+    };
+    if evaluation.get("schema_version").and_then(Value::as_str) != Some("candidate-evaluation.v1")
+        || evaluation.get("evaluation_version").and_then(Value::as_str)
+            != Some("candidate-evaluation.v1")
+        || evaluation.get("status").and_then(Value::as_str) != Some("COMPLETED")
+        || evaluation.get("decision").and_then(Value::as_str) != Some("PENDING_HUMAN_DECISION")
+        || evaluation.get("synthetic").and_then(Value::as_bool) != Some(false)
+        || evaluation.get("cycle_id").and_then(Value::as_str) != Some(cycle_id)
+        || evaluation
+            .get("candidate_model_version")
+            .and_then(Value::as_str)
+            != Some(candidate_model_version)
+        || evaluation
+            .get("production_model_version")
+            .and_then(Value::as_str)
+            != Some(production_model_version)
+        || evaluation
+            .get("candidate_dataset_version")
+            .and_then(Value::as_str)
+            != Some(candidate_dataset_version)
+        || evaluation.get("policy_version").and_then(Value::as_str) != Some(policy_version)
+        || evaluation
+            .get("promotion_policy")
+            .and_then(|policy| policy.get("version"))
+            .and_then(Value::as_str)
+            != Some(policy_version)
+        || evaluation
+            .get("promotion_policy")
+            .and_then(|policy| policy.get("thresholds"))
+            != Some(&expected_thresholds)
+    {
+        return false;
+    }
+
+    let Some(gates) = evaluation.get("gates").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut gate_by_key = std::collections::BTreeMap::new();
+    for gate in gates {
+        let Some(key) = gate.get("key").and_then(Value::as_str) else {
+            return false;
+        };
+        if gate.get("status").and_then(Value::as_str) != Some("PASSED")
+            || gate_by_key.insert(key, gate).is_some()
+        {
+            return false;
+        }
+    }
+    let observed = |key: &str| gate_by_key.get(key).and_then(|gate| gate.get("observed"));
+    let threshold = |key: &str| gate_by_key.get(key).and_then(|gate| gate.get("threshold"));
+    let candidate_offline = evaluation.get("offline_evaluation");
+    let baseline_offline = evaluation.get("baseline_evaluation");
+    let shadow_evaluation = evaluation.get("shadow_evaluation");
+    let macro_f1_delta = candidate_offline
+        .and_then(|offline| offline.get("metrics"))
+        .and_then(|metrics| metrics.get("macro_f1"))
+        .and_then(Value::as_f64)
+        .zip(
+            baseline_offline
+                .and_then(|offline| offline.get("metrics"))
+                .and_then(|metrics| metrics.get("macro_f1"))
+                .and_then(Value::as_f64),
+        )
+        .map(|(candidate, baseline)| candidate - baseline);
+    let class_changes_pass = candidate_offline
+        .and_then(|offline| offline.get("metrics"))
+        .and_then(|metrics| metrics.get("per_class_changes"))
+        .and_then(Value::as_object)
+        .is_some_and(|changes| {
+            !changes.is_empty()
+                && changes
+                    .values()
+                    .all(|change| change.as_f64().is_some_and(|delta| delta >= -0.05))
+        });
+    let no_critical_regressions = [candidate_offline, evaluation.get("shadow_evaluation")]
+        .iter()
+        .all(|section| {
+            section
+                .and_then(|section| section.get("critical_regressions"))
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        });
+    [
+        "offline_sample_count",
+        "shadow_sample_count",
+        "macro_f1_non_inferiority",
+        "critical_class_regressions",
+        "shadow_correction_rate_delta",
+        "candidate_shadow_inference_failures",
+        "synthetic_evidence",
+    ]
+    .iter()
+    .all(|key| gate_by_key.contains_key(key))
+        && candidate_offline
+            .and_then(|offline| offline.get("status"))
+            .and_then(Value::as_str)
+            == Some("COMPLETED")
+        && candidate_offline
+            .and_then(|offline| offline.get("model_version"))
+            .and_then(Value::as_str)
+            == Some(candidate_model_version)
+        && candidate_offline
+            .and_then(|offline| offline.get("dataset_version"))
+            .and_then(Value::as_str)
+            == Some(frozen_evaluation_dataset_version)
+        && candidate_offline
+            .and_then(|offline| offline.get("synthetic"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        && baseline_offline
+            .and_then(|offline| offline.get("status"))
+            .and_then(Value::as_str)
+            == Some("COMPLETED")
+        && baseline_offline
+            .and_then(|offline| offline.get("model_version"))
+            .and_then(Value::as_str)
+            == Some(production_model_version)
+        && baseline_offline
+            .and_then(|offline| offline.get("dataset_version"))
+            .and_then(Value::as_str)
+            == Some(frozen_evaluation_dataset_version)
+        && baseline_offline
+            .and_then(|offline| offline.get("synthetic"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        && candidate_offline
+            .and_then(|offline| offline.get("sample_count"))
+            .and_then(Value::as_u64)
+            == observed("offline_sample_count").and_then(Value::as_u64)
+        && baseline_offline
+            .and_then(|offline| offline.get("sample_count"))
+            .and_then(Value::as_u64)
+            == observed("offline_sample_count").and_then(Value::as_u64)
+        && macro_f1_delta.is_some_and(|delta| delta >= -0.02)
+        && class_changes_pass
+        && no_critical_regressions
+        && shadow_evaluation
+            .and_then(|shadow| shadow.get("correction_rate_delta"))
+            .and_then(Value::as_f64)
+            .is_some_and(|delta| delta <= 0.05)
+        && shadow_evaluation
+            .and_then(|shadow| shadow.get("sample_count"))
+            .and_then(Value::as_u64)
+            == observed("shadow_sample_count").and_then(Value::as_u64)
+        && shadow_evaluation
+            .and_then(|shadow| shadow.get("metrics"))
+            .and_then(|metrics| metrics.get("candidate_inference_failures"))
+            .and_then(Value::as_u64)
+            == Some(0)
+        && observed("offline_sample_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 30)
+        && threshold("offline_sample_count").and_then(Value::as_u64) == Some(30)
+        && observed("shadow_sample_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 20)
+        && threshold("shadow_sample_count").and_then(Value::as_u64) == Some(20)
+        && observed("macro_f1_non_inferiority")
+            .and_then(Value::as_f64)
+            .is_some_and(|delta| delta >= -0.02)
+        && threshold("macro_f1_non_inferiority")
+            .and_then(Value::as_f64)
+            .is_some_and(|limit| (limit + 0.02).abs() < f64::EPSILON)
+        && observed("critical_class_regressions").and_then(Value::as_u64) == Some(0)
+        && threshold("critical_class_regressions").and_then(Value::as_u64) == Some(0)
+        && observed("shadow_correction_rate_delta")
+            .and_then(Value::as_f64)
+            .is_some_and(|delta| delta <= 0.05)
+        && threshold("shadow_correction_rate_delta")
+            .and_then(Value::as_f64)
+            .is_some_and(|limit| (limit - 0.05).abs() < f64::EPSILON)
+        && observed("candidate_shadow_inference_failures").and_then(Value::as_u64) == Some(0)
+        && threshold("candidate_shadow_inference_failures").and_then(Value::as_u64) == Some(0)
+}
+
 #[cfg(test)]
 mod promotion_safety_tests {
-    use super::{synthetic_candidate_can_be_promoted, test_runtime_mode};
+    use super::{candidate_evaluation_is_promotable, synthetic_candidate_can_be_promoted};
+    use serde_json::{json, Value};
 
-    #[test]
-    fn fake_training_modes_are_non_production_only() {
-        assert!(test_runtime_mode("demo"));
-        assert!(test_runtime_mode("unit"));
-        assert!(!test_runtime_mode("production"));
+    fn passing_evaluation() -> Value {
+        json!({
+            "schema_version": "candidate-evaluation.v1",
+            "status": "COMPLETED",
+            "cycle_id": "cycle-1",
+            "candidate_model_version": "candidate-1",
+            "production_model_version": "production-1",
+            "candidate_dataset_version": "dataset-1",
+            "evaluation_version": "candidate-evaluation.v1",
+            "policy_version": "policy-v1",
+            "promotion_policy": {
+                "version": "policy-v1",
+                "thresholds": {
+                    "minimum_offline_samples": 30,
+                    "minimum_shadow_samples": 20,
+                    "maximum_macro_f1_regression": 0.02,
+                    "maximum_class_f1_regression": 0.05,
+                    "maximum_shadow_correction_rate_delta": 0.05,
+                    "maximum_shadow_inference_failures": 0
+                }
+            },
+            "offline_evaluation": {
+                "status": "COMPLETED",
+                "model_version": "candidate-1",
+                "dataset_version": "holdout-1",
+                "sample_count": 30,
+                "synthetic": false,
+                "critical_regressions": [],
+                "metrics": {"macro_f1": 0.8, "per_class_changes": {"water": 0.0}}
+            },
+            "baseline_evaluation": {
+                "status": "COMPLETED",
+                "model_version": "production-1",
+                "dataset_version": "holdout-1",
+                "sample_count": 30,
+                "synthetic": false,
+                "critical_regressions": [],
+                "metrics": {"macro_f1": 0.8}
+            },
+            "shadow_evaluation": {
+                "sample_count": 20,
+                "critical_regressions": [],
+                "correction_rate_delta": 0.0,
+                "metrics": {"candidate_inference_failures": 0}
+            },
+            "decision": "PENDING_HUMAN_DECISION",
+            "synthetic": false,
+            "gates": [
+                {"key": "offline_sample_count", "status": "PASSED", "observed": 30, "threshold": 30},
+                {"key": "shadow_sample_count", "status": "PASSED", "observed": 20, "threshold": 20},
+                {"key": "macro_f1_non_inferiority", "status": "PASSED", "observed": 0.0, "threshold": -0.02},
+                {"key": "critical_class_regressions", "status": "PASSED", "observed": 0, "threshold": 0},
+                {"key": "shadow_correction_rate_delta", "status": "PASSED", "observed": 0.0, "threshold": 0.05},
+                {"key": "candidate_shadow_inference_failures", "status": "PASSED", "observed": 0, "threshold": 0},
+                {"key": "synthetic_evidence", "status": "PASSED"}
+            ]
+        })
     }
 
     #[test]
@@ -73,6 +305,40 @@ mod promotion_safety_tests {
         assert!(!synthetic_candidate_can_be_promoted(true, "PROD"));
         assert!(synthetic_candidate_can_be_promoted(true, "demo"));
         assert!(synthetic_candidate_can_be_promoted(false, "production"));
+    }
+
+    #[test]
+    fn candidate_evaluation_requires_every_policy_gate_and_matching_lineage() {
+        let mut evaluation = passing_evaluation();
+        assert!(candidate_evaluation_is_promotable(
+            &evaluation,
+            "cycle-1",
+            "candidate-1",
+            "production-1",
+            "dataset-1",
+            "holdout-1",
+            "policy-v1"
+        ));
+        assert!(!candidate_evaluation_is_promotable(
+            &evaluation,
+            "cycle-1",
+            "candidate-1",
+            "production-1",
+            "dataset-1",
+            "different-holdout",
+            "policy-v1"
+        ));
+
+        evaluation["gates"][0]["status"] = json!("INSUFFICIENT_EVIDENCE");
+        assert!(!candidate_evaluation_is_promotable(
+            &evaluation,
+            "cycle-1",
+            "candidate-1",
+            "production-1",
+            "dataset-1",
+            "holdout-1",
+            "policy-v1"
+        ));
     }
 }
 
@@ -3405,11 +3671,18 @@ impl PgRepository {
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("close candidate evaluation window: {error}"))?;
+            let job_id: i64 = sqlx::query_scalar(
+                "INSERT INTO background_jobs (job_type, payload, state) VALUES ('CANDIDATE_EVALUATION', $1, 'QUEUED') RETURNING id",
+            )
+            .bind(json!({"kind": "candidate_evaluation", "cycle_id": &cycle_id}))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("queue candidate evaluation: {error}"))?;
             tx.commit()
                 .await
                 .map_err(|error| format!("commit evaluation window close: {error}"))?;
             return Ok(json!({
-                "job_id": Value::Null,
+                "job_id": job_id.to_string(),
                 "state": "DECISION",
                 "cycle": self.learning_cycle_from_id_lookup(&cycle_id).await?,
                 "production_model_unchanged": true,
@@ -3504,88 +3777,155 @@ impl PgRepository {
             .await?
             .active_cycle
             .ok_or_else(|| "no active learning cycle".to_owned())?;
-        let evaluation = sqlx::query("SELECT evaluation_id, model_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1")
+        let cycle_db_id = cycle
+            .id
+            .parse::<i64>()
+            .map_err(|_| "invalid database learning cycle id".to_owned())?;
+        let evaluation_payload = sqlx::query_scalar::<_, Value>(
+            "SELECT evaluation_payload FROM model_evaluations WHERE learning_cycle_id = $1 AND model_version = $2 LIMIT 1",
+        )
+            .bind(cycle_db_id)
             .bind(&cycle.candidate_model_version)
             .fetch_optional(&self.pool)
             .await
             .map_err(|error| format!("fetch candidate evaluation: {error}"))?;
-        let mut candidate_exists = false;
-        if evaluation.is_none() {
-            candidate_exists = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW'))")
-                .bind(&cycle.candidate_model_version)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|error| format!("check candidate evaluation: {error}"))?;
-            if candidate_exists && cycle.state == "DECISION" && test_fake_trainer_enabled() {
-                let evaluation_id = format!(
-                    "evaluation-{}-{}",
-                    cycle.id,
-                    Utc::now().timestamp_nanos_opt().unwrap_or_default()
-                );
-                let metrics = json!({"status": "FAKE_TRAINER_NO_METRICS", "offline_only": true, "macro_f1": Value::Null, "accuracy": Value::Null});
-                sqlx::query("INSERT INTO model_evaluations (evaluation_id, model_version, evaluation_version, split_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision, evaluator) VALUES ($1, $2, 'evaluation-v1', 'frozen-test-exclusion-v1', $3, '{}'::jsonb, '[]'::jsonb, $4, 'READY_TO_REVIEW', 'core-test-adapter') ON CONFLICT (evaluation_id) DO NOTHING")
-                    .bind(&evaluation_id)
-                    .bind(&cycle.candidate_model_version)
-                    .bind(metrics)
-                    .bind(cycle.feedback_count as i32)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|error| format!("persist candidate evaluation: {error}"))?;
-            }
+        if let Some(payload) = evaluation_payload
+            .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+        {
+            return Ok(payload);
         }
-        let evaluation = sqlx::query("SELECT evaluation_id, model_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1")
-            .bind(&cycle.candidate_model_version)
+
+        let evaluation_job = sqlx::query(
+            "SELECT state, error FROM background_jobs WHERE job_type = 'CANDIDATE_EVALUATION' AND payload->>'cycle_id' = $1 ORDER BY id DESC LIMIT 1",
+        )
+            .bind(&cycle.cycle_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|error| format!("fetch candidate evaluation: {error}"))?;
-        let (offline_metrics, shadow_metrics, regressions, sample_size, mut decision) =
-            if let Some(row) = evaluation {
-                (
-                    row.try_get::<Value, _>("metrics_json")
-                        .unwrap_or_else(|_| json!({})),
-                    row.try_get::<Value, _>("shadow_metrics_json")
-                        .unwrap_or_else(|_| json!({})),
-                    row.try_get::<Value, _>("critical_regressions")
-                        .unwrap_or_else(|_| json!([])),
-                    row.try_get::<i32, _>("sample_size").unwrap_or(0),
-                    row.try_get::<Option<String>, _>("decision")
-                        .unwrap_or(None)
-                        .unwrap_or_else(|| "PENDING".to_owned()),
-                )
-            } else {
-                (
-                    json!({
-                        "status": if candidate_exists {
-                            "EVALUATION_NOT_AVAILABLE"
-                        } else {
-                            cycle.decision_note.as_deref().unwrap_or("NOT_READY")
-                        }
-                    }),
-                    json!({}),
-                    json!([]),
-                    0,
-                    if candidate_exists {
-                        "EVALUATION_NOT_AVAILABLE".to_owned()
-                    } else {
-                        "NOT_READY".to_owned()
-                    },
-                )
-            };
-        let test_only_fake_evidence = offline_metrics.get("status").and_then(Value::as_str)
-            == Some("FAKE_TRAINER_NO_METRICS");
-        if test_only_fake_evidence && !test_fake_trainer_enabled() {
-            decision = "TEST_ONLY_FAKE_EVIDENCE".to_owned();
-        }
-        let cycle = self.learning_cycle_from_id_lookup(&cycle.id).await?;
+            .map_err(|error| format!("read candidate evaluation job: {error}"))?;
+        let job_state = evaluation_job
+            .as_ref()
+            .and_then(|row| row.try_get::<String, _>("state").ok());
+        let job_failed = job_state.as_deref() == Some("FAILED");
+        let job_result_missing =
+            cycle.state == "DECISION" && matches!(job_state.as_deref(), None | Some("COMPLETED"));
+        let evaluation_failed = job_failed || job_result_missing;
+        let status = if evaluation_failed {
+            "FAILED"
+        } else {
+            "PENDING"
+        };
+        let reason = if cycle.state == "EVALUATE" {
+            "SHADOW_WINDOW_OPEN".to_owned()
+        } else if job_failed {
+            evaluation_job
+                .as_ref()
+                .and_then(|row| row.try_get::<Option<String>, _>("error").ok().flatten())
+                .unwrap_or_else(|| "CANDIDATE_EVALUATION_JOB_FAILED".to_owned())
+        } else if job_result_missing && job_state.as_deref() == Some("COMPLETED") {
+            "CANDIDATE_EVALUATION_RESULT_MISSING".to_owned()
+        } else if job_result_missing {
+            "CANDIDATE_EVALUATION_JOB_NOT_QUEUED".to_owned()
+        } else if matches!(job_state.as_deref(), Some("QUEUED" | "RUNNING")) {
+            "CANDIDATE_EVALUATION_RUNNING".to_owned()
+        } else {
+            "CANDIDATE_EVALUATION_PENDING".to_owned()
+        };
+        let now = Utc::now().to_rfc3339();
+        let baseline_version = cycle
+            .production_model_version
+            .as_deref()
+            .unwrap_or("unconfigured-production");
+        let dataset_version = cycle
+            .frozen_evaluation_dataset_version
+            .as_deref()
+            .unwrap_or("unconfigured-evaluation-dataset");
+        let offline_sample_count: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int FROM learning_cycle_evaluation_tickets evaluation_ticket JOIN tickets t ON t.id = evaluation_ticket.ticket_id JOIN dataset_ticket_links dataset_ticket ON dataset_ticket.ticket_id = t.id AND dataset_ticket.dataset_version = evaluation_ticket.dataset_version WHERE evaluation_ticket.learning_cycle_id = $1 AND evaluation_ticket.dataset_version = $2 AND NULLIF(BTRIM(t.original_text), '') IS NOT NULL AND NULLIF(BTRIM(t.topic_id), '') IS NOT NULL",
+        )
+        .bind(cycle_db_id)
+        .bind(dataset_version)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| format!("count candidate offline evidence: {error}"))?;
+        let policy_thresholds = match cycle.promotion_policy_version.as_str() {
+            "policy-v1" => json!({
+                "minimum_offline_samples": 30,
+                "minimum_shadow_samples": 20,
+                "maximum_macro_f1_regression": 0.02,
+                "maximum_class_f1_regression": 0.05,
+                "maximum_shadow_correction_rate_delta": 0.05,
+                "maximum_shadow_inference_failures": 0
+            }),
+            _ => json!({}),
+        };
+        let model_evaluation = |evaluation_id: String, model_version: &str, sample_count: i32| {
+            json!({
+                "schema_version": "model-evaluation.v1",
+                "evaluation_id": evaluation_id,
+                "model_type": "classifier",
+                "model_version": model_version,
+                "dataset_version": dataset_version,
+                "evaluation_version": "candidate-evaluation.v1",
+                "split_version": "frozen-evaluation.v1",
+                "evaluation_type": "OFFLINE",
+                "status": "INSUFFICIENT_DATA",
+                "sample_count": sample_count,
+                "metrics": {"reason": reason},
+                "critical_regressions": [],
+                "created_at": now,
+                "evaluator": "pulse109.core.evaluation-status",
+                "synthetic": false
+            })
+        };
         Ok(json!({
-            "cycle_id": cycle.id,
-            "state": cycle.state,
-            "offline_metrics": offline_metrics,
-            "shadow_metrics": shadow_metrics,
-            "critical_regressions": regressions,
-            "sample_size": sample_size,
-            "promotion_policy_version": cycle.promotion_policy_version,
-            "decision": decision,
+            "schema_version": "candidate-evaluation.v1",
+            "status": status,
+            "cycle_id": cycle.cycle_id,
+            "candidate_model_version": cycle.candidate_model_version,
+            "production_model_version": baseline_version,
+            "candidate_dataset_version": cycle.dataset_version,
+            "evaluation_version": "candidate-evaluation.v1",
+            "policy_version": cycle.promotion_policy_version,
+            "promotion_policy": {
+                "version": cycle.promotion_policy_version,
+                "thresholds": policy_thresholds
+            },
+            "offline_evaluation": model_evaluation(
+                format!("candidate-offline-pending-{}", cycle_db_id),
+                &cycle.candidate_model_version,
+                offline_sample_count,
+            ),
+            "baseline_evaluation": model_evaluation(
+                format!("production-offline-pending-{}", cycle_db_id),
+                baseline_version,
+                if cycle.production_model_version.is_some() { offline_sample_count } else { 0 },
+            ),
+            "shadow_evaluation": {
+                "sample_count": 0,
+                "agreement_with_confirmed": Value::Null,
+                "correction_rate_delta": Value::Null,
+                "critical_regressions": [],
+                "metrics": {"linked_decision_count": cycle.shadow_operator_decision_count},
+                "blind_ab": if cycle.blind_ab_enabled { "ENABLED" } else { "DISABLED" }
+            },
+            "gates": [{
+                "key": "candidate_evaluation_job",
+                "status": if evaluation_failed { "INSUFFICIENT_EVIDENCE" } else { "PENDING" },
+                "reason": reason
+            }, {
+                "key": "offline_sample_count",
+                "status": "PENDING",
+                "observed": offline_sample_count,
+                "threshold": policy_thresholds.get("minimum_offline_samples")
+            }, {
+                "key": "shadow_sample_count",
+                "status": "PENDING",
+                "observed": cycle.shadow_operator_decision_count,
+                "threshold": policy_thresholds.get("minimum_shadow_samples")
+            }],
+            "decision": "INSUFFICIENT_EVIDENCE",
+            "evaluated_at": now,
+            "synthetic": false
         }))
     }
 
@@ -3606,7 +3946,7 @@ impl PgRepository {
             .await
             .map_err(|error| format!("begin promotion: {error}"))?;
         let locked_cycle = sqlx::query(
-            "SELECT state, candidate_model_version, candidate_dataset_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
+            "SELECT cycle_id, state, candidate_model_version, production_model_version, candidate_dataset_version, frozen_evaluation_dataset_version, promotion_policy_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
         )
         .bind(cycle_db_id)
         .fetch_one(&mut *tx)
@@ -3629,6 +3969,20 @@ impl PgRepository {
             .try_get::<Option<String>, _>("candidate_dataset_version")
             .map_err(|error| format!("candidate dataset version: {error}"))?
             .ok_or_else(|| "candidate dataset lineage is not available".to_owned())?;
+        let frozen_evaluation_dataset_version: String = locked_cycle
+            .try_get::<Option<String>, _>("frozen_evaluation_dataset_version")
+            .map_err(|error| format!("frozen evaluation dataset version: {error}"))?
+            .ok_or_else(|| "frozen evaluation dataset lineage is not available".to_owned())?;
+        let cycle_key: String = locked_cycle
+            .try_get("cycle_id")
+            .map_err(|error| format!("learning cycle key: {error}"))?;
+        let production_model_version: String = locked_cycle
+            .try_get::<Option<String>, _>("production_model_version")
+            .map_err(|error| format!("production model version: {error}"))?
+            .ok_or_else(|| "production model baseline is not available".to_owned())?;
+        let policy_version: String = locked_cycle
+            .try_get("promotion_policy_version")
+            .map_err(|error| format!("promotion policy version: {error}"))?;
         let candidate_dataset_is_synthetic: bool = sqlx::query_scalar(
             "SELECT is_synthetic FROM dataset_versions WHERE dataset_version = $1",
         )
@@ -3643,32 +3997,25 @@ impl PgRepository {
                 "synthetic candidate data cannot be promoted in production runtime".to_owned(),
             );
         }
-        let evaluation = sqlx::query(
-            "SELECT decision, metrics_json->>'status' AS evidence_status FROM model_evaluations WHERE model_version = $1 ORDER BY created_at DESC LIMIT 1",
+        let evaluation = sqlx::query_scalar::<_, Value>(
+            "SELECT evaluation_payload FROM model_evaluations WHERE learning_cycle_id = $1 AND model_version = $2 LIMIT 1",
         )
+        .bind(cycle_db_id)
         .bind(&candidate_model_version)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|error| format!("check candidate evaluation decision: {error}"))?;
-        let evaluation_decision = evaluation
-            .as_ref()
-            .and_then(|row| row.try_get::<Option<String>, _>("decision").ok().flatten());
-        let evidence_status = evaluation.as_ref().and_then(|row| {
-            row.try_get::<Option<String>, _>("evidence_status")
-                .ok()
-                .flatten()
-        });
-        if evidence_status.as_deref() == Some("FAKE_TRAINER_NO_METRICS")
-            && !test_fake_trainer_enabled()
-        {
-            return Err(
-                "test-only fake trainer evidence cannot be promoted in normal runtime".to_owned(),
-            );
-        }
-        if !evaluation_decision
-            .as_deref()
-            .is_some_and(|decision| matches!(decision, "READY_TO_REVIEW" | "READY_TO_PROMOTE"))
-        {
+        if !evaluation.as_ref().is_some_and(|payload| {
+            candidate_evaluation_is_promotable(
+                payload,
+                &cycle_key,
+                &candidate_model_version,
+                &production_model_version,
+                &candidate_dataset_version,
+                &frozen_evaluation_dataset_version,
+                &policy_version,
+            )
+        }) {
             return Err("candidate evaluation is not ready for human promotion".to_owned());
         }
         let candidate_exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW'))")
@@ -3806,6 +4153,19 @@ impl PgRepository {
             .begin()
             .await
             .map_err(|error| format!("begin model promotion: {error}"))?;
+        let is_learning_candidate: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE candidate_model_version = $1)",
+        )
+        .bind(model_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("check controlled candidate lineage: {error}"))?;
+        if is_learning_candidate {
+            return Err(
+                "candidate is managed by a learning cycle; use candidate promotion after all policy gates pass"
+                    .to_owned(),
+            );
+        }
         sqlx::query("UPDATE model_versions SET status = 'REJECTED' WHERE status = 'PRODUCTION' AND model_version <> $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("archive model: {error}"))?;
         sqlx::query("UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("promote model: {error}"))?;
         sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason) VALUES ($1, 'PROMOTE_MODEL', 'model_version', $2, 'manual promotion')").bind(user_id).bind(model_id).execute(&mut *tx).await.map_err(|error| format!("audit model promotion: {error}"))?;
@@ -3854,7 +4214,8 @@ impl PgRepository {
                     WHERE sp.learning_cycle_id = lc.id
                       AND sp.operator_decision_id IS NOT NULL) AS shadow_operator_decision_count,
                    COALESCE((SELECT me.metrics_json FROM model_evaluations me
-                             WHERE me.model_version = lc.candidate_model_version
+                             WHERE me.learning_cycle_id = lc.id
+                               AND me.model_version = lc.candidate_model_version
                              ORDER BY me.created_at DESC LIMIT 1), '{}'::jsonb) AS metrics_json
             FROM learning_cycles lc
             WHERE lc.id = $1
@@ -4678,7 +5039,7 @@ impl PgRepository {
             .await
             .map_err(|error| format!("update ticket decision: {error}"))?;
         sqlx::query(
-            "UPDATE learning_cycle_shadow_predictions SET operator_decision_id = $2 WHERE ticket_id = $1",
+            "UPDATE learning_cycle_shadow_predictions AS shadow SET operator_decision_id = $2 FROM learning_cycles AS cycle WHERE shadow.learning_cycle_id = cycle.id AND cycle.state = 'EVALUATE' AND shadow.ticket_id = $1 AND shadow.operator_decision_id IS NULL",
         )
         .bind(ticket.id.parse::<i64>().map_err(|_| "invalid database ticket id".to_owned())?)
         .bind(decision_id)

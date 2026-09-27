@@ -766,6 +766,47 @@ function CleanReportsPage({ filters }: { filters: DashboardFilters }) {
   return <div className="analytics-page"><section className="panel"><PanelHeading title="Отчёты" /><p className="panel-note">В выгрузку войдут данные за {filterSummary}.</p><div className="report-actions"><a className="button button-primary" href={reportUrl('pdf', filters)}>Скачать PDF</a><a className="button button-secondary" href={reportUrl('xlsx', filters)}>Скачать XLSX</a></div></section></div>
 }
 
+function evaluationMetric(value: unknown, percentage = false): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'недостаточно данных'
+  return percentage ? `${(value * 100).toFixed(1)}%` : value.toFixed(3)
+}
+
+function evaluationGateLabel(key: string): string {
+  const labels: Record<string, string> = {
+    promotion_policy: 'Версия promotion policy поддерживается',
+    offline_sample_count: 'Размер offline выборки',
+    shadow_sample_count: 'Размер shadow выборки',
+    macro_f1_non_inferiority: 'Macro-F1 candidate относительно production',
+    critical_class_regressions: 'Регрессии по классам',
+    shadow_correction_rate_delta: 'Изменение correction rate в shadow',
+    candidate_shadow_inference_failures: 'Ошибки candidate inference',
+    synthetic_evidence: 'Происхождение evidence',
+    candidate_evaluation_job: 'Фоновая оценка candidate',
+  }
+  return labels[key] ?? key
+}
+
+function evaluationGateStatus(status: string): string {
+  switch (status) {
+    case 'PASSED': return 'Пройден'
+    case 'FAILED': return 'Не пройден'
+    case 'PENDING': return 'Выполняется'
+    default: return 'Недостаточно данных'
+  }
+}
+
+function promotionThresholdLabel(key: string): string {
+  const labels: Record<string, string> = {
+    minimum_offline_samples: 'Минимум offline записей',
+    minimum_shadow_samples: 'Минимум shadow решений',
+    maximum_macro_f1_regression: 'Допустимое снижение macro-F1',
+    maximum_class_f1_regression: 'Допустимое снижение F1 класса',
+    maximum_shadow_correction_rate_delta: 'Допустимый рост correction rate',
+    maximum_shadow_inference_failures: 'Допустимые ошибки inference',
+  }
+  return labels[key] ?? key
+}
+
 function CleanLearningPage({ learning, onRefresh, onToast }: { learning: LearningCycle; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
   const [evaluation, setEvaluation] = useState<Awaited<ReturnType<typeof loadCandidateEvaluation>> | null>(null)
   const [evaluationError, setEvaluationError] = useState<string | null>(null)
@@ -774,15 +815,27 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
 
   useEffect(() => {
     let active = true
+    let timer: number | undefined
     setEvaluation(null)
     setEvaluationError(null)
     if (!['EVALUATE', 'DECISION'].includes(learning.stage) || learning.id === 'нет данных') return () => { active = false }
-    void loadCandidateEvaluation().then((result) => {
-      if (active) setEvaluation(result)
-    }).catch((error: unknown) => {
-      if (active) setEvaluationError(error instanceof Error ? error.message : 'Оценка пока недоступна')
-    })
-    return () => { active = false }
+    const load = async () => {
+      try {
+        const result = await loadCandidateEvaluation()
+        if (!active) return
+        setEvaluation(result)
+        if (learning.stage === 'DECISION' && result.status === 'PENDING') {
+          timer = window.setTimeout(() => void load(), 4000)
+        }
+      } catch (error: unknown) {
+        if (active) setEvaluationError(error instanceof Error ? error.message : 'Оценка пока недоступна')
+      }
+    }
+    void load()
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [learning.id, learning.stage, learning.updatedAt])
 
   const runAction = async (action: 'create' | 'close' | 'evaluation' | 'promote' | 'reject') => {
@@ -796,7 +849,7 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         onToast(result.state === 'INSUFFICIENT_FEEDBACK'
           ? `Сбор закрыт: ${result.cycle.feedback_count}/${result.cycle.min_feedback_count} валидных записей, кандидат не создан`
           : result.state === 'DECISION'
-            ? 'Окно shadow evaluation закрыто; production не изменён'
+            ? 'Окно shadow evaluation закрыто; Data/ML evaluation поставлена в очередь'
             : 'Сбор обратной связи закрыт; обучение поставлено в очередь')
       } else if (action === 'evaluation') {
         setEvaluation(await loadCandidateEvaluation())
@@ -817,8 +870,32 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
 
   if (learning.id === 'нет данных') return <div className="analytics-page"><section className="panel"><NoData message="Активного цикла обучения нет." /><button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button></section></div>
 
-  const offlineStatus = evaluation?.offline_metrics?.status
-  const readyToReview = learning.stage === 'DECISION' && evaluation?.decision === 'READY_TO_REVIEW'
+  const offlineStatus = evaluation?.offline_evaluation.status
+  const readyToReview = learning.stage === 'DECISION'
+    && evaluation?.status === 'COMPLETED'
+    && evaluation.decision === 'PENDING_HUMAN_DECISION'
+    && !evaluation.synthetic
+    && evaluation.gates.length > 0
+    && evaluation.gates.every((gate) => gate.status === 'PASSED')
+  const candidateF1 = evaluation?.offline_evaluation.metrics.macro_f1
+  const productionF1 = evaluation?.baseline_evaluation.metrics.macro_f1
+  const classMetrics = evaluation?.offline_evaluation.metrics.per_class_f1 ?? {}
+  const productionClassMetrics = evaluation?.offline_evaluation.metrics.production_per_class_f1
+    ?? evaluation?.baseline_evaluation.metrics.per_class_f1
+    ?? {}
+  const classChanges = evaluation?.offline_evaluation.metrics.per_class_changes ?? {}
+  const classSupport = evaluation?.offline_evaluation.metrics.per_class_support ?? {}
+  const classLabels = [...new Set([
+    ...Object.keys(classMetrics),
+    ...Object.keys(productionClassMetrics),
+    ...Object.keys(classChanges),
+  ])].sort()
+  const criticalRegressions = evaluation
+    ? [...new Set([
+      ...evaluation.offline_evaluation.critical_regressions,
+      ...evaluation.shadow_evaluation.critical_regressions,
+    ])]
+    : []
   const collectEndTimestamp = Date.parse(learning.collectEndsAt)
   const collectEndReached = Number.isFinite(collectEndTimestamp) && collectEndTimestamp <= Date.now()
   const canCloseCollect = learning.manualCloseEnabled || collectEndReached
@@ -868,14 +945,80 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
     </section>
     {['EVALUATE', 'DECISION'].includes(learning.stage) && <section className="panel learning-evaluation">
       <PanelHeading title="Evaluation candidate" />
-      {evaluationError && <p className="panel-note">Оценка пока недоступна: {evaluationError}. После завершения background job нажмите «Показать evaluation».</p>}
+      {evaluationError && <p className="panel-note">Оценка пока недоступна: {evaluationError}. Повторите запрос после восстановления backend.</p>}
       {!evaluation && !evaluationError && <p className="panel-note">Загружаем evaluation из backend…</p>}
       {evaluation && <>
-        <div className="dataset-stat"><span>Решение policy</span><strong>{evaluation.decision}</strong></div>
+        <div className="dataset-stat"><span>Статус оценки</span><strong>{evaluation.status === 'PENDING' ? 'В очереди или выполняется' : evaluation.status === 'FAILED' ? 'Фоновая оценка завершилась ошибкой' : 'Оценка завершена'}</strong></div>
+        <div className="dataset-stat"><span>Решение policy</span><strong>{evaluation.decision === 'PENDING_HUMAN_DECISION' ? 'Все gates пройдены; ожидает решения reviewer' : evaluation.decision === 'FAIL' ? 'Есть проваленные gates' : evaluation.decision === 'PASS' ? 'Policy пройдена; ожидает действия reviewer' : 'Недостаточно evidence'}</strong></div>
         <div className="dataset-stat"><span>Статус evidence</span><strong>{String(offlineStatus ?? 'нет данных')}</strong></div>
-        <div className="dataset-stat"><span>Sample size</span><strong>{evaluation.sample_size}</strong></div>
-        <div className="dataset-stat"><span>Promotion policy</span><strong>{evaluation.promotion_policy_version}</strong></div>
-        <pre className="learning-evaluation-json">{JSON.stringify({ offline_metrics: evaluation.offline_metrics, shadow_metrics: evaluation.shadow_metrics, critical_regressions: evaluation.critical_regressions }, null, 2)}</pre>
+        <div className="learning-evaluation-grid">
+          <article className="learning-evaluation-metric">
+            <span>Candidate macro-F1</span>
+            <strong>{evaluationMetric(candidateF1)}</strong>
+            <small>{evaluation.offline_evaluation.sample_count} frozen offline записей</small>
+          </article>
+          <article className="learning-evaluation-metric">
+            <span>Production macro-F1</span>
+            <strong>{evaluationMetric(productionF1)}</strong>
+            <small>{evaluation.baseline_evaluation.sample_count} offline записей</small>
+          </article>
+          <article className="learning-evaluation-metric">
+            <span>Shadow agreement</span>
+            <strong>{evaluationMetric(evaluation.shadow_evaluation.agreement_with_confirmed, true)}</strong>
+            <small>{evaluation.shadow_evaluation.sample_count} подтверждённых решений</small>
+          </article>
+          <article className="learning-evaluation-metric">
+            <span>Изменение correction rate</span>
+            <strong>{evaluationMetric(evaluation.shadow_evaluation.correction_rate_delta, true)}</strong>
+            <small>candidate минус production</small>
+          </article>
+        </div>
+        <div className="dataset-stat"><span>Candidate</span><strong>{evaluation.candidate_model_version}</strong></div>
+        <div className="dataset-stat"><span>Baseline production</span><strong>{evaluation.production_model_version}</strong></div>
+        <div className="dataset-stat"><span>Frozen evaluation dataset</span><strong>{evaluation.offline_evaluation.dataset_version}</strong></div>
+        <div className="dataset-stat"><span>Promotion policy</span><strong>{evaluation.policy_version}</strong></div>
+        {Object.entries(evaluation.promotion_policy.thresholds).length > 0 && <div className="learning-policy-thresholds">
+          <h3>Пороги до оценки candidate</h3>
+          <ul>{Object.entries(evaluation.promotion_policy.thresholds).map(([key, value]) => <li key={key}>
+            <span>{promotionThresholdLabel(key)}</span>
+            <strong>{key.includes('regression') || key.includes('delta') ? evaluationMetric(value, true) : value}</strong>
+          </li>)}</ul>
+        </div>}
+        <div className="learning-gates">
+          <h3>Promotion gates</h3>
+          <ul>{evaluation.gates.map((item) => <li className={`learning-gate learning-gate-${item.status.toLowerCase()}`} key={item.key}>
+            <span><strong>{evaluationGateLabel(item.key)}</strong>{item.reason && <small>{item.reason}</small>}</span>
+            <span className="learning-gate-result">
+              <strong>{evaluationGateStatus(item.status)}</strong>
+              {(item.observed !== undefined || item.threshold !== undefined) && <small>{item.observed ?? '—'} / {item.threshold ?? '—'}</small>}
+            </span>
+          </li>)}</ul>
+        </div>
+        <div className="learning-gates">
+          <h3>Critical regressions</h3>
+          {criticalRegressions.length > 0
+            ? <ul>{criticalRegressions.map((name) => <li className="learning-regression" key={name}><strong>{name}</strong></li>)}</ul>
+            : offlineStatus === 'COMPLETED' && evaluation.offline_evaluation.sample_count > 0
+              ? <p className="panel-note">Критические регрессии не обнаружены.</p>
+              : <p className="panel-note">Не оценивались: offline evidence недостаточно.</p>}
+        </div>
+        <div className="learning-gates">
+          <h3>Per-class F1</h3>
+          {classLabels.length > 0
+            ? <div className="learning-class-table-wrap"><table className="learning-class-table">
+              <thead><tr><th>Класс</th><th>Production</th><th>Candidate</th><th>Изменение</th><th>Support</th></tr></thead>
+              <tbody>{classLabels.map((label) => <tr key={label}>
+                <th scope="row">{label}</th>
+                <td>{evaluationMetric(productionClassMetrics[label])}</td>
+                <td>{evaluationMetric(classMetrics[label])}</td>
+                <td>{evaluationMetric(classChanges[label])}</td>
+                <td>{classSupport[label] ?? '—'}</td>
+              </tr>)}</tbody>
+            </table></div>
+            : <p className="panel-note">Per-class metrics появятся после получения достаточного offline evidence.</p>}
+        </div>
+        <div className="dataset-stat"><span>Blind A/B</span><strong>{evaluation.shadow_evaluation.blind_ab === 'ENABLED' ? 'включён' : 'отключён'}</strong></div>
+        {evaluation.synthetic && <p className="panel-note">Evidence синтетический и не допускается для production promotion.</p>}
       </>}
     </section>}
   </div>

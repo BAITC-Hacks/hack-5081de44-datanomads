@@ -23,7 +23,8 @@ COLLECT → TRAINING → EVALUATE → DECISION
   `learning_cycle_shadow_predictions`. Ошибка candidate inference фиксируется
   безопасным кодом и не меняет production рекомендацию. Длительность evaluation
   окна равна фактической длительности COLLECT.
-- `DECISION`: KPI и critical regressions доступны reviewer.
+- `DECISION`: reviewer видит persisted offline/shadow evidence, sample sizes,
+  policy thresholds и результат каждого gate.
 - `PROMOTED`: human reviewer утвердил candidate; указатель production обновлён
   атомарно.
 - `REJECTED`: candidate отклонён или не набрал evidence; production не меняется.
@@ -55,10 +56,10 @@ validation_status
 feedback_created_at
 ```
 
-`candidate_evaluations`:
+`model_evaluations`:
 
 ```text
-cycle_id, offline_metrics, shadow_metrics,
+learning_cycle_id, evaluation_payload, offline_metrics, shadow_metrics,
 critical_regressions, sample_size, decision, created_at
 ```
 
@@ -85,12 +86,18 @@ ticket text и свободную заметку оператора. Получ�
 4. **Training**: ML worker создаёт immutable candidate artifact и manifest;
    модель регистрируется как `SHADOW`, production pointer не меняется.
 5. **Evaluation**: Core сохраняет отдельные production/candidate predictions
-   для fresh tickets и связывает появившиеся operator decisions; offline и
-   shadow evidence доступны reviewer.
-6. **Promotion policy**: thresholds фиксируются в `promotion_policy_version`
-   до просмотра candidate metrics.
-7. **Human decision**: только `ML_REVIEWER`/`ADMIN` переводит candidate в
-   `PROMOTED` или `REJECTED`.
+   для fresh tickets и связывает появившиеся operator decisions. После закрытия
+   окна worker передаёт ML evaluator frozen holdout и связанные shadow decisions;
+   ML считает обе модели на одном holdout и сохраняет полный result с FK на
+   `learning_cycles.id`.
+6. **Promotion policy**: версия policy фиксируется в cycle до оценки. `policy-v1`
+   задаёт immutable thresholds: offline macro-F1 не ниже baseline −0.02, падение
+   F1 любого класса не больше 0.05, минимум 30 offline samples, минимум 20
+   подтверждённых shadow decisions, рост correction rate не больше +0.05 и
+   ноль candidate inference failures. Изменение чисел требует новой версии.
+7. **Human decision**: только когда все gates пройдены API разрешает
+   `ML_REVIEWER`/`ADMIN` вручную перевести candidate в `PROMOTED`; иначе reviewer
+   видит `INSUFFICIENT_EVIDENCE`/`FAIL` и может отклонить candidate.
 
 Постоянный `TRAIN_CLASSIFIER` job обучает отдельный candidate из immutable
 dataset artifact. Inline-sample training endpoint остаётся
@@ -111,8 +118,9 @@ id, job_type, payload, state, attempt,
 created_at, started_at, finished_at, error
 ```
 
-Типы: `TRAIN_CLASSIFIER`, `BUILD_EMBEDDINGS`, `RUN_MODEL_EVALUATION`,
-`BUILD_FORECAST`, `REINDEX_QDRANT`, `GENERATE_REPORT`. Worker получает задачу
+Типы: `TRAIN_CLASSIFIER`, `BUILD_CANDIDATE_DATASET`, `CANDIDATE_EVALUATION`,
+`BUILD_EMBEDDINGS`, `RUN_MODEL_EVALUATION`, `BUILD_FORECAST`, `REINDEX_QDRANT`,
+`GENERATE_REPORT`. Worker получает задачу
 в транзакции через `FOR UPDATE SKIP LOCKED`, ставит lease/attempt и явно
 сохраняет terminal error. Redis/Kafka не требуются.
 
@@ -172,6 +180,8 @@ operator click.
 - `AI prediction` и `operator_confirmed_decision` хранятся раздельно.
 - Один цикл имеет одну production baseline и не меняет её training job.
 - Candidate не становится production без audit event и человеческого approval.
+- Cycle candidate проходит только через `/api/v1/learning/candidate/promote`;
+  общий model promotion endpoint отклоняет связанные с cycle версии.
 - Rejected candidate не откатывает production, потому что он не был production.
 - Все переходы state machine валидируются Core API; ML service не может
   самостоятельно продвинуть цикл.

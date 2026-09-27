@@ -5,8 +5,10 @@ import json
 import unittest
 from typing import Any
 
+from app.services import make_services
 from worker import (
     advance_expired_learning_cycle,
+    evaluate_candidate_cycle,
     fail_candidate_dataset_build,
     persist_candidate_dataset_and_queue_training,
 )
@@ -114,6 +116,75 @@ class _PersistencePool:
         return _AcquireContext(self.connection)
 
 
+class _CandidateEvaluationConnection:
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    def transaction(self) -> _AsyncContext:
+        return _AsyncContext()
+
+    async def fetchrow(self, query: str, *_: Any) -> dict[str, Any] | None:
+        if "LEFT JOIN model_versions" in query:
+            return {
+                "id": 12,
+                "cycle_id": "cycle-12",
+                "state": "DECISION",
+                "candidate_model_version": "candidate-12",
+                "production_model_version": "production-12",
+                "candidate_dataset_version": "candidate-dataset-12",
+                "frozen_evaluation_dataset_version": "evaluation-12",
+                "promotion_policy_version": "policy-v1",
+                "blind_ab_enabled": False,
+                "candidate_artifact_checksum": f"sha256:{'a' * 64}",
+                "production_artifact_checksum": f"sha256:{'b' * 64}",
+                "production_is_synthetic": False,
+                "candidate_is_synthetic": False,
+                "evaluation_is_synthetic": False,
+            }
+        if "FOR UPDATE" in query:
+            return {"id": 12, "state": "DECISION", "candidate_model_version": "candidate-12"}
+        raise AssertionError("unexpected candidate evaluation fetchrow")
+
+    async def fetch(self, query: str, *_: Any) -> list[dict[str, Any]]:
+        if "FROM learning_cycle_evaluation_tickets" in query:
+            return [
+                {
+                    "ticket_id": str(index),
+                    "text": f"label:{'water' if index % 2 == 0 else 'lighting'}",
+                    "label": "water" if index % 2 == 0 else "lighting",
+                    "language": "RU",
+                }
+                for index in range(30)
+            ]
+        if "FROM learning_cycle_shadow_predictions" in query:
+            return [
+                {
+                    "production_topic_id": "water" if index % 2 == 0 else "lighting",
+                    "candidate_topic_id": "water" if index % 2 == 0 else "lighting",
+                    "confirmed_topic_id": "water" if index % 2 == 0 else "lighting",
+                    "candidate_inference_status": "COMPLETED",
+                }
+                for index in range(20)
+            ]
+        raise AssertionError("unexpected candidate evaluation fetch")
+
+    async def fetchval(self, query: str, *_: Any) -> int:
+        assert "candidate_inference_status = 'FAILED'" in query
+        return 0
+
+    async def execute(self, query: str, *args: Any) -> str:
+        self.executed.append((query, args))
+        return "INSERT 0 1"
+
+
+class _CandidateEvaluationPool:
+    def __init__(self) -> None:
+        self.connection = _CandidateEvaluationConnection()
+
+    def acquire(self) -> _AcquireContext:
+        return _AcquireContext(self.connection)
+
+
 def _cycle(feedback_count: int) -> dict[str, Any]:
     return {
         "id": 12,
@@ -130,14 +201,23 @@ def _cycle(feedback_count: int) -> dict[str, Any]:
 
 class LearningCycleWorkerTests(unittest.TestCase):
     def test_expired_evaluation_window_advances_to_decision_before_collect(self) -> None:
-        pool = _Pool(_cycle(feedback_count=3), evaluation_cycle={"id": 12})
+        pool = _Pool(
+            _cycle(feedback_count=3),
+            evaluation_cycle={"id": 12, "cycle_id": "cycle-12"},
+        )
 
         self.assertTrue(asyncio.run(advance_expired_learning_cycle(pool)))
 
         self.assertEqual(len(pool.connection.fetchrow_calls), 1)
         self.assertIn("SET state = 'DECISION'", pool.connection.fetchrow_calls[0])
         self.assertIn("EVALUATION_WINDOW_CLOSED", pool.connection.fetchrow_calls[0])
-        self.assertEqual(pool.connection.executed, [])
+        self.assertEqual(len(pool.connection.executed), 1)
+        insert_query, (payload_json,) = pool.connection.executed[0]
+        self.assertIn("CANDIDATE_EVALUATION", insert_query)
+        self.assertEqual(
+            json.loads(payload_json),
+            {"kind": "candidate_evaluation", "cycle_id": "cycle-12"},
+        )
 
     def test_expired_cycle_below_minimum_closes_without_training_job(self) -> None:
         pool = _Pool(_cycle(feedback_count=2))
@@ -242,3 +322,33 @@ class LearningCycleWorkerTests(unittest.TestCase):
         self.assertIn("FROZEN_EVALUATION_SET_NOT_CONFIGURED", pool.connection.executed[0][1])
         self.assertIn("state = 'DATASET_BUILD_FAILED'", pool.connection.executed[1][0])
         self.assertEqual(pool.connection.executed[1][1][0], "cycle-12")
+
+    def test_candidate_evaluation_uses_frozen_evidence_and_persists_cycle_lineage(self) -> None:
+        pool = _CandidateEvaluationPool()
+        *_, evaluator = make_services()
+
+        def classify_version(text: str, model_version: str, artifact_checksum: str | None) -> str:
+            return text.removeprefix("label:")
+
+        evaluator._classify_version = classify_version
+
+        result = asyncio.run(
+            evaluate_candidate_cycle(
+                pool,
+                {"cycle_id": "cycle-12"},
+                evaluator,
+            )
+        )
+
+        self.assertEqual(result["decision"], "PENDING_HUMAN_DECISION")
+        self.assertEqual(result["offline_evaluation"]["dataset_version"], "evaluation-12")
+        self.assertEqual(result["offline_evaluation"]["sample_count"], 30)
+        self.assertEqual(result["shadow_evaluation"]["sample_count"], 20)
+        insert_query, args = pool.connection.executed[-1]
+        self.assertIn("learning_cycle_id", insert_query)
+        self.assertIn("evaluation_payload", insert_query)
+        self.assertEqual(args[8], 12)
+        persisted = json.loads(args[9])
+        self.assertEqual(persisted["cycle_id"], "cycle-12")
+        self.assertEqual(persisted["policy_version"], "policy-v1")
+        self.assertNotIn("label:water", args[9])

@@ -7,6 +7,8 @@
       "anyOf": [
         {"type": "number"},
         {"type": "null"},
+        {"type": "string"},
+        {"type": "boolean"},
         {"type": "array", "items": {"$ref": "#/$defs/metricValue"}},
         {"type": "object", "additionalProperties": {"$ref": "#/$defs/metricValue"}}
       ]

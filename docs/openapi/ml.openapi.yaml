@@ -1274,6 +1274,175 @@ components:
       required:
       - text
       title: TrainingSample
+    CandidateEvaluation:
+      description: >-
+        Shared Data/ML worker result persisted by Core; this is an internal
+        evidence contract and is not exposed as an ML HTTP endpoint.
+      type: object
+      additionalProperties: false
+      required:
+      - schema_version
+      - status
+      - cycle_id
+      - candidate_model_version
+      - production_model_version
+      - candidate_dataset_version
+      - evaluation_version
+      - policy_version
+      - promotion_policy
+      - offline_evaluation
+      - baseline_evaluation
+      - shadow_evaluation
+      - gates
+      - decision
+      - evaluated_at
+      - synthetic
+      properties:
+        schema_version:
+          const: candidate-evaluation.v1
+        status:
+          type: string
+          enum: [PENDING, COMPLETED, FAILED]
+        cycle_id:
+          type: string
+        candidate_model_version:
+          type: string
+        production_model_version:
+          type: string
+        candidate_dataset_version:
+          type: string
+        evaluation_version:
+          type: string
+        policy_version:
+          type: string
+        promotion_policy:
+          type: object
+          additionalProperties: false
+          required: [version, thresholds]
+          properties:
+            version:
+              type: string
+            thresholds:
+              type: object
+              additionalProperties:
+                type: number
+        offline_evaluation:
+          $ref: '#/components/schemas/ModelEvaluationEvidence'
+        baseline_evaluation:
+          $ref: '#/components/schemas/ModelEvaluationEvidence'
+        shadow_evaluation:
+          type: object
+          additionalProperties: false
+          required:
+          - sample_count
+          - agreement_with_confirmed
+          - correction_rate_delta
+          - critical_regressions
+          properties:
+            sample_count:
+              type: integer
+              minimum: 0
+            agreement_with_confirmed:
+              type: [number, 'null']
+              minimum: 0
+              maximum: 1
+            correction_rate_delta:
+              type: [number, 'null']
+            critical_regressions:
+              type: array
+              items:
+                type: string
+            metrics:
+              type: object
+              additionalProperties: true
+            blind_ab:
+              type: string
+              enum: [DISABLED, ENABLED]
+        gates:
+          type: array
+          items:
+            $ref: '#/components/schemas/CandidateEvaluationGate'
+        decision:
+          type: string
+          enum: [PENDING_HUMAN_DECISION, PASS, FAIL, INSUFFICIENT_EVIDENCE]
+        evaluated_at:
+          type: string
+          format: date-time
+        synthetic:
+          type: boolean
+    ModelEvaluationEvidence:
+      type: object
+      additionalProperties: false
+      required:
+      - schema_version
+      - evaluation_id
+      - model_type
+      - model_version
+      - dataset_version
+      - evaluation_version
+      - split_version
+      - evaluation_type
+      - status
+      - sample_count
+      - metrics
+      - critical_regressions
+      - created_at
+      - synthetic
+      properties:
+        schema_version:
+          const: model-evaluation.v1
+        evaluation_id:
+          type: string
+        model_type:
+          type: string
+          enum: [classifier, embedder, forecast, anomaly]
+        model_version:
+          type: string
+        dataset_version:
+          type: string
+        evaluation_version:
+          type: string
+        split_version:
+          type: string
+        evaluation_type:
+          type: string
+          enum: [OFFLINE, SHADOW, BACKTEST]
+        status:
+          type: string
+          enum: [COMPLETED, INSUFFICIENT_DATA, FAILED]
+        sample_count:
+          type: integer
+          minimum: 0
+        metrics:
+          type: object
+          additionalProperties: true
+        critical_regressions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        evaluator:
+          type: [string, 'null']
+        synthetic:
+          type: boolean
+    CandidateEvaluationGate:
+      type: object
+      additionalProperties: false
+      required: [key, status]
+      properties:
+        key:
+          type: string
+        status:
+          type: string
+          enum: [PASSED, FAILED, INSUFFICIENT_EVIDENCE, PENDING]
+        observed:
+          type: [number, 'null']
+        threshold:
+          type: [number, 'null']
+        reason:
+          type: string
     ValidationError:
       properties:
         loc:

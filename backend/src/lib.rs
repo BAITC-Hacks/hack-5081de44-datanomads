@@ -5420,25 +5420,117 @@ async fn candidate_evaluation(
         )));
     }
     let cycle = cycle.clone();
+    let production_model_version = cycle
+        .production_model_version
+        .as_deref()
+        .unwrap_or("unconfigured-production");
+    let dataset_version = cycle
+        .frozen_evaluation_dataset_version
+        .as_deref()
+        .unwrap_or("unconfigured-evaluation-dataset");
+    let evaluation_status = if cycle.state == "EVALUATE" {
+        "PENDING"
+    } else {
+        "FAILED"
+    };
+    let status_reason = if cycle.state == "EVALUATE" {
+        "SHADOW_WINDOW_OPEN"
+    } else {
+        "IN_MEMORY_EVALUATION_UNAVAILABLE"
+    };
+    let policy_thresholds = if cycle.promotion_policy_version == "policy-v1" {
+        json!({
+            "minimum_offline_samples": 30,
+            "minimum_shadow_samples": 20,
+            "maximum_macro_f1_regression": 0.02,
+            "maximum_class_f1_regression": 0.05,
+            "maximum_shadow_correction_rate_delta": 0.05,
+            "maximum_shadow_inference_failures": 0
+        })
+    } else {
+        json!({})
+    };
+    let offline_threshold = policy_thresholds
+        .get("minimum_offline_samples")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let shadow_threshold = policy_thresholds
+        .get("minimum_shadow_samples")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let pending_model_evaluation = |evaluation_id: String, model_version: &str| {
+        json!({
+            "schema_version": "model-evaluation.v1",
+            "evaluation_id": evaluation_id,
+            "model_type": "classifier",
+            "model_version": model_version,
+            "dataset_version": dataset_version,
+            "evaluation_version": "candidate-evaluation.v1",
+            "split_version": "frozen-evaluation.v1",
+            "evaluation_type": "OFFLINE",
+            "status": "INSUFFICIENT_DATA",
+            "sample_count": 0,
+            "metrics": {"reason": status_reason},
+            "critical_regressions": [],
+            "created_at": cycle.updated_at,
+            "evaluator": "pulse109.core.demo-status",
+            "synthetic": true
+        })
+    };
     Ok(Json(json!({
+        "schema_version": "candidate-evaluation.v1",
+        "status": evaluation_status,
         "cycle_id": cycle.id,
-        "state": cycle.state,
-        "offline_metrics": {
-            "status": "DEMO_SYNTHETIC",
-            "macro_f1": cycle.metrics.macro_f1,
-            "accuracy": cycle.metrics.accuracy,
-            "evaluated_samples": cycle.metrics.evaluated_samples,
+        "candidate_model_version": cycle.candidate_model_version,
+        "production_model_version": production_model_version,
+        "candidate_dataset_version": cycle.dataset_version,
+        "evaluation_version": "candidate-evaluation.v1",
+        "policy_version": cycle.promotion_policy_version,
+        "promotion_policy": {
+            "version": cycle.promotion_policy_version,
+            "thresholds": policy_thresholds
         },
-        "shadow_metrics": {
-            "status": "DEMO_SYNTHETIC",
-            "agreement": 0.88,
-            "correction_rate_delta": -0.04,
-            "sample_size": cycle.feedback_count,
-            "blind_ab_enabled": cycle.blind_ab_enabled,
+        "offline_evaluation": pending_model_evaluation(
+            format!("demo-candidate-offline-{}", cycle.id),
+            &cycle.candidate_model_version,
+        ),
+        "baseline_evaluation": pending_model_evaluation(
+            format!("demo-production-offline-{}", cycle.id),
+            production_model_version,
+        ),
+        "shadow_evaluation": {
+            "sample_count": 0,
+            "agreement_with_confirmed": Value::Null,
+            "correction_rate_delta": Value::Null,
+            "critical_regressions": [],
+            "metrics": {
+                "decision_count": cycle.shadow_operator_decision_count,
+                "candidate_inference_failures": cycle.shadow_inference_failures,
+            },
+            "blind_ab": if cycle.blind_ab_enabled { "ENABLED" } else { "DISABLED" }
         },
-        "critical_regressions": [],
-        "promotion_policy_version": cycle.promotion_policy_version,
-        "decision": "READY_TO_REVIEW"
+        "gates": [{
+            "key": "candidate_evaluation_job",
+            "status": if evaluation_status == "PENDING" { "PENDING" } else { "INSUFFICIENT_EVIDENCE" },
+            "reason": status_reason
+        }, {
+            "key": "offline_sample_count",
+            "status": "INSUFFICIENT_EVIDENCE",
+            "observed": 0,
+            "threshold": offline_threshold
+        }, {
+            "key": "shadow_sample_count",
+            "status": "INSUFFICIENT_EVIDENCE",
+            "observed": 0,
+            "threshold": shadow_threshold
+        }, {
+            "key": "synthetic_evidence",
+            "status": "INSUFFICIENT_EVIDENCE",
+            "reason": "DEMO_SYNTHETIC_EVIDENCE_NOT_ELIGIBLE"
+        }],
+        "decision": "INSUFFICIENT_EVIDENCE",
+        "evaluated_at": cycle.updated_at,
+        "synthetic": true
     })))
 }
 
@@ -5520,56 +5612,20 @@ async fn promote_learning_cycle(
             .map_err(ApiError::Conflict)?;
         return Ok(Json(cycle));
     }
-    let mut store = state.write_store()?;
-    let (candidate_id, metrics) = {
-        let cycle = store
-            .learning_cycles
-            .get(&cycle_id)
-            .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
-        if cycle.state != "DECISION" {
-            return Err(ApiError::Conflict(format!(
-                "cycle {} cannot be promoted from state {}",
-                cycle.id, cycle.state
-            )));
-        }
-        (cycle.candidate_model_version.clone(), cycle.metrics.clone())
-    };
-    if let Some(model) = store.models.get_mut(&candidate_id) {
-        model.status = "production".to_owned();
-        model.promoted_at = Some(DEMO_TIMESTAMP.to_owned());
-    } else {
-        let labels = store.topics.iter().map(|topic| topic.id.clone()).collect();
-        store.models.insert(
-            candidate_id.clone(),
-            ModelVersion {
-                id: candidate_id.clone(),
-                model_family: "candidate".to_owned(),
-                base_model: "deterministic-demo".to_owned(),
-                dataset_version: "unknown".to_owned(),
-                status: "production".to_owned(),
-                metrics,
-                languages: vec!["ru".to_owned(), "kk".to_owned()],
-                labels,
-                created_at: DEMO_TIMESTAMP.to_owned(),
-                promoted_at: Some(DEMO_TIMESTAMP.to_owned()),
-            },
-        );
-    }
-    for model in store.models.values_mut() {
-        if model.id != candidate_id && model.status == "production" {
-            model.status = "archived".to_owned();
-        }
-    }
+    let store = state.read_store()?;
     let cycle = store
         .learning_cycles
-        .get_mut(&cycle_id)
+        .get(&cycle_id)
         .ok_or_else(|| ApiError::NotFound(format!("learning cycle {cycle_id} not found")))?;
-    cycle.state = "PROMOTED".to_owned();
-    cycle.decision_note = request
-        .note
-        .or_else(|| Some(format!("Promoted by {}", actor.user_id)));
-    cycle.updated_at = DEMO_TIMESTAMP.to_owned();
-    Ok(Json(cycle.clone()))
+    if cycle.state != "DECISION" {
+        return Err(ApiError::Conflict(format!(
+            "cycle {} cannot be promoted from state {}",
+            cycle.id, cycle.state
+        )));
+    }
+    Err(ApiError::Conflict(
+        "candidate evaluation evidence is insufficient in the in-memory runtime".to_owned(),
+    ))
 }
 
 async fn reject_learning_cycle(
@@ -5705,6 +5761,16 @@ async fn promote_model(
     if !store.models.contains_key(&model_id) {
         return Err(ApiError::NotFound(format!("model {model_id} not found")));
     }
+    if store
+        .learning_cycles
+        .values()
+        .any(|cycle| cycle.candidate_model_version == model_id)
+    {
+        return Err(ApiError::Conflict(
+            "candidate is managed by a learning cycle; use candidate promotion after all policy gates pass"
+                .to_owned(),
+        ));
+    }
     for model in store.models.values_mut() {
         if model.status == "production" {
             model.status = "archived".to_owned();
@@ -5799,13 +5865,13 @@ async fn openapi() -> Json<Value> {
             "/api/v1/learning/{cycle_id}/reject": { "post": { "summary": "Reject candidate after human review" } },
             "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
             "/api/v1/learning/cycle/close": { "post": { "summary": "Close collect and train candidate" } },
-            "/api/v1/learning/candidate/evaluation": { "get": { "summary": "Evaluate candidate" } },
+            "/api/v1/learning/candidate/evaluation": { "get": { "summary": "Read candidate evaluation evidence and promotion gates" } },
             "/api/v1/learning/candidate/promote": { "post": { "summary": "Promote candidate" } },
             "/api/v1/learning/candidate/reject": { "post": { "summary": "Reject candidate" } },
             "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Collect relation feedback" } },
             "/api/v1/models": { "get": { "summary": "List model versions" } },
             "/api/v1/models/{model_id}": { "get": { "summary": "Get model version" } },
-            "/api/v1/models/{model_id}/promote": { "post": { "summary": "Promote model version after human review" } }
+            "/api/v1/models/{model_id}/promote": { "post": { "summary": "Promote a model version outside controlled learning cycles" } }
         }
     }))
 }

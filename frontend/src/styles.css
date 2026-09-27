@@ -316,9 +316,42 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .query-results li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-metrics-panel { margin-bottom: 18px; }
 .runtime-metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.learning-evaluation-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 15px 0; }
+.learning-evaluation-metric { display: grid; align-content: start; gap: 7px; min-width: 0; padding: 13px; border: 1px solid rgba(140,240,200,.12); border-radius: 8px; background: rgba(140,240,200,.035); }
+.learning-evaluation-metric span, .learning-evaluation-metric small { color: #71877c; font-size: 9px; line-height: 1.35; }
+.learning-evaluation-metric strong { overflow-wrap: anywhere; color: #d8eee2; font-size: 18px; letter-spacing: -.03em; }
+.learning-policy-thresholds, .learning-gates { margin-top: 18px; }
+.learning-policy-thresholds h3, .learning-gates h3 { margin-bottom: 9px; color: #b9cec3; font-size: 11px; font-weight: 650; }
+.learning-policy-thresholds ul, .learning-gates ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.learning-policy-thresholds li, .learning-gate { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 9px 11px; border: 1px solid rgba(214,236,225,.07); border-radius: 6px; background: rgba(0,0,0,.12); }
+.learning-policy-thresholds li span { color: #81958b; font-size: 10px; }
+.learning-policy-thresholds li strong { color: #d2e5d9; font-size: 10px; text-align: right; }
+.learning-gate > span:first-child { display: grid; gap: 4px; min-width: 0; }
+.learning-gate > span:first-child strong { color: #c4d8cd; font-size: 10px; }
+.learning-gate small { color: #71857b; font-size: 9px; overflow-wrap: anywhere; }
+.learning-gate-result { display: grid; justify-items: end; flex: 0 0 auto; gap: 4px; }
+.learning-gate-result strong { color: #a8b8b0; font-size: 9px; }
+.learning-gate-passed .learning-gate-result strong { color: var(--mint); }
+.learning-gate-failed, .learning-regression { border-color: rgba(255,157,157,.2); background: rgba(255,157,157,.04); }
+.learning-gate-failed .learning-gate-result strong, .learning-regression strong { color: var(--rose); }
+.learning-gate-insufficient_evidence .learning-gate-result strong { color: var(--amber); }
+.learning-class-table-wrap { overflow-x: auto; border: 1px solid rgba(214,236,225,.08); border-radius: 7px; }
+.learning-class-table { width: 100%; min-width: 560px; border-collapse: collapse; color: #9db2a7; font-size: 10px; }
+.learning-class-table th, .learning-class-table td { padding: 9px 10px; border-bottom: 1px solid rgba(214,236,225,.06); text-align: right; white-space: nowrap; }
+.learning-class-table thead th { color: #71857a; font-size: 8px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+.learning-class-table th:first-child, .learning-class-table td:first-child { text-align: left; }
+.learning-class-table tbody th { color: #c5d8cd; font-weight: 550; }
+.learning-class-table tbody tr:last-child th, .learning-class-table tbody tr:last-child td { border-bottom: 0; }
+.learning-regression { padding: 10px 11px; border-radius: 6px; }
+@media (max-width: 980px) {
+  .learning-evaluation-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 900px) {
   .runtime-metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 560px) {
   .runtime-metrics-grid { grid-template-columns: 1fr; }
+  .learning-evaluation-grid { grid-template-columns: 1fr 1fr; gap: 7px; }
+  .learning-evaluation-metric { padding: 10px; }
+  .learning-evaluation-metric strong { font-size: 16px; }
 }

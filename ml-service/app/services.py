@@ -27,10 +27,12 @@ from contracts import ContractValidationError, validate_document
 
 from .constants import DEMO_IMPLEMENTATIONS, MODEL_VERSIONS, TOPICS, TOPIC_BY_ID, Topic
 from .candidate_runtime import CandidateArtifactError, classify_candidate
+from .promotion_policy import gate, promotion_policy
 from .schemas import (
     Alternative,
     AnomalyPoint,
     AnomalyResponse,
+    CandidateEvaluationRequest,
     CandidateTrainingJob,
     CandidateTrainingResult,
     Classification,
@@ -379,8 +381,10 @@ class AnomalyService:
         )
 
 
-def _classification_metrics(actual: list[str], predicted: list[str]) -> dict[str, Any]:
-    labels = sorted(set(actual) | set(predicted))
+def _classification_metrics(
+    actual: list[str], predicted: list[str], labels: list[str] | None = None
+) -> dict[str, Any]:
+    labels = sorted(set(actual) | set(predicted)) if labels is None else labels
     if not actual:
         return {"accuracy": None, "macro_f1": None, "per_class_f1": {}, "confusion_matrix": []}
     correct = sum(a == p for a, p in zip(actual, predicted))
@@ -592,6 +596,378 @@ class EvaluationService:
         )
         self.evaluations[evaluation_id] = response
         return response
+
+    def _classify_version(
+        self,
+        text: str,
+        model_version: str,
+        artifact_checksum: str | None,
+    ) -> str:
+        if model_version == self.classifier.model_version:
+            return self.classifier.classify(text).topic_id
+        if artifact_checksum is None:
+            raise CandidateArtifactError("MODEL_ARTIFACT_CHECKSUM_REQUIRED")
+        return self.classifier.classify(
+            text,
+            model_version=model_version,
+            expected_artifact_checksum=artifact_checksum,
+        ).topic_id
+
+    def evaluate_candidate(self, request: CandidateEvaluationRequest) -> dict[str, Any]:
+        """Evaluate a candidate against the cycle's frozen offline and shadow evidence."""
+
+        policy = promotion_policy(request.promotion_policy_version)
+        policy_thresholds = policy.thresholds() if policy is not None else {}
+        synthetic_evidence = request.synthetic or self._production_baseline_is_synthetic(
+            request
+        )
+        sample_count = len(request.offline_samples)
+        actual = [sample.label for sample in request.offline_samples]
+        candidate_metrics: dict[str, Any] = {}
+        baseline_metrics: dict[str, Any] = {}
+        per_class_changes: dict[str, float] = {}
+        critical_regressions: list[str] = []
+        offline_status = "COMPLETED"
+        evaluation_error: str | None = None
+
+        if not request.production_baseline_available:
+            offline_status = "INSUFFICIENT_DATA"
+            evaluation_error = "PRODUCTION_BASELINE_NOT_CONFIGURED"
+        elif synthetic_evidence:
+            offline_status = "INSUFFICIENT_DATA"
+            evaluation_error = "SYNTHETIC_EVIDENCE_NOT_ELIGIBLE"
+        elif not request.offline_samples:
+            offline_status = "INSUFFICIENT_DATA"
+            evaluation_error = "FROZEN_EVALUATION_SAMPLES_UNAVAILABLE"
+        else:
+            try:
+                production_predictions = [
+                    self._classify_version(
+                        sample.text,
+                        request.production_model_version,
+                        request.production_artifact_checksum,
+                    )
+                    for sample in request.offline_samples
+                ]
+                candidate_predictions = [
+                    self._classify_version(
+                        sample.text,
+                        request.candidate_model_version,
+                        request.candidate_artifact_checksum,
+                    )
+                    for sample in request.offline_samples
+                ]
+                shared_labels = sorted(
+                    set(actual) | set(production_predictions) | set(candidate_predictions)
+                )
+                baseline_metrics = _classification_metrics(
+                    actual, production_predictions, shared_labels
+                )
+                candidate_metrics = _classification_metrics(
+                    actual, candidate_predictions, shared_labels
+                )
+                per_class_changes = {
+                    label: round(
+                        candidate_metrics["per_class_f1"].get(label, 0.0)
+                        - baseline_metrics["per_class_f1"].get(label, 0.0),
+                        6,
+                    )
+                    for label in shared_labels
+                }
+                if policy is not None:
+                    critical_regressions = sorted(
+                        label
+                        for label, change in per_class_changes.items()
+                        if change < -policy.maximum_class_f1_regression
+                    )
+            except CandidateArtifactError as error:
+                offline_status = "FAILED"
+                evaluation_error = str(error)
+
+        shadow_decisions = [
+            item
+            for item in request.shadow_samples
+            if item.production_topic_id is not None
+        ]
+        paired_shadow_samples = [
+            item
+            for item in shadow_decisions
+            if item.candidate_inference_status == "COMPLETED"
+            and item.candidate_topic_id is not None
+        ]
+        shadow_sample_count = len(paired_shadow_samples)
+        candidate_agreement: float | None = None
+        production_agreement: float | None = None
+        correction_rate_delta: float | None = None
+        if shadow_sample_count:
+            candidate_agreement = round(
+                sum(
+                    item.candidate_topic_id == item.confirmed_topic_id
+                    for item in paired_shadow_samples
+                )
+                / shadow_sample_count,
+                6,
+            )
+            production_agreement = round(
+                sum(
+                    item.production_topic_id == item.confirmed_topic_id
+                    for item in paired_shadow_samples
+                )
+                / shadow_sample_count,
+                6,
+            )
+            correction_rate_delta = round(
+                (1.0 - candidate_agreement) - (1.0 - production_agreement),
+                6,
+            )
+
+        shadow_failures = max(
+            request.shadow_inference_failures,
+            sum(
+                item.candidate_inference_status == "FAILED"
+                for item in request.shadow_samples
+            ),
+        )
+        shadow_regressions = (
+            ["SHADOW_CORRECTION_RATE"]
+            if policy is not None
+            and correction_rate_delta is not None
+            and correction_rate_delta > policy.maximum_shadow_correction_rate_delta
+            else []
+        )
+        gates: list[dict[str, Any]] = []
+        if policy is None:
+            gates.append(
+                gate(
+                    "promotion_policy",
+                    "INSUFFICIENT_EVIDENCE",
+                    reason="POLICY_VERSION_UNSUPPORTED",
+                )
+            )
+        else:
+            gates.extend(
+                [
+                    gate(
+                        "offline_sample_count",
+                        "PASSED"
+                        if sample_count >= policy.minimum_offline_samples
+                        else "INSUFFICIENT_EVIDENCE",
+                        observed=sample_count,
+                        threshold=policy.minimum_offline_samples,
+                    ),
+                    gate(
+                        "shadow_sample_count",
+                        "PASSED"
+                        if shadow_sample_count >= policy.minimum_shadow_samples
+                        else "INSUFFICIENT_EVIDENCE",
+                        observed=shadow_sample_count,
+                        threshold=policy.minimum_shadow_samples,
+                    ),
+                ]
+            )
+            if candidate_metrics and baseline_metrics:
+                macro_f1_delta = round(
+                    candidate_metrics["macro_f1"] - baseline_metrics["macro_f1"], 6
+                )
+                gates.append(
+                    gate(
+                        "macro_f1_non_inferiority",
+                        "PASSED"
+                        if macro_f1_delta >= -policy.maximum_macro_f1_regression
+                        else "FAILED",
+                        observed=macro_f1_delta,
+                        threshold=-policy.maximum_macro_f1_regression,
+                    )
+                )
+                gates.append(
+                    gate(
+                        "critical_class_regressions",
+                        "PASSED" if not critical_regressions else "FAILED",
+                        observed=len(critical_regressions),
+                        threshold=0,
+                    )
+                )
+            else:
+                gates.extend(
+                    [
+                        gate(
+                            "macro_f1_non_inferiority",
+                            "INSUFFICIENT_EVIDENCE",
+                            reason=evaluation_error or "OFFLINE_METRICS_UNAVAILABLE",
+                        ),
+                        gate(
+                            "critical_class_regressions",
+                            "INSUFFICIENT_EVIDENCE",
+                            reason=evaluation_error or "OFFLINE_METRICS_UNAVAILABLE",
+                        ),
+                    ]
+                )
+            if correction_rate_delta is None:
+                gates.append(
+                    gate(
+                        "shadow_correction_rate_delta",
+                        "INSUFFICIENT_EVIDENCE",
+                        reason="SHADOW_DECISIONS_UNAVAILABLE",
+                    )
+                )
+            else:
+                gates.append(
+                    gate(
+                        "shadow_correction_rate_delta",
+                        "PASSED"
+                        if correction_rate_delta
+                        <= policy.maximum_shadow_correction_rate_delta
+                        else "FAILED",
+                        observed=correction_rate_delta,
+                        threshold=policy.maximum_shadow_correction_rate_delta,
+                    )
+                )
+            gates.append(
+                gate(
+                    "candidate_shadow_inference_failures",
+                    "PASSED" if shadow_failures == 0 else "FAILED",
+                    observed=shadow_failures,
+                    threshold=0,
+                )
+            )
+
+        gates.append(
+            gate(
+                "synthetic_evidence",
+                "INSUFFICIENT_EVIDENCE" if synthetic_evidence else "PASSED",
+                reason="SYNTHETIC_EVIDENCE_NOT_ELIGIBLE" if synthetic_evidence else None,
+            )
+        )
+        statuses = {item["status"] for item in gates}
+        if "FAILED" in statuses or offline_status == "FAILED":
+            decision = "FAIL"
+        elif "INSUFFICIENT_EVIDENCE" in statuses:
+            decision = "INSUFFICIENT_EVIDENCE"
+        else:
+            decision = "PENDING_HUMAN_DECISION"
+
+        evaluated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        evaluation_digest = hashlib.sha256(request.cycle_id.encode("utf-8")).hexdigest()[:24]
+
+        def model_evaluation(
+            evaluation_id: str,
+            model_version: str,
+            dataset_version: str,
+            evaluation_status: str,
+            count: int,
+            metrics: dict[str, Any],
+            regressions: list[str],
+            synthetic: bool,
+        ) -> dict[str, Any]:
+            return {
+                "schema_version": "model-evaluation.v1",
+                "evaluation_id": evaluation_id,
+                "model_type": "classifier",
+                "model_version": model_version,
+                "dataset_version": dataset_version,
+                "evaluation_version": "candidate-evaluation.v1",
+                "split_version": "frozen-evaluation.v1",
+                "evaluation_type": "OFFLINE",
+                "status": evaluation_status,
+                "sample_count": count,
+                "metrics": metrics,
+                "critical_regressions": regressions,
+                "created_at": evaluated_at,
+                "evaluator": "pulse109.ml.candidate-evaluator.v1",
+                "synthetic": synthetic,
+            }
+
+        candidate_metrics_payload = dict(candidate_metrics)
+        candidate_metrics_payload.update(
+            {
+                "production_macro_f1": baseline_metrics.get("macro_f1"),
+                "production_accuracy": baseline_metrics.get("accuracy"),
+                "production_per_class_f1": baseline_metrics.get("per_class_f1", {}),
+                "per_class_changes": per_class_changes,
+                "per_class_support": {
+                    label: actual.count(label) for label in sorted(set(actual))
+                },
+            }
+        )
+        if evaluation_error is not None:
+            candidate_metrics_payload["reason"] = evaluation_error
+
+        result = {
+            "schema_version": "candidate-evaluation.v1",
+            "status": "FAILED" if offline_status == "FAILED" else "COMPLETED",
+            "cycle_id": request.cycle_id,
+            "candidate_model_version": request.candidate_model_version,
+            "production_model_version": request.production_model_version,
+            "candidate_dataset_version": request.candidate_dataset_version,
+            "evaluation_version": "candidate-evaluation.v1",
+            "policy_version": request.promotion_policy_version,
+            "promotion_policy": {
+                "version": request.promotion_policy_version,
+                "thresholds": policy_thresholds,
+            },
+            "offline_evaluation": model_evaluation(
+                f"candidate-offline-{evaluation_digest}",
+                request.candidate_model_version,
+                request.frozen_evaluation_dataset_version,
+                offline_status,
+                sample_count,
+                candidate_metrics_payload,
+                critical_regressions,
+                synthetic_evidence,
+            ),
+            "baseline_evaluation": model_evaluation(
+                f"production-offline-{evaluation_digest}",
+                request.production_model_version,
+                request.frozen_evaluation_dataset_version,
+                "COMPLETED" if baseline_metrics else "INSUFFICIENT_DATA",
+                sample_count if baseline_metrics else 0,
+                baseline_metrics,
+                [],
+                synthetic_evidence,
+            ),
+            "shadow_evaluation": {
+                "sample_count": shadow_sample_count,
+                "agreement_with_confirmed": candidate_agreement,
+                "correction_rate_delta": correction_rate_delta,
+                "critical_regressions": shadow_regressions,
+                "metrics": {
+                    "decision_count": len(shadow_decisions),
+                    "production_agreement_with_confirmed": production_agreement,
+                    "production_correction_rate": (
+                        round(1.0 - production_agreement, 6)
+                        if production_agreement is not None
+                        else None
+                    ),
+                    "candidate_correction_rate": (
+                        round(1.0 - candidate_agreement, 6)
+                        if candidate_agreement is not None
+                        else None
+                    ),
+                    "candidate_inference_failures": shadow_failures,
+                },
+                "blind_ab": "ENABLED" if request.blind_ab_enabled else "DISABLED",
+            },
+            "gates": gates,
+            "decision": decision,
+            "evaluated_at": evaluated_at,
+            "synthetic": synthetic_evidence,
+        }
+        validate_document(result, "CandidateEvaluation")
+        return result
+
+    def _production_baseline_is_synthetic(
+        self, request: CandidateEvaluationRequest
+    ) -> bool:
+        if request.production_baseline_is_synthetic:
+            return True
+        try:
+            runtime_baseline = self.registry.get("classifier")
+        except KeyError:
+            return False
+        return (
+            runtime_baseline.model_version == request.production_model_version
+            and runtime_baseline.synthetic
+        )
 
     def get(self, evaluation_id: str) -> EvaluationResponse | None:
         return self.evaluations.get(evaluation_id)

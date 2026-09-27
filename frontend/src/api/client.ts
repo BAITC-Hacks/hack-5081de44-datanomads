@@ -181,14 +181,56 @@ interface BackendLearningCycle { id: string; cycle_id: string; state: string; da
 interface BackendLearning { source?: string; items?: BackendLearningCycle[]; active_cycle?: BackendLearningCycle; production_model?: { id: string; status: string }; controlled_loop?: Record<string, unknown> }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
 export interface CandidateEvaluation {
+  schema_version: 'candidate-evaluation.v1'
+  status: 'PENDING' | 'COMPLETED' | 'FAILED'
   cycle_id: string
-  state: string
-  offline_metrics: Record<string, unknown>
-  shadow_metrics: Record<string, unknown>
-  critical_regressions: unknown[]
-  sample_size: number
-  promotion_policy_version: string
-  decision: string
+  candidate_model_version: string
+  production_model_version: string
+  candidate_dataset_version: string
+  evaluation_version: string
+  policy_version: string
+  promotion_policy: { version: string; thresholds: Record<string, number> }
+  offline_evaluation: CandidateModelEvaluation
+  baseline_evaluation: CandidateModelEvaluation
+  shadow_evaluation: {
+    sample_count: number
+    agreement_with_confirmed: number | null
+    correction_rate_delta: number | null
+    critical_regressions: string[]
+    metrics: Record<string, unknown>
+    blind_ab: 'DISABLED' | 'ENABLED'
+  }
+  gates: Array<{
+    key: string
+    status: 'PASSED' | 'FAILED' | 'INSUFFICIENT_EVIDENCE' | 'PENDING'
+    observed?: number | null
+    threshold?: number | null
+    reason?: string
+  }>
+  decision: 'PENDING_HUMAN_DECISION' | 'PASS' | 'FAIL' | 'INSUFFICIENT_EVIDENCE'
+  evaluated_at: string
+  synthetic: boolean
+}
+export interface CandidateModelEvaluation {
+  evaluation_id: string
+  model_version: string
+  dataset_version: string
+  status: 'COMPLETED' | 'INSUFFICIENT_DATA' | 'FAILED'
+  sample_count: number
+  metrics: {
+    macro_f1?: number | null
+    accuracy?: number | null
+    per_class_f1?: Record<string, number>
+    production_macro_f1?: number | null
+    production_accuracy?: number | null
+    production_per_class_f1?: Record<string, number>
+    per_class_changes?: Record<string, number>
+    per_class_support?: Record<string, number>
+    reason?: string
+    [key: string]: unknown
+  }
+  critical_regressions: string[]
+  synthetic: boolean
 }
 export interface TaxonomyOption { id: string; label: string }
 interface BackendTaxonomy {

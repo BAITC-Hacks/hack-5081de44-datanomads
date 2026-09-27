@@ -85,9 +85,23 @@ async fn viewing_candidate_evaluation_does_not_close_its_window() {
     let evaluation: serde_json::Value =
         serde_json::from_slice(&to_bytes(evaluation.into_body(), usize::MAX).await.unwrap())
             .unwrap();
-    assert_eq!(evaluation["state"], "EVALUATE");
-    assert_eq!(evaluation["offline_metrics"]["status"], "DEMO_SYNTHETIC");
-    assert_eq!(evaluation["shadow_metrics"]["blind_ab_enabled"], false);
+    assert_eq!(evaluation["status"], "PENDING");
+    assert_eq!(evaluation["cycle_id"], "cycle-001");
+    assert_eq!(evaluation["decision"], "INSUFFICIENT_EVIDENCE");
+    assert_eq!(evaluation["synthetic"], true);
+    assert_eq!(evaluation["shadow_evaluation"]["blind_ab"], "DISABLED");
+
+    let generic_promotion = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/models/classifier-candidate-2026-09-001/promote")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(generic_promotion.status(), 409);
 
     let promotion = application
         .clone()
@@ -103,6 +117,7 @@ async fn viewing_candidate_evaluation_does_not_close_its_window() {
     assert_eq!(promotion.status(), 409);
 
     let close = application
+        .clone()
         .oneshot(
             Request::post("/api/v1/learning/cycle/close")
                 .header("content-type", "application/json")
@@ -118,6 +133,41 @@ async fn viewing_candidate_evaluation_does_not_close_its_window() {
     assert_eq!(close["state"], "DECISION");
     assert_eq!(close["production_model_unchanged"], true);
     assert_eq!(close["cycle"]["state"], "DECISION");
+
+    let completed_evaluation = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/learning/candidate/evaluation")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed_evaluation.status(), 200);
+    let completed_evaluation: serde_json::Value = serde_json::from_slice(
+        &to_bytes(completed_evaluation.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(completed_evaluation["status"], "FAILED");
+    assert_eq!(completed_evaluation["decision"], "INSUFFICIENT_EVIDENCE");
+    assert_eq!(completed_evaluation["synthetic"], true);
+
+    let promotion_after_close = application
+        .oneshot(
+            Request::post("/api/v1/learning/candidate/promote")
+                .header("content-type", "application/json")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .body(Body::from(
+                    r#"{"note":"in-memory evaluation must fail closed"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(promotion_after_close.status(), 409);
 }
 
 #[tokio::test]
