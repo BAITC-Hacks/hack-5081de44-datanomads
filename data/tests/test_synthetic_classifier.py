@@ -6,7 +6,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.generate_synthetic_classifier import SCENARIO_BANK, generate, read_scenarios, sha256
+from scripts.generate_synthetic_classifier import (
+    CHALLENGE_BANK, REQUIRED_BOUNDARIES, SCENARIO_BANK, generate, read_challenges,
+    read_scenarios, sha256,
+)
 
 
 class SyntheticClassifierTests(unittest.TestCase):
@@ -15,6 +18,30 @@ class SyntheticClassifierTests(unittest.TestCase):
         self.assertEqual(len(scenarios), 160)
         self.assertEqual(len({scenario["topic_id"] for scenario in scenarios}), 16)
 
+    def test_challenges_cover_review_decisions_and_hard_boundaries(self) -> None:
+        challenges = read_challenges(CHALLENGE_BANK)
+        self.assertEqual(len(challenges), 21)
+        self.assertEqual({row["proposed_decision"] for row in challenges},
+                         {"UNKNOWN", "OTHER", "NEEDS_REVIEW"})
+        self.assertEqual({frozenset(row["candidate_topics"]) for row in challenges
+                          if row["proposed_decision"] == "NEEDS_REVIEW"}, REQUIRED_BOUNDARIES)
+        self.assertTrue(all(row["review_status"] == "PENDING" and
+                            row["approved_for_training"] is False and
+                            "topic_id" not in row for row in challenges))
+        for scenario_id in {row["scenario_id"] for row in challenges}:
+            self.assertEqual({row["language"] for row in challenges
+                              if row["scenario_id"] == scenario_id}, {"RU", "KZ", "MIXED"})
+
+    def test_incomplete_challenge_language_group_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bank = Path(directory) / "challenges.tsv"
+            lines = CHALLENGE_BANK.read_text(encoding="utf-8").splitlines()
+            truncated = [line for line in lines
+                         if not (line.startswith("light_power_01\t") and "\tMIXED\t" in line)]
+            bank.write_text("\n".join(truncated) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lacks RU/KZ/MIXED"):
+                read_challenges(bank)
+
     def test_generation_has_balanced_training_and_disjoint_scenarios(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "classifier"
@@ -22,6 +49,12 @@ class SyntheticClassifierTests(unittest.TestCase):
             self.assertEqual(manifest["split_counts"], {"train": 20000, "validation": 2000, "test": 4000})
             self.assertEqual(manifest["language_counts"], {"RU": 13000, "KZ": 13000})
             self.assertEqual(manifest["scenario_counts_by_split"], {"train": 112, "validation": 16, "test": 32})
+            self.assertEqual(manifest["challenge_count"], 21)
+            self.assertEqual(manifest["challenge_scenario_count"], 7)
+            self.assertEqual(manifest["challenge_proposed_decision_counts"],
+                             {"NEEDS_REVIEW": 15, "OTHER": 3, "UNKNOWN": 3})
+            self.assertEqual(manifest["challenge_bank_sha256"], sha256(CHALLENGE_BANK))
+            self.assertEqual(manifest["challenge_file"]["sha256"], sha256(output / "challenges.jsonl"))
 
             groups = {}
             texts = set()
@@ -41,6 +74,10 @@ class SyntheticClassifierTests(unittest.TestCase):
             self.assertFalse(groups["train"] & groups["validation"])
             self.assertFalse(groups["train"] & groups["test"])
             self.assertFalse(groups["validation"] & groups["test"])
+            with (output / "challenges.jsonl").open(encoding="utf-8") as handle:
+                challenge_rows = [json.loads(line) for line in handle]
+            self.assertFalse({row["scenario_id"] for row in challenge_rows} & set().union(*groups.values()))
+            self.assertFalse({row["text"] for row in challenge_rows} & texts)
 
             repeated = generate(Path(directory) / "repeated")
             self.assertEqual(repeated["files"], manifest["files"])

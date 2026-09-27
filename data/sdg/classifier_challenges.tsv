@@ -1,0 +1,22 @@
+scenario_id	proposed_decision	candidate_topics	language	text
+light_power_01	NEEDS_REVIEW	street_lighting|electricity	RU	Во дворе пропал свет, не знаю, отключились дома или только фонари.
+light_power_01	NEEDS_REVIEW	street_lighting|electricity	KZ	Аулада жарық жоқ, үйлерде ме әлде тек көше шамдарында ма, білмеймін.
+light_power_01	NEEDS_REVIEW	street_lighting|electricity	MIXED	Аулада свет жоқ, үйлерде ме әлде фонари ғана ма, білмеймін.
+entrance_light_01	NEEDS_REVIEW	buildings|street_lighting	RU	У входа в дом темно: не горит лампа, но где она установлена, не уточнили.
+entrance_light_01	NEEDS_REVIEW	buildings|street_lighting	KZ	Үйдің кіреберісінде қараңғы, шам жанбайды, оның қайда орнатылғаны белгісіз.
+entrance_light_01	NEEDS_REVIEW	buildings|street_lighting	MIXED	Үйдің кіреберісінде темно, лампа жанбайды, бірақ қай жерде тұрғаны белгісіз.
+road_stop_01	NEEDS_REVIEW	roads|public_transport	RU	На остановке сломана площадка, непонятно, это дорожное покрытие или часть остановки.
+road_stop_01	NEEDS_REVIEW	roads|public_transport	KZ	Аялдамадағы алаң бүлінген, бұл жол жабыны ма әлде аялдаманың бөлігі ме, белгісіз.
+road_stop_01	NEEDS_REVIEW	roads|public_transport	MIXED	Аялдамада площадка бүлінген, жол жабыны ма әлде остановка бөлігі ме, белгісіз.
+road_water_01	NEEDS_REVIEW	wastewater|roads	RU	После дождя на дороге стоит вода, причина пока неизвестна.
+road_water_01	NEEDS_REVIEW	wastewater|roads	KZ	Жаңбырдан кейін жолда су жиналып тұр, себебі әзірге белгісіз.
+road_water_01	NEEDS_REVIEW	wastewater|roads	MIXED	Жаңбырдан кейін на дороге су тұр, себебі белгісіз.
+park_path_01	NEEDS_REVIEW	landscaping|roads	RU	У дорожки в парке провалился край рядом с корнями дерева.
+park_path_01	NEEDS_REVIEW	landscaping|roads	KZ	Саябақтағы жолдың шеті ағаш тамырларының жанында опырылған.
+park_path_01	NEEDS_REVIEW	landscaping|roads	MIXED	Парктегі дорожка шеті ағаш тамырларының жанында опырылған.
+outside_taxonomy_01	OTHER		RU	Не получается открыть вклад в банковском приложении.
+outside_taxonomy_01	OTHER		KZ	Банк қосымшасында депозит аша алмай жатырмын.
+outside_taxonomy_01	OTHER		MIXED	Банк қосымшасында вклад ашылмай жатыр.
+missing_subject_01	UNKNOWN		RU	Опять не работает. Проверьте, пожалуйста.
+missing_subject_01	UNKNOWN		KZ	Тағы жұмыс істемей тұр. Тексеріп беріңізші.
+missing_subject_01	UNKNOWN		MIXED	Тағы не работает, тексеріп беріңізші.

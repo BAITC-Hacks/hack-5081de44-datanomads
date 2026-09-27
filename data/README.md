@@ -102,6 +102,16 @@ scenario groups, review a sample of RU/KZ text and create an independent
 evaluation set. This corpus is for classification; retrieval training still
 needs separately defined positive and hard-negative pairs.
 
+The same command also writes `challenges.jsonl` from the versioned
+`sdg/classifier_challenges.tsv` bank. Its RU/KZ/MIXED records propose
+`UNKNOWN`, `OTHER`, or `NEEDS_REVIEW` for five difficult topic boundaries,
+an out-of-taxonomy situation, and a message without enough subject detail.
+They have `review_status=PENDING`, no confirmed `topic_id`, and
+`approved_for_training=false`. The manifest records their source/output
+checksums separately from the 26,000 class-labeled rows. These proposals
+require human review before they can serve as challenge evaluation evidence;
+they are never included in train, validation or test splits by this generator.
+
 Import a real (uncommitted) source export:
 
 ```bash

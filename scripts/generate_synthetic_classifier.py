@@ -11,6 +11,7 @@ import itertools
 import json
 from pathlib import Path
 import random
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +24,21 @@ from data.schemas.taxonomy import TOPIC_DEFINITIONS
 
 SEED = 109
 SCENARIO_BANK = ROOT / "data/sdg/classifier_scenarios.tsv"
+CHALLENGE_BANK = ROOT / "data/sdg/classifier_challenges.tsv"
 DEFAULT_OUTPUT = ROOT / "data/sdg/generated/classifier_v1"
 SPLITS = ("train",) * 7 + ("validation",) + ("test",) * 2
 TOPIC_INDEX = {topic["id"]: index for index, topic in enumerate(TOPIC_DEFINITIONS)}
+CHALLENGE_DECISIONS = {"UNKNOWN", "OTHER", "NEEDS_REVIEW"}
+CHALLENGE_LANGUAGES = {"RU", "KZ", "MIXED"}
+REQUIRED_BOUNDARIES = {
+    frozenset(pair) for pair in (
+        ("street_lighting", "electricity"),
+        ("buildings", "street_lighting"),
+        ("roads", "public_transport"),
+        ("wastewater", "roads"),
+        ("landscaping", "roads"),
+    )
+}
 PHRASES = {
     "RU": {
         "openers": ("", "Здравствуйте. ", "Добрый день. ", "Нужна помощь. ", "Пишу с проблемой. "),
@@ -86,6 +99,56 @@ def read_scenarios(path: Path) -> list[dict[str, str]]:
     return scenarios
 
 
+def read_challenges(path: Path) -> list[dict[str, object]]:
+    challenges: list[dict[str, object]] = []
+    groups: dict[str, tuple[str, tuple[str, ...], set[str]]] = {}
+    seen_texts: set[str] = set()
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames != ["scenario_id", "proposed_decision", "candidate_topics", "language", "text"]:
+            raise ValueError("challenge bank has unexpected columns")
+        for line_number, row in enumerate(reader, start=2):
+            if None in row or any(value is None for value in row.values()):
+                raise ValueError(f"invalid challenge structure at line {line_number}")
+            scenario_id = row["scenario_id"]
+            decision = row["proposed_decision"]
+            language = row["language"]
+            text = row["text"].strip()
+            topics = tuple(row["candidate_topics"].split("|")) if row["candidate_topics"] else ()
+            if (not re.fullmatch(r"[a-z][a-z0-9_]*", scenario_id) or
+                    decision not in CHALLENGE_DECISIONS or language not in CHALLENGE_LANGUAGES or
+                    not text or scan_pii(text).detected or text.casefold() in seen_texts or
+                    (decision == "NEEDS_REVIEW" and (len(topics) != 2 or
+                     len(set(topics)) != 2 or any(topic not in TOPIC_INDEX for topic in topics))) or
+                    (decision != "NEEDS_REVIEW" and topics)):
+                raise ValueError(f"invalid challenge at line {line_number}")
+            previous = groups.get(scenario_id)
+            if previous is None:
+                groups[scenario_id] = (decision, topics, {language})
+            elif previous[:2] != (decision, topics) or language in previous[2]:
+                raise ValueError(f"inconsistent challenge group at line {line_number}")
+            else:
+                previous[2].add(language)
+            seen_texts.add(text.casefold())
+            challenges.append({
+                "id": f"{scenario_id}-{language.lower()}",
+                "scenario_id": scenario_id,
+                "language": language,
+                "text": text,
+                "proposed_decision": decision,
+                "candidate_topics": list(topics),
+                "synthetic": True,
+                "review_status": "PENDING",
+                "approved_for_training": False,
+            })
+    boundaries = {frozenset(topics) for decision, topics, _ in groups.values() if decision == "NEEDS_REVIEW"}
+    if (not groups or any(languages != CHALLENGE_LANGUAGES for _, _, languages in groups.values()) or
+            not REQUIRED_BOUNDARIES <= boundaries or
+            not CHALLENGE_DECISIONS <= {decision for decision, _, _ in groups.values()}):
+        raise ValueError("challenge bank lacks RU/KZ/MIXED or required decision and boundary coverage")
+    return challenges
+
+
 def render_variants(fact: str, language: str, scenario_id: str) -> list[str]:
     phrases = PHRASES[language]
     variants = set()
@@ -105,8 +168,10 @@ def render_variants(fact: str, language: str, scenario_id: str) -> list[str]:
     return ordered
 
 
-def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK) -> dict[str, object]:
+def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK,
+             challenge_bank_path: Path = CHALLENGE_BANK) -> dict[str, object]:
     scenarios = read_scenarios(bank_path)
+    challenges = read_challenges(challenge_bank_path)
     output_dir.mkdir(parents=True, exist_ok=False)
     paths = {split: output_dir / f"{split}.jsonl" for split in ("train", "validation", "test")}
     counts: Counter[tuple[str, str, str]] = Counter()
@@ -151,6 +216,10 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK) -> dict[str, obj
 
     if groups["train"] & groups["validation"] or groups["train"] & groups["test"] or groups["validation"] & groups["test"]:
         raise ValueError("scenario groups overlap across splits")
+    challenge_path = output_dir / "challenges.jsonl"
+    with challenge_path.open("x", encoding="utf-8") as stream:
+        for challenge in challenges:
+            stream.write(json.dumps(challenge, ensure_ascii=False, sort_keys=True) + "\n")
     manifest = {
         "dataset_version": "synthetic-classifier-v1",
         "synthetic": True,
@@ -159,6 +228,13 @@ def generate(output_dir: Path, bank_path: Path = SCENARIO_BANK) -> dict[str, obj
         "generation_method": "deterministic_scenario_composition",
         "seed": SEED,
         "scenario_bank_sha256": sha256(bank_path),
+        "challenge_bank_sha256": sha256(challenge_bank_path),
+        "challenge_file": {"name": challenge_path.name, "sha256": sha256(challenge_path)},
+        "challenge_count": len(challenges),
+        "challenge_scenario_count": len({row["scenario_id"] for row in challenges}),
+        "challenge_proposed_decision_counts": dict(sorted(
+            Counter(row["proposed_decision"] for row in challenges).items()
+        )),
         "scenario_count": len(scenarios),
         "record_count": len(seen_texts),
         "split_counts": {split: sum(count for (name, _, _), count in counts.items() if name == split) for split in paths},
@@ -176,7 +252,10 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
     manifest = generate(args.output_dir)
-    print(json.dumps({key: manifest[key] for key in ("dataset_version", "record_count", "split_counts", "scenario_count", "language_counts")}, ensure_ascii=False, sort_keys=True))
+    print(json.dumps({key: manifest[key] for key in (
+        "dataset_version", "record_count", "split_counts", "scenario_count",
+        "language_counts", "challenge_count",
+    )}, ensure_ascii=False, sort_keys=True))
     return 0
 
 

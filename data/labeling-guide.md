@@ -66,6 +66,13 @@ review must record provenance and a decision before any `APPROVED` variant is
 eligible. The existing synthetic classifier demo remains a pending candidate,
 not a reviewed gold set.
 
+`sdg/classifier_challenges.tsv` provides separate proposed `UNKNOWN`, `OTHER`
+and `NEEDS_REVIEW` cases in RU/KZ/MIXED. Review the text and candidate topics
+independently; its proposed decisions are not ground truth. Generated
+`challenges.jsonl` has no confirmed `topic_id` and is excluded from the
+class-labeled train/validation/test files. Use it for evaluation only after a
+documented human review and a frozen evaluation version.
+
 For NeMo pilot candidates, use `scripts/review_synthetic_classifier.py` as
 described in `docs/nemo-sdg-pilot.md`. The queue binds each decision to the
 unchanged candidate, source scenario facts and both input checksums. Approval
