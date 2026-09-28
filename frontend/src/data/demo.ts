@@ -163,5 +163,14 @@ export const demoData: DashboardData = {
   timeSeries: [],
   reportSource: 'нет данных',
   forecastStatus: 'нет данных',
+  forecastCapacityAssessment: {
+    status: 'DATA_UNAVAILABLE',
+    missingInputs: [
+      'STAFFING',
+      'HANDLING_TIME_OR_THROUGHPUT',
+      'SCHEDULE',
+      'SERVICE_LEVEL_TARGET_OR_SLA',
+    ],
+  },
   filterOptions: { regions: [], topics: [], services: [], statuses: [], districts: [], channels: [] },
 }

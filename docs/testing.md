@@ -86,6 +86,9 @@ check.
 gateway, что и браузер. Для CI base URL задаётся `PULSE_BASE_URL`.
 Stateful E2E дополнительно держит `/api/v1/events` открытым и проверяет
 `alerts.snapshot` и `alerts.changed` после подтверждения оповещения.
+Forecast E2E для 30/60/90 дней также проверяет `DATA_UNAVAILABLE` и перечень
+неподключённых operational inputs; capacity numbers не выдаются без этих
+источников.
 
 Минимальный E2E:
 

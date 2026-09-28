@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -296,6 +296,10 @@ interface BackendForecast {
   model?: string
   expected_peaks?: string[]
   backtest?: ForecastBacktest
+  capacity_assessment: {
+    status: ForecastCapacityAssessment['status']
+    missing_inputs: ForecastCapacityInput[]
+  }
   run_id?: string
   issued_at?: string
   reforecast?: {
@@ -841,6 +845,10 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     forecastStart: forecast.forecast_start ?? undefined,
     forecastExpectedPeaks: forecast.expected_peaks ?? [],
     forecastBacktest: forecast.backtest,
+    forecastCapacityAssessment: {
+      status: forecast.capacity_assessment.status,
+      missingInputs: forecast.capacity_assessment.missing_inputs,
+    },
     forecastRunId: forecast.run_id,
     forecastIssuedAt: forecast.issued_at,
     forecastReforecast,

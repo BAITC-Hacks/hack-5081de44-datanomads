@@ -572,7 +572,7 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: Forecast and expected peaks
+          description: Forecast demand and expected peaks; capacity is explicitly unavailable without verified operational inputs
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ForecastResponse' }
@@ -2004,7 +2004,7 @@ components:
         dispersion_method: { type: string, enum: [median_absolute_deviation] }
     ForecastResponse:
       type: object
-      required: [source, model_version, model, status, insufficient_history, horizon_days, history, forecast_start, points, expected_peaks, backtest, manager_signals]
+      required: [source, model_version, model, status, insufficient_history, horizon_days, history, forecast_start, points, expected_peaks, backtest, capacity_assessment, manager_signals]
       properties:
         source: { type: string }
         model_version: { type: string, description: Forecast provider version; never the embedding version. }
@@ -2017,10 +2017,21 @@ components:
         points: { type: array, items: { $ref: '#/components/schemas/TimeSeriesPoint' } }
         expected_peaks: { type: array, items: { type: string } }
         backtest: { $ref: '#/components/schemas/ForecastBacktest' }
+        capacity_assessment: { $ref: '#/components/schemas/ForecastCapacityAssessment' }
         run_id: { type: string, nullable: true }
         issued_at: { type: string, format: date-time, nullable: true }
         reforecast: { allOf: [{ $ref: '#/components/schemas/ForecastReforecast' }], nullable: true }
         manager_signals: { type: array, items: { $ref: '#/components/schemas/ForecastManagerSignal' } }
+    ForecastCapacityAssessment:
+      type: object
+      description: Capacity is not calculated until real staffing, handling-time or throughput, schedule and service-level/SLA inputs are available.
+      required: [status, missing_inputs]
+      properties:
+        status: { type: string, enum: [DATA_UNAVAILABLE] }
+        missing_inputs:
+          type: array
+          uniqueItems: true
+          items: { type: string, enum: [STAFFING, HANDLING_TIME_OR_THROUGHPUT, SCHEDULE, SERVICE_LEVEL_TARGET_OR_SLA] }
     ForecastReforecastRequest:
       type: object
       additionalProperties: false

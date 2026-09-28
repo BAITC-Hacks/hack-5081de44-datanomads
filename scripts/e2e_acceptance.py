@@ -692,6 +692,19 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         status, _, forecast = json_request(base_url, "GET", f"/api/v1/forecast?horizon={horizon}", role="MANAGER", timeout=timeout)
         expect(status == 200 and forecast.get("horizon_days") == horizon, f"forecast {horizon} failed: {forecast}")
         expect(forecast.get("history"), f"forecast {horizon} has no PostgreSQL history")
+        capacity_assessment = forecast.get("capacity_assessment", {})
+        expect(
+            capacity_assessment.get("status") == "DATA_UNAVAILABLE"
+            and set(capacity_assessment.get("missing_inputs", []))
+            == {
+                "STAFFING",
+                "HANDLING_TIME_OR_THROUGHPUT",
+                "SCHEDULE",
+                "SERVICE_LEVEL_TARGET_OR_SLA",
+            }
+            and "capacity_risk" not in capacity_assessment,
+            f"forecast {horizon} must withhold capacity conclusions without operational inputs: {capacity_assessment}",
+        )
         expect(
             str(forecast.get("model_version", "")).startswith("forecast-")
             and forecast.get("model_version") != "embedder-demo-2026-09-21-001",

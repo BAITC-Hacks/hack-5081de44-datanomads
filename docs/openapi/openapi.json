@@ -37,7 +37,7 @@
     "/api/v1/alerts/{alert_id}/monitor": { "post": { "summary": "Take an observed signal under manager monitoring" } },
     "/api/v1/alerts/{alert_id}/ack": { "post": { "summary": "Acknowledge alert" } },
     "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },
-    "/api/v1/forecast": { "get": { "summary": "Forecast" } },
+    "/api/v1/forecast": { "get": { "summary": "Forecast demand, peaks and explicit capacity input status" } },
     "/api/v1/forecast/reforecast": { "post": { "summary": "Persist a rolling forecast version and compare it with the previous run" } },
     "/api/v1/reports": { "get": { "summary": "Reports" } },
     "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback and inspect learning cycle" } },

@@ -257,6 +257,10 @@ async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
     );
     assert_eq!(reports["slice"]["analytics"]["by_topic"][0]["tickets"], 1);
     assert_eq!(reports["slice"]["forecast"]["status"], "DEMO_ONLY");
+    assert_eq!(
+        reports["slice"]["forecast"]["capacity_assessment"]["status"],
+        "DATA_UNAVAILABLE"
+    );
 
     let pdf = application
         .clone()
@@ -318,6 +322,22 @@ async fn reports_exports_and_forecast_use_the_selected_filter_slice() {
     assert_eq!(forecast["source"], "deterministic-demo");
     assert_eq!(forecast["status"], "INSUFFICIENT_HISTORY");
     assert_eq!(forecast["insufficient_history"], true);
+    assert_eq!(
+        forecast["capacity_assessment"]["status"],
+        "DATA_UNAVAILABLE"
+    );
+    assert_eq!(
+        forecast["capacity_assessment"]["missing_inputs"],
+        serde_json::json!([
+            "STAFFING",
+            "HANDLING_TIME_OR_THROUGHPUT",
+            "SCHEDULE",
+            "SERVICE_LEVEL_TARGET_OR_SLA"
+        ])
+    );
+    assert!(forecast["capacity_assessment"]
+        .get("capacity_risk")
+        .is_none());
     assert_eq!(forecast["history"].as_array().unwrap().len(), 367);
     assert_eq!(
         forecast["history"]

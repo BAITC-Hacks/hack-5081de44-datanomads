@@ -320,6 +320,17 @@ export interface ForecastPoint {
   high?: number
 }
 
+export type ForecastCapacityInput =
+  | 'STAFFING'
+  | 'HANDLING_TIME_OR_THROUGHPUT'
+  | 'SCHEDULE'
+  | 'SERVICE_LEVEL_TARGET_OR_SLA'
+
+export interface ForecastCapacityAssessment {
+  status: 'DATA_UNAVAILABLE'
+  missingInputs: ForecastCapacityInput[]
+}
+
 export interface ForecastBacktest {
   status?: string
   history_days?: number
@@ -473,6 +484,7 @@ export interface DashboardData {
   forecastStart?: string
   forecastExpectedPeaks?: string[]
   forecastBacktest?: ForecastBacktest
+  forecastCapacityAssessment: ForecastCapacityAssessment
   forecastRunId?: string
   forecastIssuedAt?: string
   forecastReforecast?: ForecastReforecast

@@ -12,6 +12,9 @@ info:
     into detector quality metrics or claim that an action resolved a cause.
     Forecast inference remains stateless; Core stores forecast versions, actual
     comparisons and any manager signal under a versioned peak-change policy.
+    ML forecast output describes ticket demand only; it does not calculate
+    staffing or capacity. Core reports DATA_UNAVAILABLE until verified
+    staffing, throughput, schedule and service-level inputs are available.
   version: 0.1.0
 paths:
   /healthz:
@@ -932,6 +935,7 @@ components:
       type: object
       title: ForecastRequest
     ForecastResponse:
+      description: Demand forecast only; no staffing or capacity estimate is produced by ML inference.
       properties:
         model_version:
           type: string

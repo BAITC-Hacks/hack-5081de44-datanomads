@@ -5635,6 +5635,7 @@ fn memory_report_slice(store: &Store, query: &AnalyticsQuery) -> Result<ReportSl
             points: Vec::new(),
             expected_peaks: Vec::new(),
             backtest: json!({"status": "DEMO_ONLY", "reason": "memory report has no forecast history"}),
+            capacity_assessment: ForecastCapacityAssessment::data_unavailable(),
             run_id: None,
             issued_at: None,
             reforecast: None,
@@ -6698,6 +6699,41 @@ fn metric_bucket(
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ForecastCapacityStatus {
+    DataUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ForecastCapacityInput {
+    Staffing,
+    HandlingTimeOrThroughput,
+    Schedule,
+    ServiceLevelTargetOrSla,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForecastCapacityAssessment {
+    pub status: ForecastCapacityStatus,
+    pub missing_inputs: Vec<ForecastCapacityInput>,
+}
+
+impl ForecastCapacityAssessment {
+    pub fn data_unavailable() -> Self {
+        Self {
+            status: ForecastCapacityStatus::DataUnavailable,
+            missing_inputs: vec![
+                ForecastCapacityInput::Staffing,
+                ForecastCapacityInput::HandlingTimeOrThroughput,
+                ForecastCapacityInput::Schedule,
+                ForecastCapacityInput::ServiceLevelTargetOrSla,
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ForecastResponse {
     pub source: String,
@@ -6711,6 +6747,7 @@ pub struct ForecastResponse {
     pub points: Vec<TimeSeriesPoint>,
     pub expected_peaks: Vec<String>,
     pub backtest: Value,
+    pub capacity_assessment: ForecastCapacityAssessment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6879,6 +6916,7 @@ fn memory_forecast_response(
             points: Vec::new(),
             expected_peaks: Vec::new(),
             backtest: json!({"sample_count": 0}),
+            capacity_assessment: ForecastCapacityAssessment::data_unavailable(),
             run_id: None,
             issued_at: None,
             reforecast: None,
@@ -6910,6 +6948,7 @@ fn memory_forecast_response(
                 "observed_days": active_days,
                 "required_days": FORECAST_SEASON_LENGTH_DAYS,
             }),
+            capacity_assessment: ForecastCapacityAssessment::data_unavailable(),
             run_id: None,
             issued_at: None,
             reforecast: None,
@@ -6959,6 +6998,7 @@ fn memory_forecast_response(
         points,
         expected_peaks,
         backtest: json!({"status": "DEMO_ONLY", "history_days": FORECAST_HISTORY_DAYS}),
+        capacity_assessment: ForecastCapacityAssessment::data_unavailable(),
         run_id: None,
         issued_at: None,
         reforecast: None,

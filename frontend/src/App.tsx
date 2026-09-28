@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
@@ -323,7 +323,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
     case '/situation/topics': content = <CleanTopicsPage topics={data.topics} onDrilldown={onDrilldown} />; break
     case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
     case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onRefresh={onRefresh} onToast={onToast} onDrilldown={onDrilldown} />; break
-    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} previousForecast={data.forecastPreviousPoints ?? []} reforecast={data.forecastReforecast} managerSignals={data.forecastManagerSignals ?? []} runId={data.forecastRunId} issuedAt={data.forecastIssuedAt} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
+    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} previousForecast={data.forecastPreviousPoints ?? []} reforecast={data.forecastReforecast} managerSignals={data.forecastManagerSignals ?? []} capacityAssessment={data.forecastCapacityAssessment} runId={data.forecastRunId} issuedAt={data.forecastIssuedAt} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
     case '/situation/reports': content = <CleanReportsPage filters={filters} />; break
     case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
     case '/situation/models': content = <CleanModelsPage models={data.models} />; break
@@ -1588,12 +1588,20 @@ function forecastChartOption(history: ForecastPoint[], forecast: ForecastPoint[]
   }
 }
 
-function CleanForecastPage({ forecast, history, previousForecast, reforecast, managerSignals, runId, issuedAt, status, modelVersion, model, source, insufficientHistory, forecastStart, expectedPeaks, backtest, horizon, filters, filterOptions, onHorizonChange }: {
+const forecastCapacityInputLabels: Record<ForecastCapacityInput, string> = {
+  STAFFING: 'Подтверждённая численность сотрудников',
+  HANDLING_TIME_OR_THROUGHPUT: 'Время обработки или пропускная способность',
+  SCHEDULE: 'Рабочие графики',
+  SERVICE_LEVEL_TARGET_OR_SLA: 'Целевой уровень обслуживания или подтверждённый SLA',
+}
+
+function CleanForecastPage({ forecast, history, previousForecast, reforecast, managerSignals, capacityAssessment, runId, issuedAt, status, modelVersion, model, source, insufficientHistory, forecastStart, expectedPeaks, backtest, horizon, filters, filterOptions, onHorizonChange }: {
   forecast: ForecastPoint[]
   history: ForecastPoint[]
   previousForecast: ForecastPoint[]
   reforecast?: ForecastReforecast
   managerSignals: ForecastManagerSignal[]
+  capacityAssessment: ForecastCapacityAssessment
   runId?: string
   issuedAt?: string
   status?: string
@@ -1815,6 +1823,20 @@ function CleanForecastPage({ forecast, history, previousForecast, reforecast, ma
           )}
         </section>
       </div>
+
+      <section className="panel forecast-capacity-panel" aria-label="Расчёт риска мощности">
+        <PanelHeading title="Расчёт риска мощности" />
+        <div className="forecast-capacity-summary" role="status" data-capacity-status={capacityAssessment.status}>
+          <strong>{capacityAssessment.status}</strong>
+          <span>Расчёт недоступен: к системе не подключены подтверждённые операционные данные.</span>
+        </div>
+        <p className="panel-note">До появления всех необходимых источников система показывает только прогноз обращений и пиковые дни, без оценки нехватки персонала.</p>
+        <ul className="forecast-capacity-inputs" aria-label="Необходимые операционные данные">
+          {capacityAssessment.missingInputs.map((input) => (
+            <li key={input}>{forecastCapacityInputLabels[input]}</li>
+          ))}
+        </ul>
+      </section>
     </div>
   )
 }
