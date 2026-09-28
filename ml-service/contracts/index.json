@@ -13,6 +13,7 @@
     "CandidateTrainingResult": "schemas/v1/candidate-training-result.schema.json",
     "TrainedClassifierArtifact": "schemas/v1/trained-classifier-artifact.schema.json",
     "CandidateEvaluation": "schemas/v1/candidate-evaluation.schema.json",
+    "DriftEvidence": "schemas/v1/drift-evidence.schema.json",
     "ModelManifest": "schemas/v1/model-manifest.schema.json",
     "ModelMetadata": "schemas/v1/model-metadata.schema.json"
   }

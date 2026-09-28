@@ -73,6 +73,157 @@ async fn error_messages_do_not_echo_untrusted_values() {
 }
 
 #[tokio::test]
+async fn drift_evidence_is_deduplicated_and_human_reviewed() {
+    let application = app(AppState::demo());
+    let evidence = serde_json::json!({
+        "schema_version": "drift-evidence.v1",
+        "evidence_id": "drift-test-001",
+        "model_version": "classifier-demo-2026-09-001",
+        "detector_version": "detector-test.v1",
+        "metric_name": "topic_distribution_js_divergence",
+        "baseline_window_start": "2026-09-01T00:00:00Z",
+        "baseline_window_end": "2026-09-08T00:00:00Z",
+        "observed_window_start": "2026-09-08T00:00:00Z",
+        "observed_window_end": "2026-09-15T00:00:00Z",
+        "baseline_value": 0.04,
+        "observed_value": 0.12,
+        "drift_score": 0.08,
+        "threshold": 0.05,
+        "sample_count": 180,
+        "minimum_sample_count": 100,
+        "synthetic": false
+    });
+    let invalid = serde_json::json!({
+        "schema_version": "drift-evidence.v1",
+        "evidence_id": "drift-test-invalid",
+        "model_version": "classifier-demo-2026-09-001",
+        "detector_version": "detector-test.v1",
+        "metric_name": "topic_distribution_js_divergence",
+        "baseline_window_start": "2026-09-01T00:00:00Z",
+        "baseline_window_end": "2026-09-08T00:00:00Z",
+        "observed_window_start": "2026-09-08T00:00:00Z",
+        "observed_window_end": "2026-09-15T00:00:00Z",
+        "baseline_value": 0.04,
+        "observed_value": 0.12,
+        "drift_score": 0.04,
+        "threshold": 0.05,
+        "sample_count": 180,
+        "minimum_sample_count": 100,
+        "synthetic": false
+    });
+    let invalid_response = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/drift-triggers")
+                .header("x-pulse-role", "ML_SERVICE")
+                .header("content-type", "application/json")
+                .body(Body::from(invalid.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_response.status(), 400);
+
+    let created = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/drift-triggers")
+                .header("x-pulse-role", "ML_SERVICE")
+                .header("x-user-id", "data-ml")
+                .header("content-type", "application/json")
+                .body(Body::from(evidence.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+    let created: serde_json::Value =
+        serde_json::from_slice(&to_bytes(created.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(created["state"], "PENDING_REVIEW");
+    assert_eq!(created["created_by"], "data-ml");
+
+    let duplicate = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/drift-triggers")
+                .header("x-pulse-role", "ML_SERVICE")
+                .header("content-type", "application/json")
+                .body(Body::from(evidence.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), 200);
+
+    let mut conflicting_evidence = evidence.clone();
+    conflicting_evidence["observed_value"] = serde_json::json!(0.13);
+    let conflicting_duplicate = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/drift-triggers")
+                .header("x-pulse-role", "ML_SERVICE")
+                .header("content-type", "application/json")
+                .body(Body::from(conflicting_evidence.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflicting_duplicate.status(), 409);
+
+    let manager_list = application
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/learning/drift-triggers")
+                .header("x-pulse-role", "MANAGER")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manager_list.status(), 200);
+    let page: serde_json::Value = serde_json::from_slice(
+        &to_bytes(manager_list.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["can_review"], false);
+
+    let forbidden = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/drift-triggers/drift-test-001/review")
+                .header("x-pulse-role", "MANAGER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"decision":"DISMISS"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
+    let dismissed = application
+        .oneshot(
+            Request::post("/api/v1/learning/drift-triggers/drift-test-001/review")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .header("x-user-id", "reviewer-1")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"decision":"DISMISS"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dismissed.status(), 200);
+    let dismissed: serde_json::Value =
+        serde_json::from_slice(&to_bytes(dismissed.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(dismissed["state"], "DISMISSED");
+    assert_eq!(dismissed["reviewed_by"], "reviewer-1");
+    assert_eq!(dismissed["learning_cycle_id"], serde_json::Value::Null);
+}
+
+#[tokio::test]
 async fn manager_analytics_drilldown_omits_source_text() {
     let application = app(AppState::demo());
     let created = application

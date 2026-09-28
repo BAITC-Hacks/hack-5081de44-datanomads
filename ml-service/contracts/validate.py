@@ -67,6 +67,7 @@ def validate_demo_artifacts() -> list[str]:
         ("CandidateTrainingJob", "candidate-training-job.demo.json"),
         ("CandidateTrainingResult", "candidate-training-result.demo.json"),
         ("CandidateEvaluation", "candidate-evaluation.demo.json"),
+        ("DriftEvidence", "drift-evidence.demo.json"),
     ):
         _validate_file(examples / file_name, schema_name)
         checked.append(schema_name)

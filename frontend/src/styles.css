@@ -343,6 +343,7 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
   .related-ticket-meta { grid-template-columns: 1fr; }
 }
 .panel-note { color: var(--muted); font-size: 12px; }
+.drift-trigger-list { display: grid; gap: 14px; }.drift-trigger-card { padding: 0 14px 12px; border: 1px solid rgba(214,236,225,.08); border-radius: 8px; background: rgba(255,255,255,.015); }.drift-trigger-card .learning-actions { margin-top: 8px; }
 .error-banner { margin: 0 28px; padding: 10px 14px; border: 1px solid rgba(255,157,157,.35); border-radius: 8px; color: #ffd0d0; background: rgba(255,157,157,.08); font-size: 12px; }
 .period-buttons { display: flex; }
 .analytics-filter-selects { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }

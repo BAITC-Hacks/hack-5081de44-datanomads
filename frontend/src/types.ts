@@ -424,6 +424,33 @@ export interface LearningCycle {
   decisionNote?: string
 }
 
+export interface DriftTrigger {
+  evidence: {
+    schema_version: 'drift-evidence.v1'
+    evidence_id: string
+    model_version: string
+    detector_version: string
+    metric_name: string
+    baseline_window_start: string
+    baseline_window_end: string
+    observed_window_start: string
+    observed_window_end: string
+    baseline_value: number
+    observed_value: number
+    drift_score: number
+    threshold: number
+    sample_count: number
+    minimum_sample_count: number
+    synthetic: boolean
+  }
+  state: 'PENDING_REVIEW' | 'CYCLE_OPENED' | 'DISMISSED'
+  learning_cycle_id?: string
+  created_by: string
+  created_at: string
+  reviewed_by?: string
+  reviewed_at?: string
+}
+
 export interface DatasetProvenance {
   synthetic_ticket_count: number
   real_ticket_count: number
@@ -471,6 +498,8 @@ export interface DashboardData {
   alerts: Alert[]
   forecast: ForecastPoint[]
   models: ModelStatus[]
+  driftTriggers?: DriftTrigger[]
+  canReviewDriftTriggers?: boolean
   learning: LearningCycle
   timeSeries: Array<{ date: string; tickets: number; resolved: number }>
   reportSource: string

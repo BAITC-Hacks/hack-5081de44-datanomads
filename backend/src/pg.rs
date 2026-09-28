@@ -14,22 +14,24 @@ use crate::{
     actionable_context_for_candidates, actionable_context_manual_review,
     actionable_context_needs_candidates, build_context_handoff_package, build_query_intent_result,
     known_routing_value, manual_response_template, metric_rate, query_analytics_filters,
-    related_ticket_candidate, render_template_body, validate_query_intent, ActionableContextOption,
-    Alert, AlertQuery, AlternativePrediction, AnalyticsDrilldownQuery, AnalyticsDrilldownResponse,
-    AnalyticsDrilldownTicket, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
-    AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
-    ContextHandoffLocationSource, ContextHandoffPackage, CreateLearningCycleRequest,
-    DatasetProvenance, DecisionRequest, DecisionResponse, ForecastActualObservation,
-    ForecastCapacityAssessment, ForecastFutureComparison, ForecastManagerSignal,
-    ForecastPeakChange, ForecastQuery, ForecastReforecast, ForecastResponse, ImportRequest,
-    ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest, LearningMetrics,
-    LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
-    OutcomeVerificationEvidence, OutcomeVerificationRecord, OutcomeVerificationSnapshot,
-    OutcomeVerificationState, Prediction, QueryIntentRequest, RelatedTicketMetadata,
-    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
-    ResponseTemplatesResponse, RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics,
-    Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
-    ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
+    related_ticket_candidate, render_template_body, synthetic_evidence_allowed,
+    validate_query_intent, ActionableContextOption, Alert, AlertQuery, AlternativePrediction,
+    AnalyticsDrilldownQuery, AnalyticsDrilldownResponse, AnalyticsDrilldownTicket, AnalyticsQuery,
+    AnalyticsResponse, AssistOrchestration, AssistPreviewResponse, AssistStage,
+    CloseLearningCycleRequest, Config, ContextHandoffLocationSource, ContextHandoffPackage,
+    CreateLearningCycleRequest, DatasetProvenance, DecisionRequest, DecisionResponse,
+    DriftEvidence, DriftTrigger, ForecastActualObservation, ForecastCapacityAssessment,
+    ForecastFutureComparison, ForecastManagerSignal, ForecastPeakChange, ForecastQuery,
+    ForecastReforecast, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
+    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
+    ModelQuery, ModelVersion, OperatorDecision, OutcomeVerificationEvidence,
+    OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Prediction,
+    QueryIntentRequest, RelatedTicketMetadata, RelationSuggestionSnapshot, ResponseTemplate,
+    ResponseTemplateInput, ResponseTemplateRecord, ResponseTemplatesResponse,
+    RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
+    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    DEFAULT_LEARNING_PROMOTION_POLICY_VERSION, ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM,
+    ROUTING_FEEDBACK_PENDING_STATUS,
 };
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use reqwest::{Client, StatusCode as HttpStatus};
@@ -54,6 +56,37 @@ const FORECAST_PEAK_CHANGE_POLICY_VERSION: &str = "peak-change-backtest-mae-v1";
 const FORECAST_SIGNAL_HISTORY_LIMIT: i64 = 10;
 const READINESS_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 static MIGRATOR: Migrator = sqlx::migrate!("../migrations");
+
+fn drift_trigger_from_pg_row(row: &sqlx::postgres::PgRow) -> Result<DriftTrigger, String> {
+    let payload: Value = row
+        .try_get("evidence_payload")
+        .map_err(|error| format!("drift evidence payload: {error}"))?;
+    let evidence: DriftEvidence = serde_json::from_value(payload)
+        .map_err(|error| format!("decode drift evidence: {error}"))?;
+    let created_at: DateTime<Utc> = row
+        .try_get("created_at")
+        .map_err(|error| format!("drift trigger created time: {error}"))?;
+    let reviewed_at: Option<DateTime<Utc>> = row
+        .try_get("reviewed_at")
+        .map_err(|error| format!("drift trigger reviewed time: {error}"))?;
+    Ok(DriftTrigger {
+        evidence,
+        state: row
+            .try_get("state")
+            .map_err(|error| format!("drift trigger state: {error}"))?,
+        learning_cycle_id: row
+            .try_get("cycle_id")
+            .map_err(|error| format!("drift trigger learning cycle: {error}"))?,
+        created_by: row
+            .try_get("created_by")
+            .map_err(|error| format!("drift trigger creator: {error}"))?,
+        created_at: created_at.to_rfc3339(),
+        reviewed_by: row
+            .try_get("reviewed_by")
+            .map_err(|error| format!("drift trigger reviewer: {error}"))?,
+        reviewed_at: reviewed_at.map(|value| value.to_rfc3339()),
+    })
+}
 
 fn production_runtime_mode(runtime_mode: &str) -> bool {
     matches!(
@@ -4839,6 +4872,302 @@ impl PgRepository {
             monitoring,
             detail,
         })
+    }
+
+    pub async fn create_drift_trigger(
+        &self,
+        evidence: &DriftEvidence,
+        actor_id: &str,
+        request_id: &str,
+    ) -> Result<(DriftTrigger, bool), String> {
+        let runtime_mode = env::var("PULSE_ENV").unwrap_or_default();
+        if evidence.synthetic && !synthetic_evidence_allowed(&runtime_mode) {
+            return Err(
+                "conflict: synthetic drift evidence is not eligible in production".to_owned(),
+            );
+        }
+        let evidence_payload = serde_json::to_value(evidence)
+            .map_err(|error| format!("encode drift evidence: {error}"))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin drift trigger creation: {error}"))?;
+        let model_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM model_versions WHERE model_version = $1)",
+        )
+        .bind(&evidence.model_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("check drift model version: {error}"))?;
+        if !model_exists {
+            return Err("not found: drift evidence model version not found".to_owned());
+        }
+        let inserted = sqlx::query_scalar::<_, String>(
+            "INSERT INTO model_drift_triggers (evidence_id, model_version, evidence_payload, created_by) VALUES ($1, $2, $3, $4) ON CONFLICT (evidence_id) DO NOTHING RETURNING evidence_id",
+        )
+        .bind(&evidence.evidence_id)
+        .bind(&evidence.model_version)
+        .bind(&evidence_payload)
+        .bind(actor_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("create drift trigger: {error}"))?;
+        if inserted.is_some() {
+            sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, metadata) VALUES ($1, 'CREATE_DRIFT_TRIGGER', 'model_drift_trigger', $2, $3, $4)")
+                .bind(actor_id)
+                .bind(&evidence.evidence_id)
+                .bind(request_id)
+                .bind(json!({
+                    "schema_version": evidence.schema_version,
+                    "model_version": evidence.model_version,
+                    "detector_version": evidence.detector_version,
+                    "metric_name": evidence.metric_name,
+                    "drift_score": evidence.drift_score,
+                    "threshold": evidence.threshold,
+                    "sample_count": evidence.sample_count,
+                    "minimum_sample_count": evidence.minimum_sample_count,
+                    "synthetic": evidence.synthetic,
+                }))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("audit drift trigger creation: {error}"))?;
+        } else {
+            let existing: Value = sqlx::query_scalar(
+                "SELECT evidence_payload FROM model_drift_triggers WHERE evidence_id = $1",
+            )
+            .bind(&evidence.evidence_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("read existing drift trigger: {error}"))?;
+            if existing != evidence_payload {
+                return Err("conflict: drift evidence identifier was already used".to_owned());
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit drift trigger creation: {error}"))?;
+        let trigger = self.drift_trigger_from_id(&evidence.evidence_id).await?;
+        Ok((trigger, inserted.is_some()))
+    }
+
+    pub async fn list_drift_triggers(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<DriftTrigger>, usize), String> {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_drift_triggers")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("count drift triggers: {error}"))?;
+        let rows = sqlx::query(
+            "SELECT d.evidence_payload, d.state, lc.cycle_id AS cycle_id, d.created_by, d.created_at, d.reviewed_by, d.reviewed_at FROM model_drift_triggers d LEFT JOIN learning_cycles lc ON lc.id = d.learning_cycle_id ORDER BY d.created_at DESC, d.evidence_id DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list drift triggers: {error}"))?;
+        let items = rows
+            .iter()
+            .map(drift_trigger_from_pg_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((items, usize::try_from(total).unwrap_or(usize::MAX)))
+    }
+
+    pub async fn review_drift_trigger(
+        &self,
+        evidence_id: &str,
+        decision: &str,
+        reviewer_id: &str,
+        config: &Config,
+        request_id: &str,
+    ) -> Result<DriftTrigger, String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin drift trigger review: {error}"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pulse109:classifier-learning-cycle'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("lock drift-triggered cycle creation: {error}"))?;
+        let trigger_row = sqlx::query(
+            "SELECT evidence_payload, state, learning_cycle_id FROM model_drift_triggers WHERE evidence_id = $1 FOR UPDATE",
+        )
+        .bind(evidence_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("lock drift trigger for review: {error}"))?
+        .ok_or_else(|| "not found: drift trigger not found".to_owned())?;
+        let evidence: DriftEvidence = serde_json::from_value(
+            trigger_row
+                .try_get("evidence_payload")
+                .map_err(|error| format!("drift evidence payload: {error}"))?,
+        )
+        .map_err(|error| format!("decode drift evidence: {error}"))?;
+        let current_state: String = trigger_row
+            .try_get("state")
+            .map_err(|error| format!("drift trigger state: {error}"))?;
+        if current_state != "PENDING_REVIEW" {
+            let same_decision = (current_state == "DISMISSED" && decision == "DISMISS")
+                || (current_state == "CYCLE_OPENED" && decision == "OPEN_CANDIDATE_CYCLE");
+            if same_decision {
+                tx.commit()
+                    .await
+                    .map_err(|error| format!("finish idempotent drift trigger review: {error}"))?;
+                return self.drift_trigger_from_id(evidence_id).await;
+            }
+            return Err("conflict: drift trigger has already been reviewed".to_owned());
+        }
+
+        if decision == "DISMISS" {
+            sqlx::query("UPDATE model_drift_triggers SET state = 'DISMISSED', reviewed_by = $2, reviewed_at = now() WHERE evidence_id = $1 AND state = 'PENDING_REVIEW'")
+                .bind(evidence_id)
+                .bind(reviewer_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("dismiss drift trigger: {error}"))?;
+            sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, metadata) VALUES ($1, 'REVIEW_DRIFT_TRIGGER', 'model_drift_trigger', $2, $3, $4)")
+                .bind(reviewer_id)
+                .bind(evidence_id)
+                .bind(request_id)
+                .bind(json!({"decision": decision}))
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("audit drift trigger dismissal: {error}"))?;
+            tx.commit()
+                .await
+                .map_err(|error| format!("commit drift trigger dismissal: {error}"))?;
+            return self.drift_trigger_from_id(evidence_id).await;
+        }
+
+        let active_cycle: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE state IN ('COLLECT', 'TRAINING', 'EVALUATE', 'DECISION'))",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("check active cycle before drift review: {error}"))?;
+        if active_cycle {
+            return Err("conflict: an active classifier learning cycle already exists".to_owned());
+        }
+        let production_model_version: Option<String> = sqlx::query_scalar(
+            "SELECT model_version FROM model_versions WHERE status = 'PRODUCTION' ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("read production model before drift review: {error}"))?;
+        if production_model_version.as_deref() != Some(evidence.model_version.as_str()) {
+            return Err(
+                "conflict: drift evidence is not for the current production model".to_owned(),
+            );
+        }
+        if config.learning_promotion_policy_version != DEFAULT_LEARNING_PROMOTION_POLICY_VERSION {
+            return Err("conflict: drift cycle promotion policy is not supported".to_owned());
+        }
+        let evaluation_dataset_version = config
+            .learning_evaluation_dataset_version
+            .as_deref()
+            .ok_or_else(|| "conflict: frozen evaluation dataset is not configured".to_owned())?;
+        let dataset = sqlx::query(
+            "SELECT dv.is_synthetic, COUNT(dtl.ticket_id)::int AS linked_ticket_count FROM dataset_versions dv LEFT JOIN dataset_ticket_links dtl USING (dataset_version) WHERE dv.dataset_version = $1 GROUP BY dv.is_synthetic",
+        )
+        .bind(evaluation_dataset_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("check drift-cycle evaluation dataset: {error}"))?
+        .ok_or_else(|| "conflict: frozen evaluation dataset is not registered".to_owned())?;
+        let linked_ticket_count: i32 = dataset
+            .try_get("linked_ticket_count")
+            .map_err(|error| format!("evaluation dataset ticket count: {error}"))?;
+        if linked_ticket_count < 1 {
+            return Err("conflict: frozen evaluation dataset has no ticket links".to_owned());
+        }
+        let is_synthetic: bool = dataset
+            .try_get("is_synthetic")
+            .map_err(|error| format!("evaluation dataset provenance: {error}"))?;
+        let runtime_mode = env::var("PULSE_ENV").unwrap_or_default();
+        if is_synthetic && !synthetic_evidence_allowed(&runtime_mode) {
+            return Err(
+                "conflict: synthetic evaluation data cannot open a production cycle".to_owned(),
+            );
+        }
+        if !synthetic_evidence_allowed(&runtime_mode)
+            && env::var("PULSE_TEST_FAKE_TRAINER").is_ok_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes"
+                )
+            })
+        {
+            return Err("conflict: test fake trainer cannot open a production cycle".to_owned());
+        }
+
+        let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        let cycle_id = format!("cycle-{suffix}");
+        let candidate_model_version = format!("classifier-candidate-{suffix}");
+        let cycle_database_id: i64 = sqlx::query_scalar("INSERT INTO learning_cycles (cycle_id, state, collect_started_at, collect_ends_at, production_model_version, candidate_model_version, min_feedback_count, promotion_policy_version, manual_close_enabled, frozen_evaluation_dataset_version) VALUES ($1, 'COLLECT', now(), now() + make_interval(hours => $2), $3, $4, $5, $6, $7, $8) RETURNING id")
+            .bind(&cycle_id)
+            .bind(config.learning_cycle_duration_hours)
+            .bind(&evidence.model_version)
+            .bind(&candidate_model_version)
+            .bind(config.learning_min_feedback_count)
+            .bind(&config.learning_promotion_policy_version)
+            .bind(config.learning_manual_close_enabled)
+            .bind(evaluation_dataset_version)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("open drift-triggered learning cycle: {error}"))?;
+        sqlx::query("INSERT INTO learning_cycle_evaluation_tickets (learning_cycle_id, dataset_version, ticket_id) SELECT $1, $2, ticket_id FROM dataset_ticket_links WHERE dataset_version = $2 ON CONFLICT DO NOTHING")
+            .bind(cycle_database_id)
+            .bind(evaluation_dataset_version)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("freeze drift-cycle evaluation ticket IDs: {error}"))?;
+        sqlx::query("UPDATE model_drift_triggers SET state = 'CYCLE_OPENED', learning_cycle_id = $2, reviewed_by = $3, reviewed_at = now() WHERE evidence_id = $1 AND state = 'PENDING_REVIEW'")
+            .bind(evidence_id)
+            .bind(cycle_database_id)
+            .bind(reviewer_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("link drift trigger to learning cycle: {error}"))?;
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, metadata) VALUES ($1, 'REVIEW_DRIFT_TRIGGER', 'model_drift_trigger', $2, $3, $4)")
+            .bind(reviewer_id)
+            .bind(evidence_id)
+            .bind(request_id)
+            .bind(json!({"decision": decision, "learning_cycle_id": cycle_id}))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit drift trigger review: {error}"))?;
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ($1, 'CREATE_LEARNING_CYCLE', 'learning_cycle', $2, $3, 'drift-trigger policy', $4)")
+            .bind(reviewer_id)
+            .bind(&cycle_id)
+            .bind(request_id)
+            .bind(json!({
+                "candidate_model_version": candidate_model_version,
+                "frozen_evaluation_dataset_version": evaluation_dataset_version,
+                "promotion_policy_version": config.learning_promotion_policy_version,
+                "drift_evidence_id": evidence_id,
+            }))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit drift-triggered cycle creation: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit drift-triggered learning cycle: {error}"))?;
+        self.drift_trigger_from_id(evidence_id).await
+    }
+
+    async fn drift_trigger_from_id(&self, evidence_id: &str) -> Result<DriftTrigger, String> {
+        let row = sqlx::query(
+            "SELECT d.evidence_payload, d.state, lc.cycle_id AS cycle_id, d.created_by, d.created_at, d.reviewed_by, d.reviewed_at FROM model_drift_triggers d LEFT JOIN learning_cycles lc ON lc.id = d.learning_cycle_id WHERE d.evidence_id = $1",
+        )
+        .bind(evidence_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("read drift trigger: {error}"))?
+        .ok_or_else(|| format!("not found: drift trigger {evidence_id} not found"))?;
+        drift_trigger_from_pg_row(&row)
     }
 
     pub async fn learning_overview(&self) -> Result<LearningOverview, String> {

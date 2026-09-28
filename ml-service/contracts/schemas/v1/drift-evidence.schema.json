@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse109.local/schema/drift-evidence.v1.json",
+  "title": "Pulse 109 DriftEvidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_id",
+    "model_version",
+    "detector_version",
+    "metric_name",
+    "baseline_window_start",
+    "baseline_window_end",
+    "observed_window_start",
+    "observed_window_end",
+    "baseline_value",
+    "observed_value",
+    "drift_score",
+    "threshold",
+    "sample_count",
+    "minimum_sample_count",
+    "synthetic"
+  ],
+  "properties": {
+    "schema_version": { "const": "drift-evidence.v1" },
+    "evidence_id": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,200}$" },
+    "model_version": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,200}$" },
+    "detector_version": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,200}$" },
+    "metric_name": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,100}$" },
+    "baseline_window_start": { "type": "string", "format": "date-time" },
+    "baseline_window_end": { "type": "string", "format": "date-time" },
+    "observed_window_start": { "type": "string", "format": "date-time" },
+    "observed_window_end": { "type": "string", "format": "date-time" },
+    "baseline_value": { "type": "number" },
+    "observed_value": { "type": "number" },
+    "drift_score": { "type": "number", "minimum": 0 },
+    "threshold": { "type": "number", "minimum": 0 },
+    "sample_count": { "type": "integer", "minimum": 1 },
+    "minimum_sample_count": { "type": "integer", "minimum": 1 },
+    "synthetic": { "type": "boolean", "description": "Synthetic evidence is accepted by Core only in demo, test, or unit modes." }
+  }
+}

@@ -68,6 +68,7 @@ class SharedContractTests(unittest.TestCase):
                 "CandidateTrainingJob",
                 "CandidateTrainingResult",
                 "CandidateEvaluation",
+                "DriftEvidence",
             },
         )
 

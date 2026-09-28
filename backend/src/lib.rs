@@ -66,10 +66,20 @@ const MAX_LEARNING_CYCLE_DURATION_HOURS: i32 = 87_600;
 const AUDIT_LOG_DEFAULT_LIMIT: i64 = 50;
 const AUDIT_LOG_MAX_LIMIT: i64 = 100;
 const AUDIT_LOG_MAX_OFFSET: i64 = 1_000_000;
+const DRIFT_TRIGGER_DEFAULT_LIMIT: usize = 50;
+const DRIFT_TRIGGER_MAX_LIMIT: usize = 100;
+const DRIFT_TRIGGER_MAX_OFFSET: usize = 1_000_000;
 static LOG_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn is_active_learning_cycle_state(state: &str) -> bool {
     matches!(state, "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION")
+}
+
+pub(crate) fn synthetic_evidence_allowed(runtime_mode: &str) -> bool {
+    matches!(
+        runtime_mode.trim().to_ascii_lowercase().as_str(),
+        "demo" | "test" | "unit"
+    )
 }
 
 fn learning_collect_end_is_due(collect_ends_at: &str, now: DateTime<Utc>) -> bool {
@@ -340,6 +350,7 @@ struct Store {
     learning_cycles: BTreeMap<String, LearningCycle>,
     learning_feedback: Vec<LearningFeedback>,
     models: BTreeMap<String, ModelVersion>,
+    drift_triggers: BTreeMap<String, DriftTrigger>,
     next_ticket_number: u64,
     next_decision_number: u64,
     next_cycle_number: u64,
@@ -817,12 +828,66 @@ pub struct ModelVersion {
     pub promoted_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DriftEvidence {
+    pub schema_version: String,
+    pub evidence_id: String,
+    pub model_version: String,
+    pub detector_version: String,
+    pub metric_name: String,
+    pub baseline_window_start: String,
+    pub baseline_window_end: String,
+    pub observed_window_start: String,
+    pub observed_window_end: String,
+    pub baseline_value: f64,
+    pub observed_value: f64,
+    pub drift_score: f64,
+    pub threshold: f64,
+    pub sample_count: u32,
+    pub minimum_sample_count: u32,
+    pub synthetic: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DriftTrigger {
+    pub evidence: DriftEvidence,
+    pub state: String,
+    pub learning_cycle_id: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewDriftTriggerRequest {
+    pub decision: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DriftTriggerQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DriftTriggerPage {
+    pub items: Vec<DriftTrigger>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub can_review: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Role {
     Operator,
     Manager,
     Admin,
     MlReviewer,
+    MlService,
 }
 
 impl Role {
@@ -832,6 +897,7 @@ impl Role {
             "MANAGER" => Some(Self::Manager),
             "ADMIN" => Some(Self::Admin),
             "ML_REVIEWER" | "ML-REVIEWER" => Some(Self::MlReviewer),
+            "ML_SERVICE" | "ML-SERVICE" => Some(Self::MlService),
             _ => None,
         }
     }
@@ -842,6 +908,7 @@ impl Role {
             Self::Manager => "MANAGER",
             Self::Admin => "ADMIN",
             Self::MlReviewer => "ML_REVIEWER",
+            Self::MlService => "ML_SERVICE",
         }
     }
 }
@@ -901,6 +968,15 @@ fn require_role(headers: &HeaderMap, config: &Config, allowed: &[Role]) -> Resul
             current.role.as_str()
         )))
     }
+}
+
+fn require_auditable_actor(actor: &Actor) -> Result<(), ApiError> {
+    if actor.user_id == "unknown" {
+        return Err(ApiError::Unauthorized(
+            "an authenticated user identity is required for this action".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn request_id_from_headers(headers: &HeaderMap) -> String {
@@ -1789,6 +1865,7 @@ impl Store {
             learning_cycles,
             learning_feedback: Vec::new(),
             models,
+            drift_triggers: BTreeMap::new(),
             next_ticket_number: 13,
             next_decision_number: 2,
             next_cycle_number: 2,
@@ -1879,6 +1956,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/learning",
             get(learning_overview).post(create_learning_cycle),
+        )
+        .route(
+            "/api/v1/learning/drift-triggers",
+            get(list_drift_triggers).post(create_drift_trigger),
+        )
+        .route(
+            "/api/v1/learning/drift-triggers/{evidence_id}/review",
+            post(review_drift_trigger),
         )
         .route("/api/v1/learning/{cycle_id}", get(get_learning_cycle))
         .route(
@@ -7439,6 +7524,237 @@ async fn learning_overview(
     }))
 }
 
+fn validate_drift_evidence(evidence: &DriftEvidence) -> Result<(), ApiError> {
+    let valid_identifier = |value: &str, max_length: usize| {
+        !value.is_empty()
+            && value.len() <= max_length
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')
+            })
+    };
+    if evidence.schema_version != "drift-evidence.v1"
+        || !valid_identifier(&evidence.evidence_id, 200)
+        || !valid_identifier(&evidence.model_version, 200)
+        || !valid_identifier(&evidence.detector_version, 200)
+        || !valid_identifier(&evidence.metric_name, 100)
+    {
+        return Err(ApiError::BadRequest(
+            "drift evidence identifiers or schema version are invalid".to_owned(),
+        ));
+    }
+    let parse_timestamp = |value: &str| {
+        DateTime::parse_from_rfc3339(value)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .map_err(|_| {
+                ApiError::BadRequest("drift evidence timestamps must be RFC 3339".to_owned())
+            })
+    };
+    let baseline_start = parse_timestamp(&evidence.baseline_window_start)?;
+    let baseline_end = parse_timestamp(&evidence.baseline_window_end)?;
+    let observed_start = parse_timestamp(&evidence.observed_window_start)?;
+    let observed_end = parse_timestamp(&evidence.observed_window_end)?;
+    if baseline_start >= baseline_end
+        || baseline_end > observed_start
+        || observed_start >= observed_end
+    {
+        return Err(ApiError::BadRequest(
+            "drift evidence windows must be ordered and non-overlapping".to_owned(),
+        ));
+    }
+    if !evidence.baseline_value.is_finite()
+        || !evidence.observed_value.is_finite()
+        || !evidence.drift_score.is_finite()
+        || !evidence.threshold.is_finite()
+        || evidence.threshold < 0.0
+        || evidence.drift_score <= evidence.threshold
+        || evidence.minimum_sample_count == 0
+        || evidence.sample_count < evidence.minimum_sample_count
+    {
+        return Err(ApiError::BadRequest(
+            "drift evidence must exceed its threshold and minimum sample count".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn drift_trigger_repository_error(message: String) -> ApiError {
+    if let Some(message) = message.strip_prefix("not found: ") {
+        ApiError::NotFound(message.to_owned())
+    } else if let Some(message) = message.strip_prefix("bad request: ") {
+        ApiError::BadRequest(message.to_owned())
+    } else if let Some(message) = message.strip_prefix("conflict: ") {
+        ApiError::Conflict(message.to_owned())
+    } else {
+        ApiError::Internal(message)
+    }
+}
+
+async fn create_drift_trigger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(evidence): Json<DriftEvidence>,
+) -> Result<(StatusCode, Json<DriftTrigger>), ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlService])?;
+    require_auditable_actor(&actor)?;
+    validate_drift_evidence(&evidence)?;
+    let runtime_mode = env::var("PULSE_ENV").unwrap_or_default();
+    if evidence.synthetic && !synthetic_evidence_allowed(&runtime_mode) {
+        return Err(ApiError::Conflict(
+            "synthetic drift evidence is not eligible in production".to_owned(),
+        ));
+    }
+    if let Some(repository) = state.repository() {
+        let (trigger, created) = repository
+            .create_drift_trigger(
+                &evidence,
+                &actor.user_id,
+                &request_id_from_headers(&headers),
+            )
+            .await
+            .map_err(drift_trigger_repository_error)?;
+        return Ok((
+            if created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            },
+            Json(trigger),
+        ));
+    }
+    let mut store = state.write_store()?;
+    if !store.models.contains_key(&evidence.model_version) {
+        return Err(ApiError::NotFound(
+            "drift evidence model version not found".to_owned(),
+        ));
+    }
+    if let Some(existing) = store.drift_triggers.get(&evidence.evidence_id) {
+        if existing.evidence == evidence {
+            return Ok((StatusCode::OK, Json(existing.clone())));
+        }
+        return Err(ApiError::Conflict(
+            "drift evidence identifier was already used".to_owned(),
+        ));
+    }
+    let trigger = DriftTrigger {
+        evidence: evidence.clone(),
+        state: "PENDING_REVIEW".to_owned(),
+        learning_cycle_id: None,
+        created_by: actor.user_id,
+        created_at: Utc::now().to_rfc3339(),
+        reviewed_by: None,
+        reviewed_at: None,
+    };
+    store
+        .drift_triggers
+        .insert(evidence.evidence_id, trigger.clone());
+    Ok((StatusCode::CREATED, Json(trigger)))
+}
+
+async fn list_drift_triggers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DriftTriggerQuery>,
+) -> Result<Json<DriftTriggerPage>, ApiError> {
+    let actor = require_role(
+        &headers,
+        &state.config,
+        &[Role::Manager, Role::MlReviewer, Role::Admin],
+    )?;
+    let limit = query.limit.unwrap_or(DRIFT_TRIGGER_DEFAULT_LIMIT);
+    let offset = query.offset.unwrap_or(0);
+    if !(1..=DRIFT_TRIGGER_MAX_LIMIT).contains(&limit) || offset > DRIFT_TRIGGER_MAX_OFFSET {
+        return Err(ApiError::BadRequest(
+            "invalid drift trigger page".to_owned(),
+        ));
+    }
+    if let Some(repository) = state.repository() {
+        let (items, total) = repository
+            .list_drift_triggers(limit as i64, offset as i64)
+            .await
+            .map_err(ApiError::Internal)?;
+        return Ok(Json(DriftTriggerPage {
+            items,
+            total,
+            limit,
+            offset,
+            can_review: matches!(actor.role, Role::MlReviewer | Role::Admin),
+        }));
+    }
+    let store = state.read_store()?;
+    let mut items = store.drift_triggers.values().cloned().collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.evidence.evidence_id.cmp(&left.evidence.evidence_id))
+    });
+    let total = items.len();
+    let items = items.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(DriftTriggerPage {
+        items,
+        total,
+        limit,
+        offset,
+        can_review: matches!(actor.role, Role::MlReviewer | Role::Admin),
+    }))
+}
+
+async fn review_drift_trigger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(evidence_id): Path<String>,
+    Json(request): Json<ReviewDriftTriggerRequest>,
+) -> Result<Json<DriftTrigger>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    require_auditable_actor(&actor)?;
+    if !matches!(
+        request.decision.as_str(),
+        "OPEN_CANDIDATE_CYCLE" | "DISMISS"
+    ) {
+        return Err(ApiError::BadRequest(
+            "decision must be OPEN_CANDIDATE_CYCLE or DISMISS".to_owned(),
+        ));
+    }
+    if let Some(repository) = state.repository() {
+        return repository
+            .review_drift_trigger(
+                &evidence_id,
+                &request.decision,
+                &actor.user_id,
+                &state.config,
+                &request_id_from_headers(&headers),
+            )
+            .await
+            .map(Json)
+            .map_err(drift_trigger_repository_error);
+    }
+    let mut store = state.write_store()?;
+    let mut trigger = store
+        .drift_triggers
+        .get(&evidence_id)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound("drift trigger not found".to_owned()))?;
+    if trigger.state != "PENDING_REVIEW" {
+        return Err(ApiError::Conflict(
+            "drift trigger has already been reviewed".to_owned(),
+        ));
+    }
+    match request.decision.as_str() {
+        "DISMISS" => trigger.state = "DISMISSED".to_owned(),
+        "OPEN_CANDIDATE_CYCLE" => {
+            return Err(ApiError::Conflict(
+                "opening a drift-triggered cycle requires PostgreSQL-backed dataset lineage"
+                    .to_owned(),
+            ));
+        }
+        _ => unreachable!("decision was validated before this match"),
+    }
+    trigger.reviewed_by = Some(actor.user_id);
+    trigger.reviewed_at = Some(Utc::now().to_rfc3339());
+    store.drift_triggers.insert(evidence_id, trigger.clone());
+    Ok(Json(trigger))
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct CreateLearningCycleRequest {
     pub candidate_model_version: Option<String>,
@@ -8744,6 +9060,8 @@ async fn openapi() -> Json<Value> {
             "/api/v1/alerts/{alert_id}/acknowledge": { "post": { "summary": "Acknowledge alert alias" } },
             "/api/v1/alerts/{alert_id}/close": { "post": { "summary": "Close alert" } },
             "/api/v1/learning": { "get": { "summary": "Learning loop status" }, "post": { "summary": "Start candidate cycle" } },
+            "/api/v1/learning/drift-triggers": { "get": { "summary": "List reviewable Data/ML drift evidence triggers" }, "post": { "summary": "Receive versioned drift evidence from Data/ML" } },
+            "/api/v1/learning/drift-triggers/{evidence_id}/review": { "post": { "summary": "Dismiss a drift trigger or open a candidate cycle after review" } },
             "/api/v1/learning/{cycle_id}": { "get": { "summary": "Get learning cycle" } },
             "/api/v1/learning/{cycle_id}/feedback": { "post": { "summary": "Add validated learning feedback" } },
             "/api/v1/learning/{cycle_id}/promote": { "post": { "summary": "Promote candidate after human review" } },
@@ -8770,6 +9088,16 @@ mod tests {
         http::{Request, StatusCode},
     };
     use tower::ServiceExt;
+
+    #[test]
+    fn synthetic_drift_evidence_is_limited_to_explicit_demo_and_test_modes() {
+        assert!(synthetic_evidence_allowed("demo"));
+        assert!(synthetic_evidence_allowed("TEST"));
+        assert!(synthetic_evidence_allowed("unit"));
+        assert!(!synthetic_evidence_allowed("production"));
+        assert!(!synthetic_evidence_allowed("development"));
+        assert!(!synthetic_evidence_allowed(""));
+    }
 
     fn test_context_prediction(confidence_state: &str) -> Prediction {
         Prediction {

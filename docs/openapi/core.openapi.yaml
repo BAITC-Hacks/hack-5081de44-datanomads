@@ -1056,6 +1056,78 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/learning/drift-triggers:
+    get:
+      tags: [learning]
+      summary: List reviewable Data/ML drift evidence triggers
+      description: Manager, ML reviewer and admin access. Results contain aggregate evidence only.
+      security: [{ pulseRole: [] }, {}]
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 1000000, default: 0 }
+      responses:
+        '200':
+          description: Drift triggers ordered newest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DriftTriggerPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [learning]
+      summary: Receive versioned drift evidence from Data/ML
+      description: ML_SERVICE role only. Synthetic evidence is rejected outside demo/test/unit modes; duplicate evidence IDs are idempotent.
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DriftEvidence' }
+      responses:
+        '201':
+          description: New review trigger created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DriftTrigger' }
+        '200':
+          description: Existing trigger returned for an identical evidence ID and payload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DriftTrigger' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/learning/drift-triggers/{evidence_id}/review:
+    post:
+      tags: [learning]
+      summary: Dismiss a drift trigger or open a candidate cycle after review
+      description: ML_REVIEWER or ADMIN only. Cycle opening requires the current production model, supported policy-v1, a frozen registered dataset, and no active cycle.
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReviewDriftTriggerRequest' }
+      responses:
+        '200':
+          description: Trigger review persisted; production pointer remains unchanged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DriftTrigger' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/learning/{cycle_id}:
     get:
       tags: [learning]
@@ -2116,6 +2188,53 @@ components:
         date: { type: string, format: date }
         tickets: { type: integer }
         resolved: { type: integer }
+    DriftEvidence:
+      type: object
+      additionalProperties: false
+      required: [schema_version, evidence_id, model_version, detector_version, metric_name, baseline_window_start, baseline_window_end, observed_window_start, observed_window_end, baseline_value, observed_value, drift_score, threshold, sample_count, minimum_sample_count, synthetic]
+      properties:
+        schema_version: { type: string, enum: [drift-evidence.v1] }
+        evidence_id: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }
+        model_version: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }
+        detector_version: { type: string, minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._:-]+$' }
+        metric_name: { type: string, minLength: 1, maxLength: 100, pattern: '^[A-Za-z0-9._:-]+$' }
+        baseline_window_start: { type: string, format: date-time }
+        baseline_window_end: { type: string, format: date-time }
+        observed_window_start: { type: string, format: date-time }
+        observed_window_end: { type: string, format: date-time }
+        baseline_value: { type: number }
+        observed_value: { type: number }
+        drift_score: { type: number, minimum: 0 }
+        threshold: { type: number, minimum: 0 }
+        sample_count: { type: integer, minimum: 1 }
+        minimum_sample_count: { type: integer, minimum: 1 }
+        synthetic: { type: boolean, description: Synthetic evidence is accepted only in demo/test/unit modes. }
+    DriftTrigger:
+      type: object
+      required: [evidence, state, learning_cycle_id, created_by, created_at, reviewed_by, reviewed_at]
+      properties:
+        evidence: { $ref: '#/components/schemas/DriftEvidence' }
+        state: { type: string, enum: [PENDING_REVIEW, CYCLE_OPENED, DISMISSED] }
+        learning_cycle_id: { type: string, nullable: true }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        reviewed_by: { type: string, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+    DriftTriggerPage:
+      type: object
+      required: [items, total, limit, offset, can_review]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/DriftTrigger' } }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: integer, minimum: 0 }
+        can_review: { type: boolean, description: True for ML_REVIEWER and ADMIN actors. }
+    ReviewDriftTriggerRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [OPEN_CANDIDATE_CYCLE, DISMISS] }
     LearningCycle:
       type: object
       required: [id, cycle_id, state, dataset_version, candidate_model_version, collect_started_at, collect_ends_at, evaluation_started_at, evaluation_ends_at, shadow_prediction_count, shadow_inference_failures, shadow_operator_decision_count, blind_ab_enabled, frozen_evaluation_dataset_version, candidate_dataset_checksum, min_feedback_count, promotion_policy_version, manual_close_enabled, feedback_count, created_at, updated_at]

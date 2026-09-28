@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
@@ -326,7 +326,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
     case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} previousForecast={data.forecastPreviousPoints ?? []} reforecast={data.forecastReforecast} managerSignals={data.forecastManagerSignals ?? []} capacityAssessment={data.forecastCapacityAssessment} runId={data.forecastRunId} issuedAt={data.forecastIssuedAt} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
     case '/situation/reports': content = <CleanReportsPage filters={filters} />; break
     case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
-    case '/situation/models': content = <CleanModelsPage models={data.models} />; break
+    case '/situation/models': content = <CleanModelsPage models={data.models} driftTriggers={data.driftTriggers ?? []} canReview={data.canReviewDriftTriggers ?? false} onRefresh={onRefresh} onToast={onToast} />; break
   }
   return <>{content}{route !== '/operator' && <AnalyticsDrilldownPanel state={drilldown} loading={drilldownLoading} />}</>
 }
@@ -2104,9 +2104,58 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
   </div>
 }
 
-function CleanModelsPage({ models }: { models: ModelStatus[] }) {
-  if (!models.length) return <div className="analytics-page"><NoData message="Реестр моделей не предоставлен API." /></div>
-  return <div className="analytics-page"><section className="panel"><PanelHeading title="Реестр моделей" /><div className="models-table">{models.map((model) => <div className="models-row" key={model.version}><strong>{model.name}</strong><code>{model.version}</code><span>{model.status}</span><span><strong>{model.metricValue}</strong><small>{model.metric}</small></span><span>{model.updatedAt}</span></div>)}</div></section></div>
+function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast }: { models: ModelStatus[]; driftTriggers: NonNullable<DashboardData['driftTriggers']>; canReview: boolean; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
+  const [busyTrigger, setBusyTrigger] = useState<string | null>(null)
+  const review = async (evidenceId: string, decision: 'OPEN_CANDIDATE_CYCLE' | 'DISMISS') => {
+    setBusyTrigger(evidenceId)
+    try {
+      await reviewDriftTrigger(evidenceId, decision)
+    } catch {
+      onToast('Не удалось сохранить решение reviewer')
+      setBusyTrigger(null)
+      return
+    }
+    onToast(decision === 'OPEN_CANDIDATE_CYCLE' ? 'Цикл COLLECT открыт; production-модель не изменена' : 'Drift trigger закрыт reviewer')
+    try {
+      await onRefresh()
+    } catch {
+      onToast('Решение сохранено, но список trigger не удалось обновить')
+    } finally {
+      setBusyTrigger(null)
+    }
+  }
+  return <div className="analytics-page">
+    <section className="panel">
+      <PanelHeading title="Реестр моделей" />
+      {models.length
+        ? <div className="models-table">{models.map((model) => <div className="models-row" key={model.version}><strong>{model.name}</strong><code>{model.version}</code><span>{model.status}</span><span><strong>{model.metricValue}</strong><small>{model.metric}</small></span><span>{model.updatedAt}</span></div>)}</div>
+        : <NoData message="Реестр моделей не предоставлен API." />}
+    </section>
+    <section className="panel">
+      <PanelHeading title="Drift evidence на проверке" />
+      {driftTriggers.length === 0
+        ? <p className="panel-note">Новых агрегированных сигналов Data/ML нет.</p>
+        : <div className="drift-trigger-list">{driftTriggers.map((trigger) => {
+          const evidence = trigger.evidence
+          return <article className="drift-trigger-card" key={evidence.evidence_id}>
+            <div className="dataset-stat"><span>Состояние</span><strong>{trigger.state}</strong></div>
+            <div className="dataset-stat"><span>Evidence ID</span><code>{evidence.evidence_id}</code></div>
+            <div className="dataset-stat"><span>Модель / detector</span><strong>{evidence.model_version} · {evidence.detector_version}</strong></div>
+            <div className="dataset-stat"><span>Метрика</span><strong>{evidence.metric_name}</strong></div>
+            <div className="dataset-stat"><span>Baseline / observed</span><strong>{evidence.baseline_value.toFixed(3)} / {evidence.observed_value.toFixed(3)}</strong></div>
+            <div className="dataset-stat"><span>Drift score / threshold</span><strong>{evidence.drift_score.toFixed(3)} / {evidence.threshold.toFixed(3)}</strong></div>
+            <div className="dataset-stat"><span>Выборка</span><strong>{evidence.sample_count} / минимум {evidence.minimum_sample_count}{evidence.synthetic ? ' · synthetic' : ''}</strong></div>
+            <div className="dataset-stat"><span>Окно наблюдения</span><strong>{evidence.observed_window_start} — {evidence.observed_window_end}</strong></div>
+            {trigger.learning_cycle_id && <div className="dataset-stat"><span>Цикл</span><strong>{trigger.learning_cycle_id}</strong></div>}
+            {trigger.state === 'PENDING_REVIEW' && canReview && <div className="learning-actions" aria-label="Действия reviewer">
+              <button className="button button-primary" disabled={busyTrigger !== null} onClick={() => void review(evidence.evidence_id, 'OPEN_CANDIDATE_CYCLE')}>{busyTrigger === evidence.evidence_id ? 'Сохраняем…' : 'Открыть цикл COLLECT'}</button>
+              <button className="button button-quiet" disabled={busyTrigger !== null} onClick={() => void review(evidence.evidence_id, 'DISMISS')}>Отклонить сигнал</button>
+            </div>}
+          </article>
+        })}</div>}
+      <p className="panel-note">Открытие цикла требует текущую production-модель и frozen evaluation dataset. Оно не продвигает candidate и не меняет production pointer.</p>
+    </section>
+  </div>
 }
 
 

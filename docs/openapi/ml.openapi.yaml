@@ -15,6 +15,9 @@ info:
     ML forecast output describes ticket demand only; it does not calculate
     staffing or capacity. Core reports DATA_UNAVAILABLE until verified
     staffing, throughput, schedule and service-level inputs are available.
+    Data/ML drift packages publish aggregate drift-evidence.v1 payloads to the
+    authenticated Core trigger API; this deterministic runtime does not invent
+    drift scores when no calibrated evidence producer is configured.
   version: 0.1.0
 paths:
   /healthz:
@@ -1403,6 +1406,75 @@ components:
         evaluated_at:
           type: string
           format: date-time
+        synthetic:
+          type: boolean
+    DriftEvidence:
+      description: >-
+        Versioned aggregate output from a calibrated Data/ML drift detector.
+        Core accepts it only from the ML_SERVICE identity and rejects synthetic
+        evidence outside demo/test/unit modes.
+      type: object
+      additionalProperties: false
+      required:
+      - schema_version
+      - evidence_id
+      - model_version
+      - detector_version
+      - metric_name
+      - baseline_window_start
+      - baseline_window_end
+      - observed_window_start
+      - observed_window_end
+      - baseline_value
+      - observed_value
+      - drift_score
+      - threshold
+      - sample_count
+      - minimum_sample_count
+      - synthetic
+      properties:
+        schema_version:
+          const: drift-evidence.v1
+        evidence_id:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,200}$'
+        model_version:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,200}$'
+        detector_version:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,200}$'
+        metric_name:
+          type: string
+          pattern: '^[A-Za-z0-9._:-]{1,100}$'
+        baseline_window_start:
+          type: string
+          format: date-time
+        baseline_window_end:
+          type: string
+          format: date-time
+        observed_window_start:
+          type: string
+          format: date-time
+        observed_window_end:
+          type: string
+          format: date-time
+        baseline_value:
+          type: number
+        observed_value:
+          type: number
+        drift_score:
+          type: number
+          minimum: 0
+        threshold:
+          type: number
+          minimum: 0
+        sample_count:
+          type: integer
+          minimum: 1
+        minimum_sample_count:
+          type: integer
+          minimum: 1
         synthetic:
           type: boolean
     ModelEvaluationEvidence:

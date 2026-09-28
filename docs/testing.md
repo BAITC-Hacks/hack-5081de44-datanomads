@@ -141,6 +141,7 @@ model version и ручной переход в `DECISION` без promotion.
 - shadow classification requires the registered artifact checksum and never falls back to production;
 - evaluation reads do not close the window, while expiry/manual close advance it to `DECISION`;
 - recurring-cycle tests verify the shared creation lock, wait for `DECISION`, and block missing/synthetic production evaluation data;
+- drift-trigger API tests verify evidence validation, stable-ID deduplication, reviewer-only dismissal, and manager read-only access; live Compose validation covers atomic cycle opening, audit lineage, and an unchanged production pointer.
 - synthetic candidate artifacts are rejected by production shadow serving;
 - fake trainer is rejected when `PULSE_ENV=production`, and synthetic candidates cannot be promoted there;
 - candidate builder failure виден как `DATASET_BUILD_FAILED` и `background_jobs.FAILED`;

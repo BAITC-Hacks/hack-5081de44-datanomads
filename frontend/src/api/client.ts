@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, DriftTrigger, ForecastBacktest, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -391,6 +391,7 @@ interface BackendAlerts { source?: string; items: BackendAlert[]; total?: number
 interface BackendLearningCycle { id: string; cycle_id: string; state: string; dataset_version: string; candidate_model_version: string; collect_started_at: string; collect_ends_at: string; evaluation_started_at: string | null; evaluation_ends_at: string | null; shadow_prediction_count: number; shadow_inference_failures: number; shadow_operator_decision_count: number; blind_ab_enabled: boolean; production_model_version: string | null; frozen_evaluation_dataset_version: string | null; candidate_dataset_checksum: string | null; min_feedback_count: number; promotion_policy_version: string; manual_close_enabled: boolean; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
 interface BackendLearning { source?: string; items?: BackendLearningCycle[]; active_cycle?: BackendLearningCycle; production_model?: { id: string; status: string }; controlled_loop?: Record<string, unknown> }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
+interface BackendDriftTriggers { items: DriftTrigger[]; total: number; limit: number; offset: number; can_review: boolean }
 export interface CandidateEvaluation {
   schema_version: 'candidate-evaluation.v1'
   status: 'PENDING' | 'COMPLETED' | 'FAILED'
@@ -677,7 +678,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     channel: filters.channel,
   }
   const alertsQuery = filters.regionId ? `?region_id=${encodeURIComponent(filters.regionId)}` : ''
-  const [ticketResponse, analytics, forecast, alertsResponse, learning, models, taxonomy, datasetProvenance] = await Promise.all([
+  const [ticketResponse, analytics, forecast, alertsResponse, learning, models, driftTriggers, taxonomy, datasetProvenance] = await Promise.all([
     request<{ items: BackendTicket[] }>('/tickets?limit=50'),
     request<BackendAnalytics>(`/analytics?${analyticsQuery}`),
     request<BackendForecast>('/forecast/reforecast', {
@@ -688,6 +689,7 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     request<BackendAlerts>(`/alerts${alertsQuery}`),
     request<BackendLearning>('/learning'),
     request<BackendModels>('/models'),
+    request<BackendDriftTriggers>('/learning/drift-triggers?limit=50'),
     request<BackendTaxonomy>('/taxonomy'),
     request<DatasetProvenance>('/datasets/provenance'),
   ])
@@ -832,6 +834,8 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     alerts,
     forecast: forecastPoints,
     models: modelData,
+    driftTriggers: driftTriggers.items,
+    canReviewDriftTriggers: driftTriggers.can_review,
     learning: learningData,
     timeSeries: analytics.time_series,
     reportSource: analytics.source ?? 'postgres',
@@ -1171,6 +1175,14 @@ export async function rejectCandidate(note?: string) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ note: note?.trim() || undefined }),
+  })
+}
+
+export async function reviewDriftTrigger(evidenceId: string, decision: 'OPEN_CANDIDATE_CYCLE' | 'DISMISS') {
+  return request<DriftTrigger>(`/learning/drift-triggers/${encodeURIComponent(evidenceId)}/review`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision }),
   })
 }
 

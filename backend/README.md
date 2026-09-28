@@ -50,7 +50,9 @@ docker run --rm -p 8080:8080 pulse109-core
 не проксирует.
 
 В demo/test режиме auth использует `x-pulse-role:
-OPERATOR|MANAGER|ML_REVIEWER|ADMIN` и необязательный `x-user-id`. В normal
+OPERATOR|MANAGER|ML_REVIEWER|ML_SERVICE|ADMIN` и необязательный `x-user-id`.
+`ML_SERVICE` может только публиковать агрегированные drift evidence; решения по
+learning cycles остаются доступны только reviewer/admin. В normal
 режиме Core принимает только заголовки, выставленные доверенным auth gateway:
 `x-authenticated-role` и `x-authenticated-user`; `PULSE_DEV_AUTH=true` разрешён
 только для `PULSE_ENV=demo|test|unit` и останавливает Core при включении в

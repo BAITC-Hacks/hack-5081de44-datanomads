@@ -170,6 +170,31 @@ The schedule is global because this classifier currently has one serving
 production version. No region/topic cycle configuration is exposed until there
 is an operational reason to train independent models for those slices.
 
+## Drift-triggered candidate cycles
+
+The Core API accepts `drift-evidence.v1` only from the trusted `ML_SERVICE`
+identity. Evidence is aggregate-only and identifies the model, detector,
+metric, non-overlapping baseline/observed windows, score, threshold and sample
+counts. Core rejects evidence that does not exceed its supplied threshold or
+minimum count, repeated IDs with different payloads, and synthetic evidence
+outside explicit demo/test/unit modes. The complete evidence payload is stored
+with the trigger; audit metadata contains only allow-listed model/detector/metric
+and score fields.
+
+ML reviewers and admins can dismiss a pending trigger or open a COLLECT cycle.
+Opening a cycle requires that its evidence model is still the production
+champion, no other cycle is active, the configured frozen evaluation dataset is
+registered and linked, and production evidence is not synthetic. Trigger review
+and cycle creation share the learning-cycle transaction lock and are committed
+with their audit events. Only the currently implemented `policy-v1` promotion
+policy can open a cycle. This action only opens a candidate cycle; evaluation
+and explicit human promotion remain required to change the production pointer.
+
+The checked-in drift evidence example is synthetic and exists only to validate
+the shared contract. The current deterministic ML runtime does not produce
+calibrated drift scores; a Data/ML detector must publish real evidence through
+the trusted Core boundary before this workflow can trigger on live drift.
+
 The PostgreSQL worker checks expired COLLECT cycles on each poll. Below the
 feedback threshold it records `INSUFFICIENT_FEEDBACK` without creating a
 candidate or job. Otherwise it queues `BUILD_CANDIDATE_DATASET` with validated

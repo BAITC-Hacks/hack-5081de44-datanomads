@@ -30,6 +30,9 @@
   `PULSE_LEARNING_AUTO_CYCLES_ENABLED=true`. It waits for an eligible terminal
   state, a registered frozen evaluation dataset and a production model; it does
   not enable the test fake trainer or bypass human promotion.
+- The shared `drift-evidence.v1` contract carries aggregate detector output to
+  Core's trusted `ML_SERVICE` drift-trigger endpoint. The deterministic runtime
+  does not emit calibrated drift scores; its checked-in example is synthetic.
 
 Это честный deterministic demo baseline, а не утверждение о качестве на
 реальном dataset 109. `artifacts/manifest.json` явно содержит
