@@ -93,12 +93,22 @@ evaluation gates. Reviewer передаёт выбранную версию, е�
 production pointer: это не rollback. Rejected candidate остаётся доступным для
 аудита, но никогда не используется serving.
 
+После старта rollout reviewer или ADMIN может вручную откатить активный canary
+или модель, уже переведённую в полный production. У каждого отката обязательна
+причина и audit event с агрегированным canary evidence. Остановка `CANARY` или
+`MONITORING` помечает candidate отклонённым и сохраняет текущий production
+pointer. Откат `FULL_PRODUCTION` восстанавливает сохранённую предыдущую модель
+только если candidate всё ещё является текущим production, а checksum и
+manifest предыдущей модели совпадают с сохранёнными при старте rollout. Если
+production pointer изменился, откат завершается конфликтом и не перезаписывает
+более новую модель. Автоматический rollback не запускается.
+
 ## Жизненный цикл
 
 ```text
-TRAINED → CANDIDATE → EVALUATED
-                    ├── PROMOTED → PRODUCTION
-                    └── REJECTED
+TRAINED → CANDIDATE → EVALUATED → CANARY → MONITORING → FULL_PRODUCTION
+                    │                │          │              │
+                    └── REJECTED      └──────────┴──────────────┴──→ ROLLED_BACK
 ```
 
 Promotion требует:

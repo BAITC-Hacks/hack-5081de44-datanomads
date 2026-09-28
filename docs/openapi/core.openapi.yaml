@@ -759,6 +759,34 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '503': { $ref: '#/components/responses/Unavailable' }
+  /api/v1/model-rollouts/{rollout_id}/rollback:
+    post:
+      tags: [models]
+      summary: Manually roll back a canary or completed model rollout
+      description: Requires ML_REVIEWER or ADMIN and a reason. An active canary keeps the existing production pointer. A completed rollout restores the previous verified model only while the candidate remains current production. The action records aggregate inference evidence in the audit log.
+      parameters:
+        - name: rollout_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteModelRolloutRequest' }
+      responses:
+        '200':
+          description: Rollout stopped and previous production model retained or restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RollbackModelRolloutResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /api/v1/models:
     get:
       tags: [models]
@@ -2597,6 +2625,7 @@ components:
         canary_traffic_percent: { type: integer, minimum: 1, maximum: 25 }
         policy_version: { type: string }
         policy_snapshot: { type: object, additionalProperties: true }
+        rolled_back_at: { type: string, format: date-time, nullable: true }
         metrics: { $ref: '#/components/schemas/ModelRolloutMetrics' }
         full_rollout_eligible: { type: boolean }
         blocking_gates: { type: array, items: { type: string } }
@@ -2614,4 +2643,15 @@ components:
         status: { type: string, enum: [FULL_PRODUCTION] }
         candidate_model_version: { type: string }
         previous_production_model_version: { type: string }
+        metrics: { $ref: '#/components/schemas/ModelRolloutMetrics' }
+    RollbackModelRolloutResponse:
+      type: object
+      required: [rollout_id, status, candidate_model_version, previous_production_model_version, production_pointer_changed, current_production_model_version, metrics]
+      properties:
+        rollout_id: { type: string }
+        status: { type: string, enum: [ROLLED_BACK] }
+        candidate_model_version: { type: string }
+        previous_production_model_version: { type: string }
+        production_pointer_changed: { type: boolean }
+        current_production_model_version: { type: string }
         metrics: { $ref: '#/components/schemas/ModelRolloutMetrics' }

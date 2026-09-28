@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, completeModelRollout, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadModelRollouts, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, registerLearningCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, completeModelRollout, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadModelRollouts, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, registerLearningCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, rollbackModelRollout, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, BackendModelRollout, CandidateEvaluation, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
@@ -2177,6 +2177,8 @@ function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast 
   const [rolloutError, setRolloutError] = useState<string | null>(null)
   const [busyRollout, setBusyRollout] = useState<string | null>(null)
   const [rolloutReason, setRolloutReason] = useState('')
+  const [busyRollback, setBusyRollback] = useState<string | null>(null)
+  const [rollbackReason, setRollbackReason] = useState('')
   const refreshRollouts = useCallback(async () => {
     try {
       const result = await loadModelRollouts()
@@ -2209,6 +2211,31 @@ function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast 
       onToast('Rollout завершён, но данные не удалось обновить')
     } finally {
       setBusyRollout(null)
+    }
+  }
+  const rollbackRollout = async (rollout: BackendModelRollout) => {
+    const reason = rollbackReason.trim()
+    if (!reason || !window.confirm(`Откатить rollout ${rollout.candidate_model_version} к предыдущей production-модели?`)) return
+    setBusyRollback(rollout.rollout_id)
+    let result: Awaited<ReturnType<typeof rollbackModelRollout>>
+    try {
+      result = await rollbackModelRollout(rollout.rollout_id, reason)
+    } catch {
+      onToast('Не удалось откатить rollout; проверьте его состояние и доступность предыдущей модели')
+      setBusyRollback(null)
+      return
+    }
+    setRollbackReason('')
+    onToast(result.production_pointer_changed
+      ? 'Предыдущая verified-модель восстановлена в production'
+      : 'Canary остановлен; production-модель не менялась')
+    try {
+      await refreshRollouts()
+      await onRefresh()
+    } catch {
+      onToast('Откат выполнен, но данные не удалось обновить')
+    } finally {
+      setBusyRollback(null)
     }
   }
   const review = async (evidenceId: string, decision: 'OPEN_CANDIDATE_CYCLE' | 'DISMISS') => {
@@ -2246,6 +2273,7 @@ function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast 
         const delta = metrics.correction_rate_delta
         const deltaLabel = delta == null ? 'Недостаточно решений' : `${delta > 0 ? '+' : ''}${(delta * 100).toFixed(1)} п.п.`
         const active = rollout.status === 'CANARY' || rollout.status === 'MONITORING'
+        const rollbackAvailable = active || rollout.status === 'FULL_PRODUCTION'
         return <article className="drift-trigger-card" key={rollout.rollout_id}>
           <div className="dataset-stat"><span>Rollout / состояние</span><strong>{rollout.rollout_id} · {rollout.status}</strong></div>
           <div className="dataset-stat"><span>Candidate / production baseline</span><strong>{rollout.candidate_model_version} · {rollout.previous_production_model_version}</strong></div>
@@ -2254,12 +2282,19 @@ function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast 
           <div className="dataset-stat"><span>Correction-rate delta</span><strong>{deltaLabel}</strong></div>
           <div className="dataset-stat"><span>Inference failures / policy</span><strong>{metrics.failed_inference_count} / {rollout.policy_version}</strong></div>
           {rollout.blocking_gates.length > 0 && <p className="panel-note">Ожидают выполнения: {rollout.blocking_gates.join(', ')}</p>}
-          {active && <label className="learning-candidate-register">
+          {active && canReview && <label className="learning-candidate-register">
             <span>Причина ручного полного rollout</span>
-            <input className="learning-note" value={rolloutReason} maxLength={1000} onChange={(event) => setRolloutReason(event.target.value)} disabled={busyRollout !== null} />
+            <input className="learning-note" value={rolloutReason} maxLength={1000} onChange={(event) => setRolloutReason(event.target.value)} disabled={busyRollout !== null || busyRollback !== null} />
           </label>}
-          {active && canReview && <button className="button button-primary" disabled={busyRollout !== null || !rollout.full_rollout_eligible || rolloutReason.trim().length === 0} onClick={() => void completeRollout(rollout)}>
+          {active && canReview && <button className="button button-primary" disabled={busyRollout !== null || busyRollback !== null || !rollout.full_rollout_eligible || rolloutReason.trim().length === 0} onClick={() => void completeRollout(rollout)}>
             {busyRollout === rollout.rollout_id ? 'Переводим…' : 'Вручную перевести в полный production'}
+          </button>}
+          {rollbackAvailable && canReview && <label className="learning-candidate-register">
+            <span>Причина ручного rollback</span>
+            <input className="learning-note" value={rollbackReason} maxLength={1000} onChange={(event) => setRollbackReason(event.target.value)} disabled={busyRollback !== null || busyRollout !== null} />
+          </label>}
+          {rollbackAvailable && canReview && <button className="button button-quiet" disabled={busyRollback !== null || busyRollout !== null || rollbackReason.trim().length === 0} onClick={() => void rollbackRollout(rollout)}>
+            {busyRollback === rollout.rollout_id ? 'Откатываем…' : active ? 'Остановить canary и сохранить production' : 'Откатить к предыдущей production-модели'}
           </button>}
         </article>
       })}

@@ -404,6 +404,7 @@ export interface BackendModelRollout {
   created_at: string
   monitoring_started_at?: string | null
   full_production_at?: string | null
+  rolled_back_at?: string | null
   metrics: {
     canary_ticket_count: number
     canary_decision_count: number
@@ -1245,6 +1246,22 @@ export async function completeModelRollout(rolloutId: string, reason: string) {
     previous_production_model_version: string
     metrics: BackendModelRollout['metrics']
   }>(`/model-rollouts/${encodeURIComponent(rolloutId)}/full-production`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason.trim() }),
+  })
+}
+
+export async function rollbackModelRollout(rolloutId: string, reason: string) {
+  return request<{
+    rollout_id: string
+    status: 'ROLLED_BACK'
+    candidate_model_version: string
+    previous_production_model_version: string
+    production_pointer_changed: boolean
+    current_production_model_version: string
+    metrics: BackendModelRollout['metrics']
+  }>(`/model-rollouts/${encodeURIComponent(rolloutId)}/rollback`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ reason: reason.trim() }),

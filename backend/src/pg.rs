@@ -6785,7 +6785,7 @@ impl PgRepository {
 
     pub async fn model_rollouts(&self) -> Result<Value, String> {
         let rows = sqlx::query(
-            "SELECT id, rollout_id, rollout_version, learning_cycle_id, candidate_model_version, previous_production_model_version, canary_traffic_percent, policy_version, policy_snapshot, status, created_at, monitoring_started_at, full_production_at FROM model_rollouts ORDER BY created_at DESC, id DESC LIMIT 25",
+            "SELECT id, rollout_id, rollout_version, learning_cycle_id, candidate_model_version, previous_production_model_version, canary_traffic_percent, policy_version, policy_snapshot, status, created_at, monitoring_started_at, full_production_at, rolled_back_at FROM model_rollouts ORDER BY created_at DESC, id DESC LIMIT 25",
         )
         .fetch_all(&self.pool)
         .await
@@ -6809,6 +6809,9 @@ impl PgRepository {
             let full_production_at: Option<DateTime<Utc>> = row
                 .try_get("full_production_at")
                 .map_err(|error| format!("model rollout production time: {error}"))?;
+            let rolled_back_at: Option<DateTime<Utc>> = row
+                .try_get("rolled_back_at")
+                .map_err(|error| format!("model rollout rollback time: {error}"))?;
             items.push(json!({
                 "rollout_id": row.try_get::<String, _>("rollout_id").map_err(|error| format!("model rollout key: {error}"))?,
                 "rollout_version": row.try_get::<i32, _>("rollout_version").map_err(|error| format!("model rollout version: {error}"))?,
@@ -6822,6 +6825,7 @@ impl PgRepository {
                 "created_at": created_at.to_rfc3339(),
                 "monitoring_started_at": monitoring_started_at.map(|value| value.to_rfc3339()),
                 "full_production_at": full_production_at.map(|value| value.to_rfc3339()),
+                "rolled_back_at": rolled_back_at.map(|value| value.to_rfc3339()),
                 "metrics": {
                     "canary_ticket_count": metrics.canary_ticket_count,
                     "canary_decision_count": metrics.canary_decision_count,
@@ -7010,6 +7014,270 @@ impl PgRepository {
             "status": "FULL_PRODUCTION",
             "candidate_model_version": candidate_model_version,
             "previous_production_model_version": previous_production_model_version,
+            "metrics": {
+                "canary_ticket_count": metrics.canary_ticket_count,
+                "canary_decision_count": metrics.canary_decision_count,
+                "failed_inference_count": metrics.failed_inference_count,
+                "candidate_correction_rate": metrics.candidate_correction_rate,
+                "production_correction_rate": metrics.production_correction_rate,
+                "correction_rate_delta": metrics.correction_rate_delta,
+            },
+        }))
+    }
+
+    pub async fn rollback_model_rollout(
+        &self,
+        rollout_id: &str,
+        actor_id: &str,
+        reason: &str,
+        request_id: &str,
+    ) -> Result<Value, String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin model rollout rollback: {error}"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pulse109:model-rollout'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("lock model rollout rollback: {error}"))?;
+        let rollout = sqlx::query(
+            "SELECT id, learning_cycle_id, candidate_model_version, candidate_artifact_checksum, previous_production_model_version, previous_artifact_checksum, status FROM model_rollouts WHERE rollout_id = $1 FOR UPDATE",
+        )
+        .bind(rollout_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("find model rollout to roll back: {error}"))?
+        .ok_or_else(|| format!("model rollout {rollout_id} not found"))?;
+        let status: String = rollout
+            .try_get("status")
+            .map_err(|error| format!("model rollout rollback status: {error}"))?;
+        let is_full_production = status == "FULL_PRODUCTION";
+        if !is_full_production && !matches!(status.as_str(), "CANARY" | "MONITORING") {
+            return Err(format!(
+                "model rollout {rollout_id} is not active or in full production"
+            ));
+        }
+        let database_id: i64 = rollout
+            .try_get("id")
+            .map_err(|error| format!("model rollout database id: {error}"))?;
+        let metrics = model_rollout_metrics(&self.pool, database_id).await?;
+        let candidate_model_version: String = rollout
+            .try_get("candidate_model_version")
+            .map_err(|error| format!("rollback candidate version: {error}"))?;
+        let candidate_artifact_checksum: String = rollout
+            .try_get("candidate_artifact_checksum")
+            .map_err(|error| format!("rollback candidate checksum: {error}"))?;
+        let previous_production_model_version: String = rollout
+            .try_get("previous_production_model_version")
+            .map_err(|error| format!("rollback previous production version: {error}"))?;
+        let previous_artifact_checksum: Option<String> = rollout
+            .try_get("previous_artifact_checksum")
+            .map_err(|error| format!("rollback previous artifact checksum: {error}"))?;
+        let learning_cycle_id: Option<i64> = rollout
+            .try_get("learning_cycle_id")
+            .map_err(|error| format!("rollback learning cycle id: {error}"))?;
+
+        if is_full_production {
+            let another_rollout_is_active: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM model_rollouts WHERE id <> $1 AND status IN ('CANARY', 'MONITORING'))",
+            )
+            .bind(database_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| format!("check active rollouts before rollback: {error}"))?;
+            if another_rollout_is_active {
+                return Err(
+                    "another model rollout is active; rollback would invalidate its production baseline"
+                        .to_owned(),
+                );
+            }
+        }
+
+        let current_production_model_version: Option<String> = sqlx::query_scalar(
+            "SELECT model_version FROM model_versions WHERE status = 'PRODUCTION' FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("lock current production model for rollback: {error}"))?;
+        let expected_current_model = if is_full_production {
+            candidate_model_version.as_str()
+        } else {
+            previous_production_model_version.as_str()
+        };
+        if current_production_model_version.as_deref() != Some(expected_current_model) {
+            return Err(
+                "production model changed since rollout; refusing to overwrite its pointer"
+                    .to_owned(),
+            );
+        }
+
+        let candidate = sqlx::query(
+            "SELECT status, artifact_checksum FROM model_versions WHERE model_version = $1 FOR UPDATE",
+        )
+        .bind(&candidate_model_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("lock rollback candidate model: {error}"))?
+        .ok_or_else(|| "rollback candidate registry entry changed".to_owned())?;
+        let candidate_status: String = candidate
+            .try_get("status")
+            .map_err(|error| format!("rollback candidate status: {error}"))?;
+        let candidate_checksum: Option<String> = candidate
+            .try_get("artifact_checksum")
+            .map_err(|error| format!("rollback candidate checksum: {error}"))?;
+        let candidate_status_matches = if is_full_production {
+            candidate_status == "PRODUCTION"
+        } else {
+            matches!(candidate_status.as_str(), "CANDIDATE" | "SHADOW")
+        };
+        if !candidate_status_matches
+            || candidate_checksum.as_deref() != Some(candidate_artifact_checksum.as_str())
+        {
+            return Err("rollback candidate registry entry changed".to_owned());
+        }
+
+        let previous = sqlx::query(
+            "SELECT status, artifact_checksum, manifest_uri FROM model_versions WHERE model_version = $1 FOR UPDATE",
+        )
+        .bind(&previous_production_model_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("lock previous production model: {error}"))?
+        .ok_or_else(|| "previous production model changed since rollout".to_owned())?;
+        let previous_status: String = previous
+            .try_get("status")
+            .map_err(|error| format!("previous production status: {error}"))?;
+        let previous_checksum: Option<String> = previous
+            .try_get("artifact_checksum")
+            .map_err(|error| format!("previous production checksum: {error}"))?;
+        let previous_manifest_uri: Option<String> = previous
+            .try_get("manifest_uri")
+            .map_err(|error| format!("previous production manifest: {error}"))?;
+        let expected_previous_status = if is_full_production {
+            "ARCHIVED"
+        } else {
+            "PRODUCTION"
+        };
+        if previous_status != expected_previous_status
+            || previous_checksum.as_deref() != previous_artifact_checksum.as_deref()
+        {
+            return Err("previous production model changed since rollout".to_owned());
+        }
+        let Some(previous_checksum) = previous_checksum.as_deref() else {
+            return Err("previous production model artifact is not verifiable".to_owned());
+        };
+        if !artifact_checksum_is_verified(previous_checksum)
+            && !(previous_checksum == "builtin-baseline-no-artifact"
+                && previous_manifest_uri.as_deref() == Some("builtin://deterministic-classifier"))
+        {
+            return Err("previous production model artifact is not verifiable".to_owned());
+        }
+
+        if is_full_production {
+            let archived_candidate = sqlx::query(
+                "UPDATE model_versions SET status = 'ARCHIVED' WHERE model_version = $1 AND status = 'PRODUCTION' AND artifact_checksum = $2",
+            )
+            .bind(&candidate_model_version)
+            .bind(&candidate_artifact_checksum)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("archive rolled back candidate: {error}"))?;
+            if archived_candidate.rows_affected() != 1 {
+                return Err("rollback candidate registry entry changed".to_owned());
+            }
+            let restored_previous = sqlx::query(
+                "UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1 AND status = 'ARCHIVED' AND artifact_checksum = $2",
+            )
+            .bind(&previous_production_model_version)
+            .bind(previous_checksum)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("restore previous production model: {error}"))?;
+            if restored_previous.rows_affected() != 1 {
+                return Err("previous production model changed before rollback".to_owned());
+            }
+        } else {
+            let rejected_candidate = sqlx::query(
+                "UPDATE model_versions SET status = 'REJECTED' WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW') AND artifact_checksum = $2",
+            )
+            .bind(&candidate_model_version)
+            .bind(&candidate_artifact_checksum)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("reject rolled back candidate: {error}"))?;
+            if rejected_candidate.rows_affected() != 1 {
+                return Err("rollback candidate registry entry changed".to_owned());
+            }
+            if let Some(cycle_id) = learning_cycle_id {
+                let rejected_candidate = sqlx::query(
+                    "UPDATE learning_cycle_candidates SET status = 'REJECTED' WHERE learning_cycle_id = $1 AND model_version = $2 AND status IN ('CANARY', 'MONITORING')",
+                )
+                .bind(cycle_id)
+                .bind(&candidate_model_version)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("reject rolled back learning candidate: {error}"))?;
+                if rejected_candidate.rows_affected() != 1 {
+                    return Err("learning candidate changed before rollback".to_owned());
+                }
+                let rejected_cycle = sqlx::query(
+                    "UPDATE learning_cycles SET state = 'REJECTED', decision_note = $2, updated_at = now() WHERE id = $1 AND state IN ('CANARY', 'MONITORING')",
+                )
+                .bind(cycle_id)
+                .bind(reason)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("reject rolled back learning cycle: {error}"))?;
+                if rejected_cycle.rows_affected() != 1 {
+                    return Err("learning cycle changed before rollback".to_owned());
+                }
+            }
+        }
+
+        let rolled_back = sqlx::query(
+            "UPDATE model_rollouts SET status = 'ROLLED_BACK', rollback_triggered_at = COALESCE(rollback_triggered_at, now()), rolled_back_at = now(), rollback_reason = $2 WHERE id = $1 AND status = $3",
+        )
+        .bind(database_id)
+        .bind(reason)
+        .bind(&status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("mark model rollout rolled back: {error}"))?;
+        if rolled_back.rows_affected() != 1 {
+            return Err("model rollout changed before rollback".to_owned());
+        }
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ($1, 'ROLLBACK_MODEL_ROLLOUT', 'model_rollout', $2, $3, $4, $5)")
+            .bind(actor_id)
+            .bind(rollout_id)
+            .bind(request_id)
+            .bind(reason)
+            .bind(json!({
+                "candidate_model_version": candidate_model_version,
+                "previous_production_model_version": previous_production_model_version,
+                "production_pointer_changed": is_full_production,
+                "metrics": {
+                    "canary_ticket_count": metrics.canary_ticket_count,
+                    "canary_decision_count": metrics.canary_decision_count,
+                    "failed_inference_count": metrics.failed_inference_count,
+                    "candidate_correction_rate": metrics.candidate_correction_rate,
+                    "production_correction_rate": metrics.production_correction_rate,
+                    "correction_rate_delta": metrics.correction_rate_delta,
+                },
+            }))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit model rollout rollback: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit model rollout rollback: {error}"))?;
+        Ok(json!({
+            "rollout_id": rollout_id,
+            "status": "ROLLED_BACK",
+            "candidate_model_version": candidate_model_version,
+            "previous_production_model_version": previous_production_model_version,
+            "production_pointer_changed": is_full_production,
+            "current_production_model_version": previous_production_model_version,
             "metrics": {
                 "canary_ticket_count": metrics.canary_ticket_count,
                 "canary_decision_count": metrics.canary_decision_count,

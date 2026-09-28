@@ -2019,6 +2019,10 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/model-rollouts/{rollout_id}/full-production",
             post(complete_model_rollout),
         )
+        .route(
+            "/api/v1/model-rollouts/{rollout_id}/rollback",
+            post(rollback_model_rollout),
+        )
         .layer(middleware::from_fn(request_context))
         .layer(
             CorsLayer::new()
@@ -9099,6 +9103,47 @@ async fn complete_model_rollout(
         })
 }
 
+async fn rollback_model_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(rollout_id): Path<String>,
+    Json(request): Json<CompleteModelRolloutRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    require_auditable_actor(&actor)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.chars().count() > 1000 {
+        return Err(ApiError::BadRequest(
+            "reason must contain 1 to 1000 characters".to_owned(),
+        ));
+    }
+    let repository = state.repository().ok_or_else(|| {
+        ApiError::Unavailable("model rollout rollback requires PostgreSQL storage".to_owned())
+    })?;
+    repository
+        .rollback_model_rollout(
+            &rollout_id,
+            &actor.user_id,
+            reason,
+            &request_id_from_headers(&headers),
+        )
+        .await
+        .map(Json)
+        .map_err(|error| {
+            if error.contains("not found") {
+                ApiError::NotFound(error)
+            } else if error.contains("changed")
+                || error.contains("not active")
+                || error.contains("not verifiable")
+                || error.contains("another model rollout is active")
+            {
+                ApiError::Conflict(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })
+}
+
 async fn openapi() -> Json<Value> {
     Json(json!({
         "openapi": "3.1.0",
@@ -9189,7 +9234,8 @@ async fn openapi() -> Json<Value> {
             "/api/v1/models/{model_id}": { "get": { "summary": "Get model version" } },
             "/api/v1/models/{model_id}/promote": { "post": { "summary": "Reject direct model promotion outside the canary rollout path" } },
             "/api/v1/model-rollouts": { "get": { "summary": "List versioned model rollout status and canary evidence" } },
-            "/api/v1/model-rollouts/{rollout_id}/full-production": { "post": { "summary": "Manually move an eligible canary rollout to full production" } }
+            "/api/v1/model-rollouts/{rollout_id}/full-production": { "post": { "summary": "Manually move an eligible canary rollout to full production" } },
+            "/api/v1/model-rollouts/{rollout_id}/rollback": { "post": { "summary": "Manually restore the previous production model for a canary or completed rollout" } }
         }
     }))
 }
@@ -9795,6 +9841,7 @@ mod tests {
             value["paths"]["/api/v1/model-rollouts/{rollout_id}/full-production"]["post"]
                 .is_object()
         );
+        assert!(value["paths"]["/api/v1/model-rollouts/{rollout_id}/rollback"]["post"].is_object());
         assert!(value["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert!(value["paths"]["/internal/v1/classify"].is_null());
     }
