@@ -1,3 +1,4 @@
+import { localeTag, translateUi } from '../uiSettings'
 import { useEffect, useState } from 'react'
 import { loadAuditLog, type AuditLogPage as AuditLogPageData } from '../api/client'
 
@@ -17,7 +18,7 @@ function auditLoadError(error: unknown): string {
 }
 
 function formatAuditTime(value: string): string {
-  return new Date(value).toLocaleString('ru-RU')
+  return new Date(value).toLocaleString(localeTag())
 }
 
 export function AuditLogPage() {
@@ -58,33 +59,34 @@ export function AuditLogPage() {
       <section className="panel audit-log-panel">
         <div className="panel-heading">
           <div>
-            <h2>События системы</h2>
-            <p className="panel-note">В выдачу входят только учётные поля. Свободный текст и metadata закрыты.</p>
+            <h2>{translateUi("События системы")}</h2>
+            <p className="panel-note">{translateUi("В выдачу входят только учётные поля. Свободный текст и metadata закрыты.")}</p>
           </div>
-          <span className="audit-log-total">{page ? `${total.toLocaleString('ru-RU')} записей` : ' '}</span>
+          <span className="audit-log-total">{page ? `${total.toLocaleString(localeTag())} ${translateUi('записей')}` : ' '}</span>
         </div>
 
-        {loading && <div className="audit-log-state" role="status">Загрузка журнала…</div>}
+        {loading && <div className="audit-log-state" role="status">{translateUi("Загрузка журнала…")}</div>}
         {!loading && error && (
           <div className="audit-log-state" role="alert">
-            <p>{error}</p>
-            <button className="button button-secondary" onClick={() => setReloadVersion((version) => version + 1)}>Повторить</button>
+            <p>{translateUi(error)}</p>
+            <button className="button button-secondary" onClick={() => setReloadVersion((version) => version + 1)}>{translateUi("Повторить")}</button>
           </div>
         )}
         {!loading && !error && page?.items.length === 0 && (
-          <div className="audit-log-state">В журнале пока нет записей.</div>
+          <div className="audit-log-state">{translateUi("В журнале пока нет записей.")}</div>
         )}
         {!loading && !error && page && page.items.length > 0 && (
           <>
-            <div className="audit-log-table-scroll">
+            <p className="audit-scroll-hint">{translateUi('Прокрутите таблицу в сторону, чтобы увидеть остальные столбцы.')}</p>
+            <div className="audit-log-table-scroll" role="region" aria-label={translateUi('Таблица событий аудита')} tabIndex={0}>
               <table className="audit-log-table">
                 <thead>
                   <tr>
-                    <th scope="col">Время</th>
-                    <th scope="col">Субъект</th>
-                    <th scope="col">Действие</th>
-                    <th scope="col">Тип объекта</th>
-                    <th scope="col">ID объекта</th>
+                    <th scope="col">{translateUi("Время")}</th>
+                    <th scope="col">{translateUi("Субъект")}</th>
+                    <th scope="col">{translateUi("Действие")}</th>
+                    <th scope="col">{translateUi("Тип объекта")}</th>
+                    <th scope="col">{translateUi("ID объекта")}</th>
                     <th scope="col">Request ID</th>
                   </tr>
                 </thead>
@@ -103,10 +105,10 @@ export function AuditLogPage() {
               </table>
             </div>
             <div className="audit-log-pagination">
-              <span>Показаны {firstItem}–{lastItem} из {total.toLocaleString('ru-RU')}</span>
+              <span>{translateUi("Показаны")} {firstItem}–{lastItem} {translateUi("из")} {total.toLocaleString(localeTag())}</span>
               <div>
-                <button className="button button-secondary" disabled={!canGoBack} onClick={() => setPageIndex((index) => Math.max(0, index - 1))}>Назад</button>
-                <button className="button button-secondary" disabled={!canGoForward} onClick={() => setPageIndex((index) => index + 1)}>Далее</button>
+                <button className="button button-secondary" disabled={!canGoBack} onClick={() => setPageIndex((index) => Math.max(0, index - 1))}>{translateUi("Назад")}</button>
+                <button className="button button-secondary" disabled={!canGoForward} onClick={() => setPageIndex((index) => index + 1)}>{translateUi("Далее")}</button>
               </div>
             </div>
           </>

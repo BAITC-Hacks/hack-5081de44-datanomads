@@ -4,9 +4,9 @@ import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
 import { buildContextPreviewText, combineRelatedCandidates, mapRelatedFactors, mapTicketChannel, topRelatedCandidates } from '../operator'
+import { readDemoRole, type DemoRole } from '../session'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api/v1').replace(/\/$/, '')
-const API_ROLE = import.meta.env.VITE_PULSE_ROLE ?? 'ADMIN'
 const DEMO_ENABLED = import.meta.env.VITE_PULSE_DEMO === 'true'
 
 export interface ApiResult<T> {
@@ -40,9 +40,11 @@ function queryString(filters: DashboardFilters) {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const role = readDemoRole()
+  if (!role) throw new Error('Выберите тестовый аккаунт')
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
-    headers: { Accept: 'application/json', 'X-Pulse-Role': API_ROLE, 'X-User-Id': 'pulse-web', ...options?.headers },
+    headers: { Accept: 'application/json', 'X-Pulse-Role': role, 'X-User-Id': `pulse-demo-${role.toLowerCase()}`, ...options?.headers },
   })
   if (!response.ok) {
     throw new Error(`API ${response.status}`)
@@ -719,7 +721,7 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
   }
 }
 
-async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardData> {
+async function loadApiDashboard(filters: DashboardFilters, role: DemoRole): Promise<DashboardData> {
   const analyticsQuery = queryString(filters)
   const forecastRequest = {
     horizon: filters.forecastHorizon ?? 30,
@@ -731,26 +733,30 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     channel: filters.channel,
   }
   const alertsQuery = filters.regionId ? `?region_id=${encodeURIComponent(filters.regionId)}` : ''
+  const emptyAnalytics: BackendAnalytics = { overview: { total_tickets: 0, open_tickets: 0, resolved_tickets: 0, high_priority_tickets: 0 }, by_region: [], by_topic: [], time_series: [] }
+  const emptyForecast: BackendForecast = { points: [], model_version: '', capacity_assessment: { status: 'DATA_UNAVAILABLE', missing_inputs: [] } }
   const [ticketResponse, analytics, forecast, alertsResponse, learning, models, driftTriggers, taxonomy, datasetProvenance] = await Promise.all([
-    request<{ items: BackendTicket[] }>('/tickets?limit=50'),
-    request<BackendAnalytics>(`/analytics?${analyticsQuery}`),
-    request<BackendForecast>('/forecast/reforecast', {
+    role === 'OPERATOR' ? request<{ items: BackendTicket[] }>('/tickets?limit=50') : Promise.resolve({ items: [] }),
+    role === 'MANAGER' ? request<BackendAnalytics>(`/analytics?${analyticsQuery}`) : Promise.resolve(emptyAnalytics),
+    role === 'MANAGER' ? request<BackendForecast>('/forecast/reforecast', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(forecastRequest),
-    }),
-    request<BackendAlerts>(`/alerts${alertsQuery}`),
-    request<BackendLearning>('/learning'),
-    request<BackendModels>('/models'),
-    request<BackendDriftTriggers>('/learning/drift-triggers?limit=50'),
-    request<BackendTaxonomy>('/taxonomy'),
-    request<DatasetProvenance>('/datasets/provenance'),
+    }) : Promise.resolve(emptyForecast),
+    role === 'MANAGER' ? request<BackendAlerts>(`/alerts${alertsQuery}`) : Promise.resolve({ items: [] }),
+    role === 'ML_REVIEWER' ? request<BackendLearning>('/learning') : Promise.resolve({} as BackendLearning),
+    role === 'ML_REVIEWER' ? request<BackendModels>('/models') : Promise.resolve({ items: [] }),
+    role === 'ML_REVIEWER' ? request<BackendDriftTriggers>('/learning/drift-triggers?limit=50') : Promise.resolve({ items: [], total: 0, limit: 50, offset: 0, can_review: false }),
+    role !== 'ML_REVIEWER' ? request<BackendTaxonomy>('/taxonomy') : Promise.resolve({ regions: [], topics: [], services: [] } as BackendTaxonomy),
+    role !== 'ML_REVIEWER' ? request<DatasetProvenance>('/datasets/provenance') : Promise.resolve(undefined),
   ])
   const detailResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendTicketDetail>(`/tickets/${encodeURIComponent(ticket.id)}`)))
   const previewResults = await Promise.all(ticketResponse.items.map((ticket) => request<BackendAssistPreview>('/assist/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticket_id: ticket.id }) })))
   const tickets = ticketResponse.items.map((ticket, index) => mapBackendTicket(ticket, detailResults[index], ticketResponse.items, previewResults[index]))
+  const operatorDecisionCount = tickets.filter((ticket) => ticket.status === 'confirmed' || ticket.status === 'corrected').length
+  const operatorConfirmedCount = tickets.filter((ticket) => ticket.status === 'confirmed').length
   const regions: RegionMetric[] = analytics.by_region.map((region) => ({ id: region.id, name: region.label, tickets: region.tickets, previousTickets: region.change_abs == null ? undefined : Math.max(0, region.tickets - region.change_abs), changeAbs: region.change_abs, change: region.change_pct }))
-  const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0 || (topic.change_abs != null && topic.change_abs < 0)).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), tickets: topic.tickets, previousTickets: topic.change_abs == null ? undefined : Math.max(0, topic.tickets - topic.change_abs), changeAbs: topic.change_abs, change: topic.change_pct, color: ['#8cf0c8', '#a7d9ff', '#f8d488', '#d2b5ff', '#ff9d9d'][index % 5] }))
+  const topics: TopicMetric[] = analytics.by_topic.filter((topic) => topic.tickets > 0 || (topic.change_abs != null && topic.change_abs < 0)).map((topic, index) => ({ id: topic.id, name: topic.label, value: Math.round((topic.tickets / Math.max(1, analytics.overview.total_tickets)) * 100), tickets: topic.tickets, previousTickets: topic.change_abs == null ? undefined : Math.max(0, topic.tickets - topic.change_abs), changeAbs: topic.change_abs, change: topic.change_pct, color: ['oklch(58% .18 255)', 'oklch(62% .14 155)', 'oklch(70% .16 80)', 'oklch(62% .13 300)', 'oklch(61% .19 25)'][index % 5] }))
   const alerts: Alert[] = alertsResponse.items.map((alert) => {
     const region = taxonomy.regions.find((item) => item.id === alert.region_id)?.label ?? alert.region_id
     const topic = taxonomy.topics.find((item) => item.id === alert.topic_id)?.label ?? alert.topic_id
@@ -869,13 +875,13 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   return {
     tickets,
     overview: {
-      totalTickets: analytics.overview.total_tickets,
-      openTickets: analytics.overview.open_tickets,
-      resolvedTickets: analytics.overview.resolved_tickets,
-      highPriorityTickets: analytics.overview.high_priority_tickets,
-      operatorDecisions: analytics.overview.operator_decisions ?? 0,
-      confirmedDecisions: analytics.overview.confirmed_decisions ?? 0,
-      correctedDecisions: analytics.overview.corrected_decisions ?? 0,
+      totalTickets: role === 'OPERATOR' ? tickets.length : analytics.overview.total_tickets,
+      openTickets: role === 'OPERATOR' ? tickets.filter((ticket) => ticket.status === 'new').length : analytics.overview.open_tickets,
+      resolvedTickets: role === 'OPERATOR' ? operatorDecisionCount : analytics.overview.resolved_tickets,
+      highPriorityTickets: role === 'OPERATOR' ? tickets.filter((ticket) => ticket.priority === 'Критический' || ticket.priority === 'Высокий').length : analytics.overview.high_priority_tickets,
+      operatorDecisions: role === 'OPERATOR' ? operatorDecisionCount : analytics.overview.operator_decisions ?? 0,
+      confirmedDecisions: role === 'OPERATOR' ? operatorConfirmedCount : analytics.overview.confirmed_decisions ?? 0,
+      correctedDecisions: role === 'OPERATOR' ? operatorDecisionCount - operatorConfirmedCount : analytics.overview.corrected_decisions ?? 0,
       changeAbs: analytics.overview.change_abs ?? 0,
       previousTotalTickets: analytics.overview.previous_total_tickets,
       avgDecisionMinutes: analytics.overview.avg_decision_minutes ?? undefined,
@@ -923,9 +929,9 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   }
 }
 
-export async function loadDashboard(filters: DashboardFilters = { range: '7d' }): Promise<ApiResult<DashboardData>> {
+export async function loadDashboard(filters: DashboardFilters = { range: '7d' }, role: DemoRole): Promise<ApiResult<DashboardData>> {
   try {
-    return { data: await loadApiDashboard(filters), source: 'api' }
+    return { data: await loadApiDashboard(filters, role), source: 'api' }
   } catch (error) {
     if (!DEMO_ENABLED) throw error
     return {
@@ -937,10 +943,44 @@ export async function loadDashboard(filters: DashboardFilters = { range: '7d' })
 }
 
 export function subscribeToAlertChanges(onChange: () => void): () => void {
-  const events = new EventSource(`${API_BASE}/events`, { withCredentials: true })
-  events.addEventListener('alerts.changed', onChange)
-  events.addEventListener('alerts.resync', onChange)
-  return () => events.close()
+  const controller = new AbortController()
+  const role = readDemoRole()
+  if (role !== 'MANAGER') return () => controller.abort()
+
+  const readEvents = async () => {
+    while (!controller.signal.aborted) {
+      try {
+        const response = await fetch(`${API_BASE}/events`, {
+          headers: { Accept: 'text/event-stream', 'X-Pulse-Role': role, 'X-User-Id': 'pulse-demo-manager' },
+          signal: controller.signal,
+        })
+        if (!response.ok || !response.body) throw new Error(`Alert stream ${response.status}`)
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+        let pending = ''
+        while (!controller.signal.aborted) {
+          const { value, done } = await reader.read()
+          if (done) break
+          pending = (pending + value).replace(/\r\n/g, '\n')
+          const messages = pending.split('\n\n')
+          pending = messages.pop() ?? ''
+          for (const message of messages) {
+            if (/^event: alerts\.(changed|resync)$/m.test(message)) onChange()
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) console.warn('Alert stream unavailable', error)
+      }
+      if (!controller.signal.aborted) {
+        await new Promise<void>((resolve) => {
+          const onAbort = () => { window.clearTimeout(timeout); resolve() }
+          const timeout = window.setTimeout(() => { controller.signal.removeEventListener('abort', onAbort); resolve() }, 5000)
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+        })
+      }
+    }
+  }
+  void readEvents()
+  return () => controller.abort()
 }
 
 export async function loadTickets(): Promise<ApiResult<Ticket[]>> {
@@ -1288,6 +1328,24 @@ export function reportUrl(format: 'pdf' | 'xlsx', filters: DashboardFilters = { 
   return `${API_BASE}/analytics/export.${format}?${queryString(filters)}`
 }
 
+export async function downloadReport(format: 'pdf' | 'xlsx', filters: DashboardFilters): Promise<void> {
+  const role = readDemoRole()
+  if (role !== 'MANAGER') throw new Error('Для выгрузки нужна роль руководителя')
+  const response = await fetch(reportUrl(format, filters), {
+    headers: { 'X-Pulse-Role': role, 'X-User-Id': `pulse-demo-${role.toLowerCase()}` },
+  })
+  if (!response.ok) throw new Error(`API ${response.status}`)
+  const blob = await response.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `pulse109-report.${format}`
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 export async function loadAnalyticsDrilldown(dimension: DrilldownDimension, value: string | undefined, filters: DashboardFilters = { range: '30d' }) {
   const params = new URLSearchParams(queryString(filters))
   params.set('dimension', dimension)
@@ -1391,13 +1449,28 @@ export interface QueryIntentFilterValues {
   group_by?: string
 }
 
+type SupportedQueryIntent = 'count' | 'trend' | 'compare_regions' | 'top_topics' | 'spikes' | 'forecast'
+
+function kazakhQueryIntent(question: string): SupportedQueryIntent | null {
+  const text = question.toLocaleLowerCase('kk-KZ')
+  if (/болжам|болжа/.test(text)) return 'forecast'
+  if (/күрт өс|шұғыл өс|ауытқу|аномали|шарықтау/.test(text)) return 'spikes'
+  if (/динамика|үрдіс|өзгеріс|өзгеру/.test(text)) return 'trend'
+  if (/өңір|облыс|аймақ|салыстыр/.test(text)) return 'compare_regions'
+  if (/тақырып|санат/.test(text)) return 'top_topics'
+  if (/қанша|саны|көлемі/.test(text)) return 'count'
+  return null
+}
+
 export async function runQueryIntent(text: string, filters: DashboardFilters = { range: '30d' }) {
+  const question = text.trim()
+  const intent = kazakhQueryIntent(question)
   try {
     return await request<QueryIntentResult>('/analytics/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        text: text.trim(),
+        ...(intent ? { intent } : { text: question }),
         range: filters.range,
         region_id: filters.regionId,
         topic_id: filters.topicId,
@@ -1411,7 +1484,7 @@ export async function runQueryIntent(text: string, filters: DashboardFilters = {
           channel: filters.channel,
         },
         limit: 100,
-        ...(/прогноз|forecast/i.test(text) ? { horizon_days: filters.forecastHorizon ?? 30 } : {}),
+        ...(intent === 'forecast' || /прогноз|forecast/i.test(question) ? { horizon_days: filters.forecastHorizon ?? 30 } : {}),
       }),
     })
   } catch (error: unknown) {
