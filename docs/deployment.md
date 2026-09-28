@@ -67,7 +67,9 @@ ML endpoints. Сервисы внутри Compose продолжают обра�
 Перед внешним доступом необходимо:
 
 1. заменить demo password и все placeholder secrets через secret manager;
-2. ограничить `CORS_ALLOWED_ORIGINS` и network ingress; Compose host ports уже
+2. задать точный список browser origins в `CORS_ALLOWED_ORIGINS` (через запятую
+   для нескольких origin); wildcard запрещён, пустой список отключает CORS.
+   По умолчанию разрешён только `http://localhost:8080`, а Compose host ports
    привязаны к `127.0.0.1`;
 3. включить TLS перед Nginx (или доверенный ingress) и проверить forwarded
    headers;

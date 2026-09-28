@@ -9,6 +9,63 @@ use tokio_stream::StreamExt;
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn cors_only_allows_configured_origins() {
+    let application = app(AppState::demo());
+    let preflight = application
+        .clone()
+        .oneshot(
+            Request::options("/api/v1/tickets")
+                .header("origin", "http://localhost:8080")
+                .header("access-control-request-method", "GET")
+                .header("access-control-request-headers", "x-pulse-role")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(preflight.status(), 200);
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
+        "http://localhost:8080"
+    );
+
+    let denied = application
+        .oneshot(
+            Request::get("/api/v1/tickets")
+                .header("origin", "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(denied
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none());
+
+    let mut cors_disabled_state = AppState::demo();
+    cors_disabled_state.config.cors_allowed_origins.clear();
+    let cors_disabled = app(cors_disabled_state)
+        .oneshot(
+            Request::get("/api/v1/tickets")
+                .header("origin", "http://localhost:8080")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(cors_disabled
+        .headers()
+        .get("access-control-allow-origin")
+        .is_none());
+}
+
+#[tokio::test]
 async fn demo_api_supports_preview_and_manager_analytics() {
     let application = app(AppState::demo());
     let preview = application

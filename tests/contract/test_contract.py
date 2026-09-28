@@ -96,6 +96,104 @@ class ContractArtifactTests(unittest.TestCase):
         self.assertIn("p50=12.500ms", latency_check.detail)
         self.assertIn("p95=20.000ms", latency_check.detail)
 
+    def test_log_schema_checks_request_events_not_startup_records(self):
+        fields = {
+            "timestamp": "2026-09-27T00:00:00Z",
+            "level": "INFO",
+            "request_id": "internal-1",
+            "trace_id": "trace-safe",
+            "service": "pulse109-core",
+            "endpoint": "/api/v1/tickets",
+            "latency_ms": 12.5,
+            "model_version": "n/a",
+            "status": 200,
+            "error_code": "none",
+            "message": "request_completed",
+        }
+        startup = {"message": "service_ready", "service": "pulse109-core"}
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "requests.jsonl"
+            log_path.write_text(
+                "\n".join(json.dumps(event) for event in (startup, fields)),
+                encoding="utf-8",
+            )
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=True)
+
+        schema_check = next(check for check in checks if check.name == "structured JSON observability fields")
+        self.assertTrue(schema_check.ok, schema_check.detail)
+        self.assertIn("1 request events", schema_check.detail)
+
+    def test_log_schema_rejects_request_events_missing_required_fields(self):
+        event = {
+            "message": "request_completed",
+            "latency_ms": 10.0,
+            "service": "pulse109-core",
+            "endpoint": "/api/v1/tickets",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "requests.jsonl"
+            log_path.write_text(json.dumps(event), encoding="utf-8")
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=True)
+
+        schema_check = next(check for check in checks if check.name == "structured JSON observability fields")
+        self.assertFalse(schema_check.ok)
+        self.assertIn("missing required fields", schema_check.detail)
+
+    def test_strict_log_schema_allows_only_known_uvicorn_startup_lines(self):
+        fields = {
+            "timestamp": "2026-09-27T00:00:00Z",
+            "level": "INFO",
+            "request_id": "internal-1",
+            "trace_id": "trace-safe",
+            "service": "pulse109-ml",
+            "endpoint": "/internal/v1/classify",
+            "latency_ms": 12.5,
+            "model_version": "classifier-demo-v1",
+            "status": 200,
+            "error_code": "none",
+            "message": "request_completed",
+        }
+        startup_lines = (
+            "INFO:     Started server process [1]",
+            "INFO:     Waiting for application startup.",
+            "INFO:     Application startup complete.",
+            "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "requests.jsonl"
+            log_path.write_text(
+                "\n".join((*startup_lines, json.dumps(fields))),
+                encoding="utf-8",
+            )
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=True)
+
+        schema_check = next(check for check in checks if check.name == "structured JSON observability fields")
+        self.assertTrue(schema_check.ok, schema_check.detail)
+        self.assertIn("allowed Uvicorn startup lines=4", schema_check.detail)
+
+    def test_strict_log_schema_rejects_unrecognized_plain_text(self):
+        fields = {
+            "timestamp": "2026-09-27T00:00:00Z",
+            "level": "INFO",
+            "request_id": "internal-1",
+            "trace_id": "trace-safe",
+            "service": "pulse109-core",
+            "endpoint": "/api/v1/tickets",
+            "latency_ms": 12.5,
+            "model_version": "n/a",
+            "status": 200,
+            "error_code": "none",
+            "message": "request_completed",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "requests.jsonl"
+            log_path.write_text("unexpected plain text\n" + json.dumps(fields), encoding="utf-8")
+            checks = self.smoke.check_log_file(log_path, self.manifest, strict_schema=True)
+
+        schema_check = next(check for check in checks if check.name == "structured JSON observability fields")
+        self.assertFalse(schema_check.ok)
+        self.assertIn("non-JSON lines", schema_check.detail)
+
     def test_log_check_rejects_nonfinite_latency(self):
         event = {
             "timestamp": "2026-09-27T00:00:00Z",

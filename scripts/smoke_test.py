@@ -40,6 +40,15 @@ from typing import Any, Mapping, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "contract" / "contract_manifest.json"
 DEFAULT_FIXTURE = ROOT / "tests" / "fixtures" / "deterministic_demo.json"
+# Uvicorn writes fixed process-start notices outside the app's JSON formatter.
+UVICORN_STARTUP_LOG_PATTERNS = (
+    re.compile(r"INFO:\s+Started server process \[\d+\]"),
+    re.compile(r"INFO:\s+Waiting for application startup\."),
+    re.compile(r"INFO:\s+Application startup complete\."),
+    re.compile(
+        r"INFO:\s+Uvicorn running on http://[^\s]+ \(Press CTRL\+C to quit\)"
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -612,6 +621,10 @@ def finite_latency_ms(value: Any) -> float | None:
     return latency if math.isfinite(latency) and latency >= 0 else None
 
 
+def is_uvicorn_startup_log(line: str) -> bool:
+    return any(pattern.fullmatch(line) for pattern in UVICORN_STARTUP_LOG_PATTERNS)
+
+
 def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bool) -> list[Check]:
     if not path.is_file():
         return [Check("PII log file exists", False, f"missing {path}")]
@@ -635,6 +648,8 @@ def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bo
     safe_latency_groups = [field for field in latency_groups if field in allowed_latency_groups]
     missing: set[str] = set()
     non_json_lines = 0
+    uvicorn_startup_lines = 0
+    request_event_count = 0
     valid_latencies = 0
     invalid_latencies = 0
     latency_samples: dict[tuple[str, ...], list[float]] = {}
@@ -644,12 +659,16 @@ def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bo
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
-            non_json_lines += 1
+            if is_uvicorn_startup_log(line):
+                uvicorn_startup_lines += 1
+            else:
+                non_json_lines += 1
             continue
         if isinstance(event, dict):
-            missing.update(required - set(event))
             if event.get("message") not in {"request_completed", "request_failed"}:
                 continue
+            request_event_count += 1
+            missing.update(required - set(event))
             latency = finite_latency_ms(event.get("latency_ms"))
             if (
                 latency is not None
@@ -662,14 +681,34 @@ def check_log_file(path: Path, manifest: Mapping[str, Any], *, strict_schema: bo
             else:
                 invalid_latencies += 1
     if strict_schema:
-        ok = bool(content.strip()) and non_json_lines == 0 and not missing
-        detail = "structured JSON fields present" if ok else "logs contain non-JSON lines or missing required fields"
+        ok = (
+            bool(content.strip())
+            and non_json_lines == 0
+            and request_event_count > 0
+            and not missing
+        )
+        if ok:
+            detail = (
+                f"required fields present on {request_event_count} request events; "
+                f"allowed Uvicorn startup lines={uvicorn_startup_lines}"
+            )
+        elif non_json_lines:
+            detail = f"logs contain {non_json_lines} non-JSON lines"
+        elif request_event_count == 0:
+            detail = "logs contain no request_completed/request_failed events"
+        else:
+            detail = "request events are missing required fields: " + ", ".join(sorted(missing))
     else:
         # A log file may contain startup text from a local supervisor.  The
         # PII assertion remains strict while schema validation is informative.
         ok = True
-        detail = "schema advisory: " + (
-            "missing " + ", ".join(sorted(missing)) if missing else "required fields observed"
+        detail = (
+            f"schema advisory: request events={request_event_count}; "
+            + (
+                "missing " + ", ".join(sorted(missing))
+                if missing
+                else "all required request fields observed"
+            )
         )
     checks.append(Check("structured JSON observability fields", ok, detail))
     latency_ok = (
@@ -961,7 +1000,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="capture Core and ML container logs after live probes, before scanning",
     )
-    parser.add_argument("--strict-logs", action="store_true", help="fail on non-JSON log lines/missing fields")
+    parser.add_argument(
+        "--strict-logs",
+        action="store_true",
+        help="fail on unrecognized non-JSON lines or request events missing required fields",
+    )
     parser.add_argument(
         "--pii-probe",
         action="store_true",

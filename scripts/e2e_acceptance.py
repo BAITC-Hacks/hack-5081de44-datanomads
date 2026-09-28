@@ -1098,6 +1098,7 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
     )
     expect(status == 201, f"learning cycle creation failed: {cycle}")
     cycle_id = str(cycle["id"])
+    cycle_reference = str(cycle["cycle_id"])
     status, _, forbidden_learning = json_request(
         base_url,
         "GET",
@@ -1163,14 +1164,22 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             cycle_record.get("state") == "EVALUATE",
             f"normal worker reached neither EVALUATE nor the documented post-handoff blocker: {cycle_record}",
         )
-    evaluation: dict[str, Any] = {}
-    for _ in range(40):
-        time.sleep(0.5)
-        status, _, evaluation = json_request(base_url, "GET", "/api/v1/learning/candidate/evaluation", role="ML_REVIEWER", timeout=timeout)
-        expect(status == 200, f"candidate evaluation read failed: HTTP {status}")
-        if evaluation.get("state") != "TRAINING":
-            break
-    expect(evaluation.get("state") == "EVALUATE", f"normal worker did not start the evaluation window: {evaluation}")
+    status, _, evaluation = json_request(
+        base_url,
+        "GET",
+        "/api/v1/learning/candidate/evaluation",
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    expect(status == 200, f"candidate evaluation read failed: HTTP {status}")
+    evaluation_window = evaluation.get("evaluation_set") or {}
+    expect(
+        evaluation.get("cycle_id") == cycle_reference
+        and evaluation.get("status") == "PENDING"
+        and bool(evaluation_window.get("window_started_at"))
+        and bool(evaluation_window.get("window_ended_at")),
+        f"candidate evaluation did not report its open shadow window: {evaluation}",
+    )
 
     if not fake_trainer:
         status, _, shadow_ticket = json_request(
@@ -1262,7 +1271,7 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             break
         time.sleep(0.5)
     expect(
-        evaluation.get("cycle_id") == cycle_id
+        evaluation.get("cycle_id") == cycle_reference
         and evaluation.get("status") in {"COMPLETED", "FAILED"},
         f"candidate evaluation job did not produce a terminal result: {evaluation}",
     )

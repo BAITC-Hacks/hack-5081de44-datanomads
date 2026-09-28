@@ -99,6 +99,8 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub dev_auth: bool,
+    // Demo callers choose their own role header, so browsers need an exact origin allowlist.
+    pub cors_allowed_origins: Vec<axum::http::HeaderValue>,
     pub storage: String,
     pub learning_cycle_duration_hours: i32,
     pub learning_min_feedback_count: i32,
@@ -114,6 +116,9 @@ impl Default for Config {
             host: "0.0.0.0".to_owned(),
             port: 8080,
             dev_auth: true,
+            cors_allowed_origins: vec![axum::http::HeaderValue::from_static(
+                "http://localhost:8080",
+            )],
             storage: "memory".to_owned(),
             learning_cycle_duration_hours: DEFAULT_LEARNING_CYCLE_DURATION_HOURS,
             learning_min_feedback_count: DEFAULT_LEARNING_MIN_FEEDBACK_COUNT,
@@ -159,6 +164,12 @@ impl Config {
             is_demo_environment,
         )
         .unwrap_or_else(|error| panic!("{error}"));
+        let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS").ok();
+        let cors_allowed_origins = parse_cors_allowed_origins(
+            cors_allowed_origins.as_deref(),
+            &defaults.cors_allowed_origins,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         Self {
             host: env::var("PULSE_HOST").unwrap_or(defaults.host),
             port: env::var("PULSE_PORT")
@@ -166,6 +177,7 @@ impl Config {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(defaults.port),
             dev_auth,
+            cors_allowed_origins,
             storage,
             learning_cycle_duration_hours: parse_learning_cycle_duration_hours(
                 defaults.learning_cycle_duration_hours,
@@ -188,6 +200,72 @@ impl Config {
             .filter(|value| !value.is_empty()),
             alert_detector: AlertDetectorConfig::from_env(),
         }
+    }
+}
+
+fn parse_cors_allowed_origins(
+    configured_origins: Option<&str>,
+    default_origins: &[axum::http::HeaderValue],
+) -> Result<Vec<axum::http::HeaderValue>, String> {
+    let Some(configured_origins) = configured_origins else {
+        return Ok(default_origins.to_vec());
+    };
+
+    configured_origins
+        .split(',')
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| {
+            if origin == "*" {
+                return Err("CORS_ALLOWED_ORIGINS must not contain a wildcard".to_owned());
+            }
+            origin
+                .parse::<axum::http::HeaderValue>()
+                .map_err(|_| "CORS_ALLOWED_ORIGINS contains an invalid origin".to_owned())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod cors_config_tests {
+    use super::parse_cors_allowed_origins;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn cors_origins_default_to_the_local_application_origin() {
+        let defaults = [HeaderValue::from_static("http://localhost:8080")];
+
+        let origins = parse_cors_allowed_origins(None, &defaults).unwrap();
+
+        assert_eq!(origins, defaults);
+    }
+
+    #[test]
+    fn cors_origins_accept_an_explicit_list_and_empty_disables_cross_origin_access() {
+        let defaults = [HeaderValue::from_static("http://localhost:8080")];
+
+        let origins = parse_cors_allowed_origins(
+            Some(" https://pulse.example , http://localhost:5174 "),
+            &defaults,
+        )
+        .unwrap();
+        assert_eq!(
+            origins,
+            [
+                HeaderValue::from_static("https://pulse.example"),
+                HeaderValue::from_static("http://localhost:5174"),
+            ]
+        );
+        assert!(parse_cors_allowed_origins(Some("  , "), &defaults)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn cors_origins_reject_a_wildcard() {
+        let defaults = [HeaderValue::from_static("http://localhost:8080")];
+
+        assert!(parse_cors_allowed_origins(Some("http://localhost:8080, *"), &defaults).is_err());
     }
 }
 
@@ -1883,6 +1961,20 @@ impl Store {
 /// Build the application router.  This function is public so integration
 /// tests and local tooling can exercise the API without binding a TCP port.
 pub fn app(state: AppState) -> Router {
+    let cors_allowed_origins = state.config.cors_allowed_origins.clone();
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers([
+            header::HeaderName::from_static("x-request-id"),
+            header::HeaderName::from_static("x-trace-id"),
+        ]);
+    let cors = if cors_allowed_origins.is_empty() {
+        cors
+    } else {
+        cors.allow_origin(tower_http::cors::AllowOrigin::list(cors_allowed_origins))
+    };
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -2024,16 +2116,7 @@ pub fn app(state: AppState) -> Router {
             post(rollback_model_rollout),
         )
         .layer(middleware::from_fn(request_context))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-                .allow_headers(tower_http::cors::Any)
-                .expose_headers([
-                    header::HeaderName::from_static("x-request-id"),
-                    header::HeaderName::from_static("x-trace-id"),
-                ]),
-        )
+        .layer(cors)
         .with_state(state)
 }
 

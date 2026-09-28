@@ -116,6 +116,11 @@ ticket text и свободную заметку оператора. Получ�
    `PRODUCTION`, а прежний champion архивируется в одной транзакции. Reject
    завершает все candidate links этого цикла и не меняет production pointer.
 
+Promotion остаётся одним явным шагом `ML_REVIEWER` или `ADMIN` с обязательным
+audit event. Текущая policy не требует независимого второго согласования, поэтому
+demo не добавляет многошаговый approval workflow до появления такого
+операционного требования.
+
 Постоянный `TRAIN_CLASSIFIER` job обучает отдельный candidate из immutable
 dataset artifact. Inline-sample training endpoint остаётся
 `TRAINER_NOT_CONFIGURED`, если включён только deterministic baseline. Тестовый
