@@ -109,6 +109,11 @@ Promotion требует:
 4. критические regressions просмотрены;
 5. human reviewer с `ML_REVIEWER` или `ADMIN` подтвердил решение.
 
+Дополнительные reviewer roles или независимый второй approval не вводятся:
+контракт задаёт одну явную человеческую ответственность после policy gates, а
+отдельная роль для separation of duties не определена. API проверяет роль и
+аудирует каждый model decision с actor и причиной.
+
 Несколько candidate versions могут проходить shadow и evaluation в рамках одного
 learning cycle. Они сравниваются на общем frozen holdout, при этом каждая имеет
 собственные offline/shadow metrics и gates. Candidate не заменяет production
