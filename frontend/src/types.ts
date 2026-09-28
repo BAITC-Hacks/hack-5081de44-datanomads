@@ -402,7 +402,7 @@ export interface ModelStatus {
 
 export interface LearningCycle {
   id: string
-  stage: 'COLLECT' | 'TRAIN' | 'TRAINING_FAILED' | 'EVALUATE' | 'DECISION' | 'PROMOTED' | 'REJECTED' | 'INSUFFICIENT_FEEDBACK' | 'DATASET_BUILD_FAILED'
+  stage: 'COLLECT' | 'TRAIN' | 'TRAINING_FAILED' | 'EVALUATE' | 'DECISION' | 'CANARY' | 'MONITORING' | 'PROMOTED' | 'REJECTED' | 'INSUFFICIENT_FEEDBACK' | 'DATASET_BUILD_FAILED'
   dataset: string
   feedbackCount: number
   candidate: string

@@ -391,6 +391,30 @@ interface BackendAlerts { source?: string; items: BackendAlert[]; total?: number
 interface BackendLearningCycle { id: string; cycle_id: string; state: string; dataset_version: string; candidate_model_version: string; collect_started_at: string; collect_ends_at: string; evaluation_started_at: string | null; evaluation_ends_at: string | null; shadow_prediction_count: number; shadow_inference_failures: number; shadow_operator_decision_count: number; blind_ab_enabled: boolean; production_model_version: string | null; frozen_evaluation_dataset_version: string | null; candidate_dataset_checksum: string | null; min_feedback_count: number; promotion_policy_version: string; manual_close_enabled: boolean; feedback_count: number; updated_at: string; decision_note?: string; metrics: { macro_f1?: number | null; accuracy?: number | null; evaluated_samples?: number } }
 interface BackendLearning { source?: string; items?: BackendLearningCycle[]; active_cycle?: BackendLearningCycle; production_model?: { id: string; status: string }; controlled_loop?: Record<string, unknown> }
 interface BackendModels { source?: string; items: Array<{ id: string; model_family: string; status: string; metrics: { macro_f1: number | null; accuracy: number | null }; created_at: string }> }
+export interface BackendModelRollout {
+  rollout_id: string
+  rollout_version: number
+  learning_cycle_id?: number | null
+  candidate_model_version: string
+  previous_production_model_version: string
+  canary_traffic_percent: number
+  policy_version: string
+  policy_snapshot: Record<string, unknown>
+  status: 'CANARY' | 'MONITORING' | 'FULL_PRODUCTION' | 'ROLLED_BACK' | 'CANCELLED'
+  created_at: string
+  monitoring_started_at?: string | null
+  full_production_at?: string | null
+  metrics: {
+    canary_ticket_count: number
+    canary_decision_count: number
+    failed_inference_count: number
+    candidate_correction_rate?: number | null
+    production_correction_rate?: number | null
+    correction_rate_delta?: number | null
+  }
+  full_rollout_eligible: boolean
+  blocking_gates: string[]
+}
 interface BackendDriftTriggers { items: DriftTrigger[]; total: number; limit: number; offset: number; can_review: boolean }
 export interface CandidateEvaluation {
   schema_version: 'candidate-evaluation.v1'
@@ -489,6 +513,10 @@ function mapLearningStage(value: string): LearningCycle['stage'] {
       return 'EVALUATE'
     case 'DECISION':
       return 'DECISION'
+    case 'CANARY':
+      return 'CANARY'
+    case 'MONITORING':
+      return 'MONITORING'
     case 'PROMOTED':
       return 'PROMOTED'
     case 'REJECTED':
@@ -1202,6 +1230,24 @@ export async function promoteCandidate(note?: string, candidateModelVersion?: st
       note: note?.trim() || undefined,
       candidate_model_version: candidateModelVersion?.trim() || undefined,
     }),
+  })
+}
+
+export async function loadModelRollouts() {
+  return request<{ items: BackendModelRollout[]; total: number }>('/model-rollouts')
+}
+
+export async function completeModelRollout(rolloutId: string, reason: string) {
+  return request<{
+    rollout_id: string
+    status: 'FULL_PRODUCTION'
+    candidate_model_version: string
+    previous_production_model_version: string
+    metrics: BackendModelRollout['metrics']
+  }>(`/model-rollouts/${encodeURIComponent(rolloutId)}/full-production`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason.trim() }),
   })
 }
 

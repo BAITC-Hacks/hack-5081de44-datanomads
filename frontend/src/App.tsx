@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, registerLearningCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
-import type { AnalyticsDrilldownTicket, CandidateEvaluation, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, completeModelRollout, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadModelRollouts, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, registerLearningCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import type { AnalyticsDrilldownTicket, BackendModelRollout, CandidateEvaluation, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
@@ -1954,11 +1954,11 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         setCandidateVersionInput('')
         onToast(`Кандидат ${result.candidate_model_version} зарегистрирован до начала общего shadow-окна`)
       } else if (action === 'promote' || action === 'reject') {
-        if (!window.confirm(action === 'promote' ? 'Продвинуть candidate в production?' : 'Отклонить candidate?')) return
+        if (!window.confirm(action === 'promote' ? 'Запустить candidate на 10% трафика для canary-наблюдения?' : 'Отклонить candidate?')) return
         const result = action === 'promote'
           ? await promoteCandidate(note, selectedCandidateVersion)
           : await rejectCandidate(note)
-        onToast(result.state === 'PROMOTED' ? 'Candidate продвинут в production' : 'Candidate отклонён; production не изменён')
+        onToast(action === 'promote' ? 'Canary запущен на 10% трафика; production pointer не изменён' : 'Candidate отклонён; production не изменён')
         setNote('')
       }
       await onRefresh()
@@ -2040,6 +2040,7 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         {learning.stage === 'COLLECT' && learning.id !== 'нет данных' && !canCloseCollect && <p className="panel-note">Сбор завершится автоматически по окончании окна COLLECT.</p>}
         {learning.stage === 'EVALUATE' && learning.id !== 'нет данных' && <button className="button button-primary" disabled={busy !== null || !canCloseEvaluation} onClick={() => void runAction('close')}>{busy === 'close' ? 'Закрываем…' : 'Закрыть окно evaluation'}</button>}
         {learning.stage === 'EVALUATE' && learning.id !== 'нет данных' && !canCloseEvaluation && <p className="panel-note">Shadow evaluation завершится автоматически по окончании окна.</p>}
+        {['CANARY', 'MONITORING'].includes(learning.stage) && <p className="panel-note">Candidate обслуживает 10% обращений в canary. Production pointer пока прежний; наблюдайте evidence на странице «Реестр моделей».</p>}
         {!learning.blindAbEnabled && <p className="panel-note">Слепое сравнение A/B отключено; предпочтения не собираются.</p>}
         {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK', 'DATASET_BUILD_FAILED', 'TRAINING_FAILED'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <button className="button button-secondary" disabled={busy !== null} onClick={() => void runAction('evaluation')}>{busy === 'evaluation' ? 'Читаем…' : 'Показать evaluation'}</button>}
@@ -2050,7 +2051,7 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         </div>}
         {learning.stage === 'DECISION' && <>
           <input className="learning-note" aria-label="Комментарий reviewer" placeholder="Комментарий к решению (необязательно)" value={note} onChange={(event) => setNote(event.target.value)} disabled={busy !== null} />
-          <button className="button button-primary" disabled={busy !== null || !readyToReview} onClick={() => void runAction('promote')}>{busy === 'promote' ? 'Продвигаем…' : 'Promote выбранную версию'}</button>
+          <button className="button button-primary" disabled={busy !== null || !readyToReview} onClick={() => void runAction('promote')}>{busy === 'promote' ? 'Запускаем canary…' : 'Запустить canary на 10%'}</button>
           <button className="button button-quiet" disabled={busy !== null} onClick={() => void runAction('reject')}>{busy === 'reject' ? 'Отклоняем…' : 'Reject'}</button>
         </>}
       </div>
@@ -2172,6 +2173,44 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
 
 function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast }: { models: ModelStatus[]; driftTriggers: NonNullable<DashboardData['driftTriggers']>; canReview: boolean; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
   const [busyTrigger, setBusyTrigger] = useState<string | null>(null)
+  const [rollouts, setRollouts] = useState<BackendModelRollout[]>([])
+  const [rolloutError, setRolloutError] = useState<string | null>(null)
+  const [busyRollout, setBusyRollout] = useState<string | null>(null)
+  const [rolloutReason, setRolloutReason] = useState('')
+  const refreshRollouts = useCallback(async () => {
+    try {
+      const result = await loadModelRollouts()
+      setRollouts(result.items)
+      setRolloutError(null)
+    } catch {
+      setRolloutError('Статус canary rollout пока недоступен через API.')
+    }
+  }, [])
+  useEffect(() => {
+    void refreshRollouts()
+  }, [refreshRollouts])
+  const completeRollout = async (rollout: BackendModelRollout) => {
+    const reason = rolloutReason.trim()
+    if (!reason || !window.confirm(`Перевести ${rollout.candidate_model_version} в полный production?`)) return
+    setBusyRollout(rollout.rollout_id)
+    try {
+      await completeModelRollout(rollout.rollout_id, reason)
+    } catch {
+      onToast('Не удалось завершить rollout; проверьте текущие gates и состояние API')
+      setBusyRollout(null)
+      return
+    }
+    setRolloutReason('')
+    onToast('Candidate переведён в полный production вручную')
+    try {
+      await refreshRollouts()
+      await onRefresh()
+    } catch {
+      onToast('Rollout завершён, но данные не удалось обновить')
+    } finally {
+      setBusyRollout(null)
+    }
+  }
   const review = async (evidenceId: string, decision: 'OPEN_CANDIDATE_CYCLE' | 'DISMISS') => {
     setBusyTrigger(evidenceId)
     try {
@@ -2196,6 +2235,34 @@ function CleanModelsPage({ models, driftTriggers, canReview, onRefresh, onToast 
       {models.length
         ? <div className="models-table">{models.map((model) => <div className="models-row" key={model.version}><strong>{model.name}</strong><code>{model.version}</code><span>{model.status}</span><span><strong>{model.metricValue}</strong><small>{model.metric}</small></span><span>{model.updatedAt}</span></div>)}</div>
         : <NoData message="Реестр моделей не предоставлен API." />}
+    </section>
+    <section className="panel">
+      <PanelHeading title="Canary rollout" />
+      <p className="panel-note">В canary поступает 10% обращений. Полный production доступен только после 100 успешных canary-тикетов, 20 решений оператора, нулевых ошибок inference и correction-rate delta не выше +5 п.п.; переключение выполняет reviewer вручную.</p>
+      {rolloutError && <p className="panel-note">{rolloutError}</p>}
+      {!rolloutError && rollouts.length === 0 && <p className="panel-note">Активных и завершённых rollout пока нет.</p>}
+      {rollouts.map((rollout) => {
+        const metrics = rollout.metrics
+        const delta = metrics.correction_rate_delta
+        const deltaLabel = delta == null ? 'Недостаточно решений' : `${delta > 0 ? '+' : ''}${(delta * 100).toFixed(1)} п.п.`
+        const active = rollout.status === 'CANARY' || rollout.status === 'MONITORING'
+        return <article className="drift-trigger-card" key={rollout.rollout_id}>
+          <div className="dataset-stat"><span>Rollout / состояние</span><strong>{rollout.rollout_id} · {rollout.status}</strong></div>
+          <div className="dataset-stat"><span>Candidate / production baseline</span><strong>{rollout.candidate_model_version} · {rollout.previous_production_model_version}</strong></div>
+          <div className="dataset-stat"><span>Canary traffic</span><strong>{rollout.canary_traffic_percent}%</strong></div>
+          <div className="dataset-stat"><span>Canary tickets / operator decisions</span><strong>{metrics.canary_ticket_count} / {metrics.canary_decision_count}</strong></div>
+          <div className="dataset-stat"><span>Correction-rate delta</span><strong>{deltaLabel}</strong></div>
+          <div className="dataset-stat"><span>Inference failures / policy</span><strong>{metrics.failed_inference_count} / {rollout.policy_version}</strong></div>
+          {rollout.blocking_gates.length > 0 && <p className="panel-note">Ожидают выполнения: {rollout.blocking_gates.join(', ')}</p>}
+          {active && <label className="learning-candidate-register">
+            <span>Причина ручного полного rollout</span>
+            <input className="learning-note" value={rolloutReason} maxLength={1000} onChange={(event) => setRolloutReason(event.target.value)} disabled={busyRollout !== null} />
+          </label>}
+          {active && canReview && <button className="button button-primary" disabled={busyRollout !== null || !rollout.full_rollout_eligible || rolloutReason.trim().length === 0} onClick={() => void completeRollout(rollout)}>
+            {busyRollout === rollout.rollout_id ? 'Переводим…' : 'Вручную перевести в полный production'}
+          </button>}
+        </article>
+      })}
     </section>
     <section className="panel">
       <PanelHeading title="Drift evidence на проверке" />

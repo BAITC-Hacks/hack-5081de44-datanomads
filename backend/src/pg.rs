@@ -55,6 +55,10 @@ const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-na
 const FORECAST_PEAK_CHANGE_POLICY_VERSION: &str = "peak-change-backtest-mae-v1";
 const FORECAST_SIGNAL_HISTORY_LIMIT: i64 = 10;
 const MAX_LEARNING_CANDIDATES_PER_CYCLE: i64 = 5;
+const MODEL_CANARY_TRAFFIC_PERCENT: i16 = 10;
+const MODEL_CANARY_MINIMUM_TICKETS: i64 = 100;
+const MODEL_CANARY_MINIMUM_DECISIONS: i64 = 20;
+const MODEL_CANARY_MAXIMUM_CORRECTION_RATE_DELTA: f64 = 0.05;
 const READINESS_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 static MIGRATOR: Migrator = sqlx::migrate!("../migrations");
 
@@ -128,6 +132,107 @@ fn artifact_checksum_is_verified(value: &str) -> bool {
             && digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn is_canary_assignment(rollout_id: &str, ticket_ref: &str, traffic_percent: i16) -> bool {
+    if !(1..=100).contains(&traffic_percent) {
+        return false;
+    }
+    let digest = Sha256::digest(format!("{rollout_id}\0{ticket_ref}").as_bytes());
+    let bucket = digest[..8]
+        .iter()
+        .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+        % 100;
+    bucket < u64::from(traffic_percent as u16)
+}
+
+async fn model_rollout_metrics(
+    pool: &PgPool,
+    rollout_db_id: i64,
+) -> Result<ModelRolloutMetrics, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(ri.id) FILTER (
+                WHERE ri.traffic_group = 'CANARY'
+                  AND ri.inference_status = 'COMPLETED'
+                  AND ri.model_version = rollout.candidate_model_version
+                  AND ri.candidate_topic_id IS NOT NULL
+            )::bigint AS canary_ticket_count,
+            COUNT(ri.id) FILTER (
+                WHERE ri.traffic_group = 'CANARY'
+                  AND ri.inference_status = 'COMPLETED'
+                  AND ri.candidate_topic_id IS NOT NULL
+                  AND decision.confirmed_topic_id IS NOT NULL
+            )::bigint AS canary_decision_count,
+            COUNT(ri.id) FILTER (
+                WHERE ri.traffic_group = 'CANARY'
+                  AND ri.inference_status = 'FAILED'
+            )::bigint AS failed_inference_count,
+            SUM(CASE WHEN ri.traffic_group = 'CANARY'
+                          AND ri.inference_status = 'COMPLETED'
+                          AND ri.candidate_topic_id IS NOT NULL
+                          AND decision.confirmed_topic_id IS NOT NULL
+                          AND ri.candidate_topic_id IS DISTINCT FROM decision.confirmed_topic_id
+                     THEN 1.0 ELSE 0.0 END)
+                / NULLIF(COUNT(ri.id) FILTER (
+                    WHERE ri.traffic_group = 'CANARY'
+                      AND ri.inference_status = 'COMPLETED'
+                      AND ri.candidate_topic_id IS NOT NULL
+                      AND decision.confirmed_topic_id IS NOT NULL
+                ), 0)::float8 AS candidate_correction_rate,
+            SUM(CASE WHEN ri.traffic_group = 'CANARY'
+                          AND ri.inference_status = 'COMPLETED'
+                          AND ri.candidate_topic_id IS NOT NULL
+                          AND decision.confirmed_topic_id IS NOT NULL
+                          AND ri.production_topic_id IS DISTINCT FROM decision.confirmed_topic_id
+                     THEN 1.0 ELSE 0.0 END)
+                / NULLIF(COUNT(ri.id) FILTER (
+                    WHERE ri.traffic_group = 'CANARY'
+                      AND ri.inference_status = 'COMPLETED'
+                      AND ri.candidate_topic_id IS NOT NULL
+                      AND decision.confirmed_topic_id IS NOT NULL
+                ), 0)::float8 AS production_correction_rate
+        FROM model_rollouts rollout
+        LEFT JOIN model_rollout_inferences ri ON ri.rollout_id = rollout.id
+        LEFT JOIN LATERAL (
+            SELECT confirmed_topic_id
+            FROM operator_decisions
+            WHERE ticket_id = ri.ticket_id AND confirmed_topic_id IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        ) decision ON TRUE
+        WHERE rollout.id = $1
+        GROUP BY rollout.id
+        "#,
+    )
+    .bind(rollout_db_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| format!("read model rollout metrics: {error}"))?;
+    let candidate_correction_rate: Option<f64> = row
+        .try_get("candidate_correction_rate")
+        .map_err(|error| format!("canary correction rate: {error}"))?;
+    let production_correction_rate: Option<f64> = row
+        .try_get("production_correction_rate")
+        .map_err(|error| format!("production correction rate: {error}"))?;
+    Ok(ModelRolloutMetrics {
+        canary_ticket_count: row
+            .try_get("canary_ticket_count")
+            .map_err(|error| format!("canary ticket count: {error}"))?,
+        canary_decision_count: row
+            .try_get("canary_decision_count")
+            .map_err(|error| format!("canary decision count: {error}"))?,
+        failed_inference_count: row
+            .try_get("failed_inference_count")
+            .map_err(|error| format!("canary failure count: {error}"))?,
+        correction_rate_delta: candidate_correction_rate
+            .zip(production_correction_rate)
+            .map(|(candidate, production)| (candidate - production) * 1_000_000.0)
+            .map(|delta| delta.round() / 1_000_000.0),
+        candidate_correction_rate,
+        production_correction_rate,
     })
 }
 
@@ -328,7 +433,7 @@ fn candidate_evaluation_is_promotable(
 #[cfg(test)]
 mod promotion_safety_tests {
     use super::{
-        artifact_checksum_is_verified, candidate_evaluation_is_promotable,
+        artifact_checksum_is_verified, candidate_evaluation_is_promotable, is_canary_assignment,
         synthetic_candidate_can_be_promoted,
     };
     use serde_json::{json, Value};
@@ -444,6 +549,20 @@ mod promotion_safety_tests {
             "A".repeat(64)
         )));
         assert!(!artifact_checksum_is_verified("sha256:short"));
+    }
+
+    #[test]
+    fn canary_assignment_is_stable_and_uses_the_configured_share() {
+        let assigned = (0..10_000)
+            .filter(|ticket| is_canary_assignment("rollout-1", &format!("ticket-{ticket}"), 10))
+            .count();
+
+        assert_eq!(
+            is_canary_assignment("rollout-1", "ticket-42", 10),
+            is_canary_assignment("rollout-1", "ticket-42", 10)
+        );
+        assert!((900..=1_100).contains(&assigned));
+        assert!(!is_canary_assignment("rollout-1", "ticket-42", 0));
     }
 }
 
@@ -788,6 +907,66 @@ struct CandidateShadowInference {
     window: CandidateShadowWindow,
     prediction: Option<MlClassificationWithModel>,
     error_code: Option<&'static str>,
+}
+
+#[derive(Debug)]
+struct ActiveModelRollout {
+    id: i64,
+    rollout_id: String,
+    candidate_model_version: String,
+    candidate_artifact_checksum: String,
+    previous_production_model_version: String,
+    canary_traffic_percent: i16,
+}
+
+struct ModelRolloutInference {
+    rollout_id: i64,
+    traffic_group: &'static str,
+    model_version: String,
+    inference_status: &'static str,
+    candidate_topic_id: Option<String>,
+    production_topic_id: String,
+    error_code: Option<&'static str>,
+}
+
+#[derive(Debug)]
+struct ModelRolloutMetrics {
+    canary_ticket_count: i64,
+    canary_decision_count: i64,
+    failed_inference_count: i64,
+    candidate_correction_rate: Option<f64>,
+    production_correction_rate: Option<f64>,
+    correction_rate_delta: Option<f64>,
+}
+
+impl ModelRolloutMetrics {
+    fn full_rollout_eligible(&self) -> bool {
+        self.canary_ticket_count >= MODEL_CANARY_MINIMUM_TICKETS
+            && self.canary_decision_count >= MODEL_CANARY_MINIMUM_DECISIONS
+            && self.failed_inference_count == 0
+            && self
+                .correction_rate_delta
+                .is_some_and(|delta| delta <= MODEL_CANARY_MAXIMUM_CORRECTION_RATE_DELTA)
+    }
+
+    fn blocking_gates(&self) -> Vec<&'static str> {
+        let mut gates = Vec::new();
+        if self.canary_ticket_count < MODEL_CANARY_MINIMUM_TICKETS {
+            gates.push("CANARY_TICKETS_BELOW_MINIMUM");
+        }
+        if self.canary_decision_count < MODEL_CANARY_MINIMUM_DECISIONS {
+            gates.push("OPERATOR_DECISIONS_BELOW_MINIMUM");
+        }
+        if self.failed_inference_count > 0 {
+            gates.push("CANARY_INFERENCE_FAILURES_PRESENT");
+        }
+        match self.correction_rate_delta {
+            Some(delta) if delta <= MODEL_CANARY_MAXIMUM_CORRECTION_RATE_DELTA => {}
+            Some(_) => gates.push("CORRECTION_RATE_DELTA_EXCEEDS_LIMIT"),
+            None => gates.push("CORRECTION_RATE_EVIDENCE_UNAVAILABLE"),
+        }
+        gates
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1671,6 +1850,94 @@ impl PgRepository {
         })
     }
 
+    async fn classify_production(
+        &self,
+        text: &str,
+        language: Option<&str>,
+        request_id: &str,
+        trace_id: &str,
+    ) -> Result<MlClassificationWithModel, String> {
+        let row = sqlx::query(
+            "SELECT model_version, artifact_checksum, manifest_uri FROM model_versions WHERE status = 'PRODUCTION' ORDER BY promoted_at DESC NULLS LAST, id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("read production classifier: {error}"))?
+        .ok_or_else(|| "production classifier is not configured".to_owned())?;
+        let model_version: String = row
+            .try_get("model_version")
+            .map_err(|error| format!("production model version: {error}"))?;
+        let artifact_checksum: Option<String> = row
+            .try_get("artifact_checksum")
+            .map_err(|error| format!("production artifact checksum: {error}"))?;
+        let manifest_uri: Option<String> = row
+            .try_get("manifest_uri")
+            .map_err(|error| format!("production manifest URI: {error}"))?;
+
+        if let Some(checksum) = artifact_checksum
+            .as_deref()
+            .filter(|checksum| artifact_checksum_is_verified(checksum))
+        {
+            let result = self
+                .classify_versioned(
+                    text,
+                    language,
+                    request_id,
+                    trace_id,
+                    Some(&model_version),
+                    Some(checksum),
+                )
+                .await?;
+            if result.model_version != model_version {
+                return Err("production classifier returned a different model version".to_owned());
+            }
+            return Ok(result);
+        }
+
+        if artifact_checksum.as_deref() != Some("builtin-baseline-no-artifact")
+            || manifest_uri.as_deref() != Some("builtin://deterministic-classifier")
+        {
+            return Err("production classifier artifact is not verifiable".to_owned());
+        }
+        let mut result = self.classify(text, language, request_id, trace_id).await?;
+        // The database row names the built-in deterministic baseline. The ML
+        // manifest has a demo identifier for the same runtime implementation.
+        result.model_version = model_version;
+        Ok(result)
+    }
+
+    async fn active_model_rollout(&self) -> Result<Option<ActiveModelRollout>, String> {
+        let row = sqlx::query(
+            "SELECT id, rollout_id, candidate_model_version, candidate_artifact_checksum, previous_production_model_version, canary_traffic_percent FROM model_rollouts WHERE status IN ('CANARY', 'MONITORING') ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| format!("read active model rollout: {error}"))?;
+        row.map(|row| {
+            Ok(ActiveModelRollout {
+                id: row
+                    .try_get("id")
+                    .map_err(|error| format!("active rollout id: {error}"))?,
+                rollout_id: row
+                    .try_get("rollout_id")
+                    .map_err(|error| format!("active rollout key: {error}"))?,
+                candidate_model_version: row
+                    .try_get("candidate_model_version")
+                    .map_err(|error| format!("active rollout candidate: {error}"))?,
+                candidate_artifact_checksum: row
+                    .try_get("candidate_artifact_checksum")
+                    .map_err(|error| format!("active rollout checksum: {error}"))?,
+                previous_production_model_version: row
+                    .try_get("previous_production_model_version")
+                    .map_err(|error| format!("active rollout baseline: {error}"))?,
+                canary_traffic_percent: row
+                    .try_get("canary_traffic_percent")
+                    .map_err(|error| format!("active rollout traffic share: {error}"))?,
+            })
+        })
+        .transpose()
+    }
+
     async fn shadow_window_for_ticket(
         &self,
         ticket_created_at: DateTime<Utc>,
@@ -2422,9 +2689,82 @@ impl PgRepository {
         source: Option<&str>,
         request_id: &str,
     ) -> Result<TicketDetailResponse, String> {
-        let classification = self
-            .classify(text, language, request_id, request_id)
+        let external_id = format!(
+            "api-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let rollout = self.active_model_rollout().await?;
+        let production_classification = self
+            .classify_production(text, language, request_id, request_id)
             .await?;
+        let mut rollout_inference = None;
+        let classification = if let Some(rollout) = rollout {
+            if production_classification.model_version != rollout.previous_production_model_version
+            {
+                return Err("active model rollout baseline no longer matches production".to_owned());
+            }
+            if is_canary_assignment(
+                &rollout.rollout_id,
+                &external_id,
+                rollout.canary_traffic_percent,
+            ) {
+                match self
+                    .classify_versioned(
+                        text,
+                        language,
+                        request_id,
+                        request_id,
+                        Some(&rollout.candidate_model_version),
+                        Some(&rollout.candidate_artifact_checksum),
+                    )
+                    .await
+                {
+                    Ok(candidate) if candidate.model_version == rollout.candidate_model_version => {
+                        rollout_inference = Some(ModelRolloutInference {
+                            rollout_id: rollout.id,
+                            traffic_group: "CANARY",
+                            model_version: candidate.model_version.clone(),
+                            inference_status: "COMPLETED",
+                            candidate_topic_id: Some(candidate.prediction.topic_id.clone()),
+                            production_topic_id: production_classification
+                                .prediction
+                                .topic_id
+                                .clone(),
+                            error_code: None,
+                        });
+                        candidate
+                    }
+                    _ => {
+                        rollout_inference = Some(ModelRolloutInference {
+                            rollout_id: rollout.id,
+                            traffic_group: "CANARY",
+                            model_version: production_classification.model_version.clone(),
+                            inference_status: "FAILED",
+                            candidate_topic_id: None,
+                            production_topic_id: production_classification
+                                .prediction
+                                .topic_id
+                                .clone(),
+                            error_code: Some("CANDIDATE_INFERENCE_FAILED"),
+                        });
+                        production_classification
+                    }
+                }
+            } else {
+                rollout_inference = Some(ModelRolloutInference {
+                    rollout_id: rollout.id,
+                    traffic_group: "CONTROL",
+                    model_version: production_classification.model_version.clone(),
+                    inference_status: "COMPLETED",
+                    candidate_topic_id: None,
+                    production_topic_id: production_classification.prediction.topic_id.clone(),
+                    error_code: None,
+                });
+                production_classification
+            }
+        } else {
+            production_classification
+        };
         let db_topic = normalize_topic_id(&classification.prediction.topic_id);
         let db_region = normalize_region_id(region_id.unwrap_or("KZ-ASTANA"));
         let db_language =
@@ -2433,10 +2773,6 @@ impl PgRepository {
             .resolve_routing(&db_topic, &db_region, None, priority, RuleSource::Manual)
             .await?;
         let db_priority = routing.priority.clone();
-        let external_id = format!(
-            "api-{}",
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        );
         let now = Utc::now();
         let shadow_windows = self.shadow_window_for_ticket(now).await?;
         let mut shadow_inferences = Vec::with_capacity(shadow_windows.len());
@@ -2578,7 +2914,65 @@ impl PgRepository {
             .bind(shadow_inference.error_code)
             .execute(&mut *tx)
             .await
-            .map_err(|error| format!("persist candidate shadow prediction: {error}"))?;
+                .map_err(|error| format!("persist candidate shadow prediction: {error}"))?;
+        }
+        if let Some(inference) = rollout_inference {
+            sqlx::query(
+                "INSERT INTO model_rollout_inferences (rollout_id, ticket_id, traffic_group, model_version, inference_status, candidate_topic_id, production_topic_id, error_code, completed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())",
+            )
+            .bind(inference.rollout_id)
+            .bind(ticket_id)
+            .bind(inference.traffic_group)
+            .bind(&inference.model_version)
+            .bind(inference.inference_status)
+            .bind(&inference.candidate_topic_id)
+            .bind(&inference.production_topic_id)
+            .bind(inference.error_code)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("persist model rollout inference: {error}"))?;
+
+            if inference.traffic_group == "CANARY" {
+                let started = sqlx::query(
+                    "UPDATE model_rollouts SET status = 'MONITORING', monitoring_started_at = now() WHERE id = $1 AND status = 'CANARY' RETURNING rollout_id, learning_cycle_id",
+                )
+                .bind(inference.rollout_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| format!("start model rollout monitoring: {error}"))?;
+                if let Some(started) = started {
+                    let rollout_key: String = started
+                        .try_get("rollout_id")
+                        .map_err(|error| format!("monitoring rollout key: {error}"))?;
+                    let cycle_id: Option<i64> = started
+                        .try_get("learning_cycle_id")
+                        .map_err(|error| format!("monitoring cycle id: {error}"))?;
+                    if let Some(cycle_id) = cycle_id {
+                        sqlx::query("UPDATE learning_cycle_candidates SET status = 'MONITORING' WHERE learning_cycle_id = $1 AND model_version = (SELECT candidate_model_version FROM model_rollouts WHERE id = $2) AND status = 'CANARY'")
+                            .bind(cycle_id)
+                            .bind(inference.rollout_id)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|error| format!("mark candidate monitoring: {error}"))?;
+                        sqlx::query("UPDATE learning_cycles SET state = 'MONITORING', updated_at = now() WHERE id = $1 AND state = 'CANARY'")
+                            .bind(cycle_id)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|error| format!("mark cycle monitoring: {error}"))?;
+                    }
+                    sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ('system', 'START_MODEL_ROLLOUT_MONITORING', 'model_rollout', $1, $2, 'first canary inference observed', $3)")
+                        .bind(rollout_key)
+                        .bind(request_id)
+                        .bind(json!({
+                            "traffic_group": inference.traffic_group,
+                            "inference_status": inference.inference_status,
+                            "ticket_id": ticket_id,
+                        }))
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|error| format!("audit model rollout monitoring: {error}"))?;
+                }
+            }
         }
         tx.commit()
             .await
@@ -2835,7 +3229,7 @@ impl PgRepository {
             let language =
                 normalize_language(json_text(item, "language").as_deref().unwrap_or("UNKNOWN"));
             let classification = self
-                .classify(&text, Some(&language), request_id, request_id)
+                .classify_production(&text, Some(&language), request_id, request_id)
                 .await?;
             let topic_id = normalize_topic_id(
                 json_text(item, "topic_id")
@@ -5078,7 +5472,7 @@ impl PgRepository {
         }
 
         let active_cycle: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE state IN ('COLLECT', 'TRAINING', 'EVALUATE', 'DECISION'))",
+            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE state IN ('COLLECT', 'TRAINING', 'EVALUATE', 'DECISION', 'CANARY', 'MONITORING'))",
         )
         .fetch_one(&mut *tx)
         .await
@@ -5222,7 +5616,7 @@ impl PgRepository {
             .find(|cycle| {
                 matches!(
                     cycle.state.as_str(),
-                    "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION"
+                    "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION" | "CANARY" | "MONITORING"
                 )
             })
             .cloned();
@@ -5238,7 +5632,7 @@ impl PgRepository {
             active_cycle,
             production_model,
             controlled_loop: json!({
-                "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTED", "REJECTED"],
+                "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "CANARY", "MONITORING", "PROMOTED", "REJECTED"],
                 "production_auto_update": false,
                 "trainer": "versioned Data/ML trainer; test fake is demo/test only",
             }),
@@ -5396,7 +5790,7 @@ impl PgRepository {
             .await
             .map_err(|error| format!("lock classifier learning cycle: {error}"))?;
         let active_cycle_exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE state IN ('COLLECT', 'TRAINING', 'EVALUATE', 'DECISION'))",
+            "SELECT EXISTS (SELECT 1 FROM learning_cycles WHERE state IN ('COLLECT', 'TRAINING', 'EVALUATE', 'DECISION', 'CANARY', 'MONITORING'))",
         )
         .fetch_one(&mut *tx)
         .await
@@ -6168,17 +6562,70 @@ impl PgRepository {
         }) {
             return Err("candidate evaluation is not ready for human promotion".to_owned());
         }
-        sqlx::query("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'PRODUCTION'")
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pulse109:model-rollout'))")
             .execute(&mut *tx)
             .await
-            .map_err(|error| format!("archive production model: {error}"))?;
-        sqlx::query("UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1")
+            .map_err(|error| format!("lock model rollout: {error}"))?;
+        let active_rollout: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM model_rollouts WHERE status IN ('CANARY', 'MONITORING'))",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("check active model rollout: {error}"))?;
+        if active_rollout {
+            return Err("another model rollout is already active".to_owned());
+        }
+        let production = sqlx::query(
+            "SELECT model_version, artifact_checksum FROM model_versions WHERE status = 'PRODUCTION' FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("lock production model for canary: {error}"))?
+        .ok_or_else(|| "production model baseline is not available".to_owned())?;
+        let current_production_model_version: String = production
+            .try_get("model_version")
+            .map_err(|error| format!("current production model version: {error}"))?;
+        if current_production_model_version != production_model_version {
+            return Err("learning cycle production baseline is no longer current".to_owned());
+        }
+        let previous_artifact_checksum: Option<String> = production
+            .try_get("artifact_checksum")
+            .map_err(|error| format!("previous production artifact checksum: {error}"))?;
+        let rollout_version: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(rollout_version), 0)::int + 1 FROM model_rollouts WHERE candidate_model_version = $1",
+        )
+        .bind(&candidate_model_version)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("allocate model rollout version: {error}"))?;
+        let rollout_digest = format!("{:x}", Sha256::digest(candidate_model_version.as_bytes()));
+        let rollout_id = format!("rollout-{rollout_version}-{}", &rollout_digest[..16]);
+        let rollout_policy = json!({
+            "version": "rollout-policy-v1",
+            "canary_traffic_percent": MODEL_CANARY_TRAFFIC_PERCENT,
+            "minimum_canary_tickets": MODEL_CANARY_MINIMUM_TICKETS,
+            "minimum_operator_decisions": MODEL_CANARY_MINIMUM_DECISIONS,
+            "maximum_correction_rate_delta": MODEL_CANARY_MAXIMUM_CORRECTION_RATE_DELTA,
+            "automatic_full_rollout": false,
+            "promotion_policy_version": policy_version,
+        });
+        sqlx::query("INSERT INTO model_rollouts (rollout_id, rollout_version, learning_cycle_id, candidate_model_version, candidate_artifact_checksum, previous_production_model_version, previous_artifact_checksum, canary_traffic_percent, policy_version, policy_snapshot, status, created_by, baseline_correction_rate) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'rollout-policy-v1', $9, 'CANARY', $10, $11)")
+            .bind(&rollout_id)
+            .bind(rollout_version)
+            .bind(cycle_db_id)
             .bind(&candidate_model_version)
+            .bind(artifact_checksum.as_deref())
+            .bind(&production_model_version)
+            .bind(previous_artifact_checksum)
+            .bind(MODEL_CANARY_TRAFFIC_PERCENT)
+            .bind(&rollout_policy)
+            .bind(user_id)
+            .bind(evaluation.as_ref().and_then(|payload| payload.pointer("/shadow_evaluation/metrics/production_correction_rate").and_then(Value::as_f64)))
             .execute(&mut *tx)
             .await
-            .map_err(|error| format!("promote candidate: {error}"))?;
+            .map_err(|error| format!("create model canary rollout: {error}"))?;
         let selected_candidate_transition = sqlx::query(
-            "UPDATE learning_cycle_candidates SET status = 'PROMOTED', evaluated_at = COALESCE(evaluated_at, now()) WHERE learning_cycle_id = $1 AND model_version = $2 AND status IN ('REGISTERED', 'EVALUATING', 'EVALUATED')",
+            "UPDATE learning_cycle_candidates SET status = 'CANARY', evaluated_at = COALESCE(evaluated_at, now()) WHERE learning_cycle_id = $1 AND model_version = $2 AND status IN ('REGISTERED', 'EVALUATING', 'EVALUATED')",
         )
         .bind(cycle_db_id)
         .bind(&candidate_model_version)
@@ -6188,26 +6635,33 @@ impl PgRepository {
         if selected_candidate_transition.rows_affected() != 1 {
             return Err("selected learning candidate changed before promotion".to_owned());
         }
-        let transition = sqlx::query("UPDATE learning_cycles SET candidate_model_version = $2, candidate_dataset_version = $3, candidate_dataset_checksum = $4, state = 'PROMOTED', decision_note = $5, updated_at = now() WHERE id = $1 AND state = 'DECISION'")
+        let transition = sqlx::query("UPDATE learning_cycles SET candidate_model_version = $2, candidate_dataset_version = $3, candidate_dataset_checksum = $4, state = 'CANARY', decision_note = $5, updated_at = now() WHERE id = $1 AND state = 'DECISION'")
             .bind(cycle_db_id)
             .bind(&candidate_model_version)
             .bind(&candidate_dataset_version)
             .bind(candidate_dataset_checksum)
-            .bind(note.or(Some("promoted")))
+            .bind(note.or(Some("canary rollout started")))
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("promote learning cycle: {error}"))?;
         if transition.rows_affected() != 1 {
             return Err("learning cycle changed before promotion".to_owned());
         }
-        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason, metadata) VALUES ($1, 'PROMOTE_MODEL', 'learning_cycle', $2, $3, $4)")
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason, metadata) VALUES ($1, 'START_MODEL_CANARY', 'learning_cycle', $2, $3, $4)")
             .bind(user_id)
             .bind(cycle.id.clone())
             .bind(note)
-            .bind(json!({"candidate_model_version": candidate_model_version}))
+            .bind(json!({
+                "rollout_id": rollout_id,
+                "candidate_model_version": candidate_model_version,
+                "previous_production_model_version": production_model_version,
+                "canary_traffic_percent": MODEL_CANARY_TRAFFIC_PERCENT,
+                "policy_snapshot": rollout_policy,
+                "production_pointer_changed": false,
+            }))
             .execute(&mut *tx)
             .await
-            .map_err(|error| format!("audit promotion: {error}"))?;
+            .map_err(|error| format!("audit model canary start: {error}"))?;
         tx.commit()
             .await
             .map_err(|error| format!("commit promotion: {error}"))?;
@@ -6329,6 +6783,244 @@ impl PgRepository {
         Ok(models)
     }
 
+    pub async fn model_rollouts(&self) -> Result<Value, String> {
+        let rows = sqlx::query(
+            "SELECT id, rollout_id, rollout_version, learning_cycle_id, candidate_model_version, previous_production_model_version, canary_traffic_percent, policy_version, policy_snapshot, status, created_at, monitoring_started_at, full_production_at FROM model_rollouts ORDER BY created_at DESC, id DESC LIMIT 25",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| format!("list model rollouts: {error}"))?;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_rollouts")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| format!("count model rollouts: {error}"))?;
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|error| format!("model rollout id: {error}"))?;
+            let metrics = model_rollout_metrics(&self.pool, id).await?;
+            let created_at: DateTime<Utc> = row
+                .try_get("created_at")
+                .map_err(|error| format!("model rollout created time: {error}"))?;
+            let monitoring_started_at: Option<DateTime<Utc>> = row
+                .try_get("monitoring_started_at")
+                .map_err(|error| format!("model rollout monitoring time: {error}"))?;
+            let full_production_at: Option<DateTime<Utc>> = row
+                .try_get("full_production_at")
+                .map_err(|error| format!("model rollout production time: {error}"))?;
+            items.push(json!({
+                "rollout_id": row.try_get::<String, _>("rollout_id").map_err(|error| format!("model rollout key: {error}"))?,
+                "rollout_version": row.try_get::<i32, _>("rollout_version").map_err(|error| format!("model rollout version: {error}"))?,
+                "learning_cycle_id": row.try_get::<Option<i64>, _>("learning_cycle_id").map_err(|error| format!("model rollout cycle: {error}"))?,
+                "candidate_model_version": row.try_get::<String, _>("candidate_model_version").map_err(|error| format!("model rollout candidate: {error}"))?,
+                "previous_production_model_version": row.try_get::<String, _>("previous_production_model_version").map_err(|error| format!("model rollout baseline: {error}"))?,
+                "canary_traffic_percent": row.try_get::<i16, _>("canary_traffic_percent").map_err(|error| format!("model rollout traffic: {error}"))?,
+                "policy_version": row.try_get::<String, _>("policy_version").map_err(|error| format!("model rollout policy: {error}"))?,
+                "policy_snapshot": row.try_get::<Value, _>("policy_snapshot").map_err(|error| format!("model rollout policy snapshot: {error}"))?,
+                "status": row.try_get::<String, _>("status").map_err(|error| format!("model rollout state: {error}"))?,
+                "created_at": created_at.to_rfc3339(),
+                "monitoring_started_at": monitoring_started_at.map(|value| value.to_rfc3339()),
+                "full_production_at": full_production_at.map(|value| value.to_rfc3339()),
+                "metrics": {
+                    "canary_ticket_count": metrics.canary_ticket_count,
+                    "canary_decision_count": metrics.canary_decision_count,
+                    "failed_inference_count": metrics.failed_inference_count,
+                    "candidate_correction_rate": metrics.candidate_correction_rate,
+                    "production_correction_rate": metrics.production_correction_rate,
+                    "correction_rate_delta": metrics.correction_rate_delta,
+                },
+                "full_rollout_eligible": metrics.full_rollout_eligible(),
+                "blocking_gates": metrics.blocking_gates(),
+            }));
+        }
+        Ok(json!({"items": items, "total": total}))
+    }
+
+    pub async fn complete_model_rollout(
+        &self,
+        rollout_id: &str,
+        actor_id: &str,
+        reason: &str,
+        request_id: &str,
+    ) -> Result<Value, String> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin full model rollout: {error}"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('pulse109:model-rollout'))")
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("lock full model rollout: {error}"))?;
+        let rollout = sqlx::query(
+            "SELECT id, learning_cycle_id, candidate_model_version, candidate_artifact_checksum, previous_production_model_version, canary_traffic_percent, policy_version, policy_snapshot, status FROM model_rollouts WHERE rollout_id = $1 FOR UPDATE",
+        )
+        .bind(rollout_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("find model rollout for full production: {error}"))?
+        .ok_or_else(|| format!("model rollout {rollout_id} not found"))?;
+        let status: String = rollout
+            .try_get("status")
+            .map_err(|error| format!("model rollout status: {error}"))?;
+        if !matches!(status.as_str(), "CANARY" | "MONITORING") {
+            return Err(format!("model rollout {rollout_id} is not active"));
+        }
+        let policy_version: String = rollout
+            .try_get("policy_version")
+            .map_err(|error| format!("model rollout policy version: {error}"))?;
+        let policy_snapshot: Value = rollout
+            .try_get("policy_snapshot")
+            .map_err(|error| format!("model rollout policy snapshot: {error}"))?;
+        let canary_traffic_percent: i16 = rollout
+            .try_get("canary_traffic_percent")
+            .map_err(|error| format!("model rollout traffic share: {error}"))?;
+        if policy_version != "rollout-policy-v1"
+            || policy_snapshot.get("version").and_then(Value::as_str) != Some("rollout-policy-v1")
+            || canary_traffic_percent != MODEL_CANARY_TRAFFIC_PERCENT
+            || policy_snapshot
+                .get("canary_traffic_percent")
+                .and_then(Value::as_i64)
+                != Some(i64::from(MODEL_CANARY_TRAFFIC_PERCENT))
+            || policy_snapshot
+                .get("minimum_canary_tickets")
+                .and_then(Value::as_i64)
+                != Some(MODEL_CANARY_MINIMUM_TICKETS)
+            || policy_snapshot
+                .get("minimum_operator_decisions")
+                .and_then(Value::as_i64)
+                != Some(MODEL_CANARY_MINIMUM_DECISIONS)
+            || policy_snapshot
+                .get("maximum_correction_rate_delta")
+                .and_then(Value::as_f64)
+                != Some(MODEL_CANARY_MAXIMUM_CORRECTION_RATE_DELTA)
+            || policy_snapshot
+                .get("automatic_full_rollout")
+                .and_then(Value::as_bool)
+                != Some(false)
+        {
+            return Err("model rollout policy is unsupported".to_owned());
+        }
+        let database_id: i64 = rollout
+            .try_get("id")
+            .map_err(|error| format!("model rollout database id: {error}"))?;
+        let metrics = model_rollout_metrics(&self.pool, database_id).await?;
+        if !metrics.full_rollout_eligible() {
+            return Err(format!(
+                "model rollout evidence is not sufficient: {}",
+                metrics.blocking_gates().join(",")
+            ));
+        }
+        let candidate_model_version: String = rollout
+            .try_get("candidate_model_version")
+            .map_err(|error| format!("full rollout candidate: {error}"))?;
+        let candidate_artifact_checksum: String = rollout
+            .try_get("candidate_artifact_checksum")
+            .map_err(|error| format!("full rollout artifact checksum: {error}"))?;
+        let previous_production_model_version: String = rollout
+            .try_get("previous_production_model_version")
+            .map_err(|error| format!("full rollout previous production: {error}"))?;
+        let learning_cycle_id: Option<i64> = rollout
+            .try_get("learning_cycle_id")
+            .map_err(|error| format!("full rollout learning cycle: {error}"))?;
+
+        let current_production_model_version: Option<String> = sqlx::query_scalar(
+            "SELECT model_version FROM model_versions WHERE status = 'PRODUCTION' FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("lock current production classifier: {error}"))?;
+        if current_production_model_version.as_deref()
+            != Some(previous_production_model_version.as_str())
+        {
+            return Err("production model changed during the canary rollout".to_owned());
+        }
+        let previous_archived = sqlx::query(
+            "UPDATE model_versions SET status = 'ARCHIVED' WHERE model_version = $1 AND status = 'PRODUCTION'",
+        )
+        .bind(&previous_production_model_version)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("archive previous production model: {error}"))?;
+        if previous_archived.rows_affected() != 1 {
+            return Err("previous production model changed before full rollout".to_owned());
+        }
+        let promoted = sqlx::query(
+            "UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1 AND status IN ('CANDIDATE', 'SHADOW') AND artifact_checksum = $2",
+        )
+        .bind(&candidate_model_version)
+        .bind(&candidate_artifact_checksum)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("promote canary candidate to production: {error}"))?;
+        if promoted.rows_affected() != 1 {
+            return Err("canary candidate registry entry changed before full rollout".to_owned());
+        }
+        sqlx::query("UPDATE model_rollouts SET status = 'FULL_PRODUCTION', full_production_at = now() WHERE id = $1 AND status IN ('CANARY', 'MONITORING')")
+            .bind(database_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("complete model rollout: {error}"))?;
+        if let Some(cycle_id) = learning_cycle_id {
+            let candidate_transition = sqlx::query("UPDATE learning_cycle_candidates SET status = 'PROMOTED' WHERE learning_cycle_id = $1 AND model_version = $2 AND status IN ('CANARY', 'MONITORING')")
+                .bind(cycle_id)
+                .bind(&candidate_model_version)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("mark canary candidate promoted: {error}"))?;
+            if candidate_transition.rows_affected() != 1 {
+                return Err("learning candidate state changed before full rollout".to_owned());
+            }
+            let cycle_transition = sqlx::query("UPDATE learning_cycles SET state = 'PROMOTED', decision_note = $2, updated_at = now() WHERE id = $1 AND state IN ('CANARY', 'MONITORING')")
+                .bind(cycle_id)
+                .bind(reason)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("complete learning cycle rollout: {error}"))?;
+            if cycle_transition.rows_affected() != 1 {
+                return Err("learning cycle state changed before full rollout".to_owned());
+            }
+        }
+        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, request_id, reason, metadata) VALUES ($1, 'COMPLETE_MODEL_ROLLOUT', 'model_rollout', $2, $3, $4, $5)")
+            .bind(actor_id)
+            .bind(rollout_id)
+            .bind(request_id)
+            .bind(reason)
+            .bind(json!({
+                "candidate_model_version": candidate_model_version,
+                "previous_production_model_version": previous_production_model_version,
+                "metrics": {
+                    "canary_ticket_count": metrics.canary_ticket_count,
+                    "canary_decision_count": metrics.canary_decision_count,
+                    "failed_inference_count": metrics.failed_inference_count,
+                    "candidate_correction_rate": metrics.candidate_correction_rate,
+                    "production_correction_rate": metrics.production_correction_rate,
+                    "correction_rate_delta": metrics.correction_rate_delta,
+                },
+            }))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("audit full model rollout: {error}"))?;
+        tx.commit()
+            .await
+            .map_err(|error| format!("commit full model rollout: {error}"))?;
+        Ok(json!({
+            "rollout_id": rollout_id,
+            "status": "FULL_PRODUCTION",
+            "candidate_model_version": candidate_model_version,
+            "previous_production_model_version": previous_production_model_version,
+            "metrics": {
+                "canary_ticket_count": metrics.canary_ticket_count,
+                "canary_decision_count": metrics.canary_decision_count,
+                "failed_inference_count": metrics.failed_inference_count,
+                "candidate_correction_rate": metrics.candidate_correction_rate,
+                "production_correction_rate": metrics.production_correction_rate,
+                "correction_rate_delta": metrics.correction_rate_delta,
+            },
+        }))
+    }
+
     pub async fn get_model(&self, model_id: &str) -> Result<ModelVersion, String> {
         self.model_from_version(model_id).await
     }
@@ -6336,42 +7028,33 @@ impl PgRepository {
     pub async fn promote_model(
         &self,
         model_id: &str,
-        user_id: &str,
+        _user_id: &str,
     ) -> Result<ModelVersion, String> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|error| format!("begin model promotion: {error}"))?;
-        let locked_model: Option<String> = sqlx::query_scalar(
-            "SELECT model_version FROM model_versions WHERE model_version = $1 FOR UPDATE",
+        let locked_model = sqlx::query(
+            "SELECT model_version, status FROM model_versions WHERE model_version = $1 FOR UPDATE",
         )
         .bind(model_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|error| format!("lock model for promotion: {error}"))?;
-        if locked_model.is_none() {
-            return Err(format!("model {model_id} not found"));
-        }
-        let is_learning_candidate: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM learning_cycle_candidates WHERE model_version = $1)",
-        )
-        .bind(model_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|error| format!("check controlled candidate lineage: {error}"))?;
-        if is_learning_candidate {
+        let locked_model = locked_model.ok_or_else(|| format!("model {model_id} not found"))?;
+        let current_status: String = locked_model
+            .try_get("status")
+            .map_err(|error| format!("model promotion status: {error}"))?;
+        if current_status != "PRODUCTION" {
             return Err(
-                "candidate is managed by a learning cycle; use candidate promotion after all policy gates pass"
+                "direct model promotion is disabled; start a controlled canary rollout after evaluation"
                     .to_owned(),
             );
         }
-        sqlx::query("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'PRODUCTION' AND model_version <> $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("archive model: {error}"))?;
-        sqlx::query("UPDATE model_versions SET status = 'PRODUCTION', promoted_at = now() WHERE model_version = $1").bind(model_id).execute(&mut *tx).await.map_err(|error| format!("promote model: {error}"))?;
-        sqlx::query("INSERT INTO audit_log (actor_id, action, entity_type, entity_id, reason) VALUES ($1, 'PROMOTE_MODEL', 'model_version', $2, 'manual promotion')").bind(user_id).bind(model_id).execute(&mut *tx).await.map_err(|error| format!("audit model promotion: {error}"))?;
         tx.commit()
             .await
-            .map_err(|error| format!("commit model promotion: {error}"))?;
+            .map_err(|error| format!("commit model promotion check: {error}"))?;
         self.model_from_version(model_id).await
     }
 
@@ -6808,7 +7491,9 @@ impl PgRepository {
                     updated_at: created_at.clone(),
                 };
                 let classification_started = Instant::now();
-                let classification = self.classify(text, language, request_id, trace_id).await;
+                let classification = self
+                    .classify_production(text, language, request_id, trace_id)
+                    .await;
                 let classification_latency_ms =
                     classification_started.elapsed().as_secs_f64() * 1000.0;
                 let mut language_state = assist_language_state(language);

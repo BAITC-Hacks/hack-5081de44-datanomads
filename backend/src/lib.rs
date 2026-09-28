@@ -72,7 +72,10 @@ const DRIFT_TRIGGER_MAX_OFFSET: usize = 1_000_000;
 static LOG_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn is_active_learning_cycle_state(state: &str) -> bool {
-    matches!(state, "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION")
+    matches!(
+        state,
+        "COLLECT" | "TRAINING" | "EVALUATE" | "DECISION" | "CANARY" | "MONITORING"
+    )
 }
 
 pub(crate) fn synthetic_evidence_allowed(runtime_mode: &str) -> bool {
@@ -2011,6 +2014,11 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/{model_id}", get(get_model))
         .route("/api/v1/models/{model_id}/promote", post(promote_model))
+        .route("/api/v1/model-rollouts", get(list_model_rollouts))
+        .route(
+            "/api/v1/model-rollouts/{rollout_id}/full-production",
+            post(complete_model_rollout),
+        )
         .layer(middleware::from_fn(request_context))
         .layer(
             CorsLayer::new()
@@ -7493,7 +7501,7 @@ async fn learning_overview(
         active_cycle,
         production_model,
         controlled_loop: json!({
-            "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "PROMOTED", "REJECTED"],
+            "stages": ["COLLECT", "TRAINING", "EVALUATE", "DECISION", "CANARY", "MONITORING", "PROMOTED", "REJECTED"],
             "production_auto_update": false,
             "operator_correction_triggers_training": false,
         }),
@@ -9016,44 +9024,79 @@ async fn promote_model(
                 }
             });
     }
-    let mut store = state.write_store()?;
-    if !store.models.contains_key(&model_id) {
-        return Err(ApiError::NotFound(format!("model {model_id} not found")));
-    }
-    if store
-        .learning_cycles
-        .values()
-        .any(|cycle| cycle.candidate_model_version == model_id)
-    {
+    let store = state.read_store()?;
+    let model = store
+        .models
+        .get(&model_id)
+        .ok_or_else(|| ApiError::NotFound(format!("model {model_id} not found")))?;
+    if !model.status.eq_ignore_ascii_case("production") {
         return Err(ApiError::Conflict(
-            "candidate is managed by a learning cycle; use candidate promotion after all policy gates pass"
+            "direct model promotion is disabled; start a controlled canary rollout after evaluation"
                 .to_owned(),
         ));
     }
-    for model in store.models.values_mut() {
-        if model.status == "production" {
-            model.status = "archived".to_owned();
-        }
-    }
-    let model = store
-        .models
-        .get_mut(&model_id)
-        .ok_or_else(|| ApiError::NotFound(format!("model {model_id} not found")))?;
-    model.status = "production".to_owned();
-    model.promoted_at = Some(DEMO_TIMESTAMP.to_owned());
-    info!(
-        service = SERVICE_NAME,
-        model_version = %model_id,
-        request_id = "n/a",
-        trace_id = "n/a",
-        endpoint = "/api/v1/models/{model_id}/promote",
-        latency_ms = 0.0_f64,
-        status = 200_u16,
-        error_code = "none",
-        result_state = "promoted",
-        "model_promoted"
-    );
     Ok(Json(model.clone()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompleteModelRolloutRequest {
+    pub reason: String,
+}
+
+async fn list_model_rollouts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let repository = state.repository().ok_or_else(|| {
+        ApiError::Unavailable("model rollout status requires PostgreSQL storage".to_owned())
+    })?;
+    repository
+        .model_rollouts()
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
+async fn complete_model_rollout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(rollout_id): Path<String>,
+    Json(request): Json<CompleteModelRolloutRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    require_auditable_actor(&actor)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.chars().count() > 1000 {
+        return Err(ApiError::BadRequest(
+            "reason must contain 1 to 1000 characters".to_owned(),
+        ));
+    }
+    let repository = state.repository().ok_or_else(|| {
+        ApiError::Unavailable("model rollout requires PostgreSQL storage".to_owned())
+    })?;
+    repository
+        .complete_model_rollout(
+            &rollout_id,
+            &actor.user_id,
+            reason,
+            &request_id_from_headers(&headers),
+        )
+        .await
+        .map(Json)
+        .map_err(|error| {
+            if error.contains("not found") {
+                ApiError::NotFound(error)
+            } else if error.contains("not sufficient")
+                || error.contains("not active")
+                || error.contains("unsupported")
+                || error.contains("changed")
+            {
+                ApiError::Conflict(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })
 }
 
 async fn openapi() -> Json<Value> {
@@ -9133,18 +9176,20 @@ async fn openapi() -> Json<Value> {
             "/api/v1/learning/{cycle_id}": { "get": { "summary": "Get learning cycle" } },
             "/api/v1/learning/{cycle_id}/feedback": { "post": { "summary": "Add validated learning feedback" } },
             "/api/v1/learning/{cycle_id}/candidates": { "post": { "summary": "Register a candidate for the cycle frozen evaluation set" } },
-            "/api/v1/learning/{cycle_id}/promote": { "post": { "summary": "Promote candidate after human review" } },
+            "/api/v1/learning/{cycle_id}/promote": { "post": { "summary": "Start a 10% canary rollout after human review" } },
             "/api/v1/learning/{cycle_id}/reject": { "post": { "summary": "Reject candidate after human review" } },
             "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
             "/api/v1/learning/cycle/close": { "post": { "summary": "Close collect and train candidate" } },
             "/api/v1/learning/candidate/evaluation": { "get": { "summary": "Read candidate evaluation evidence and promotion gates" } },
-            "/api/v1/learning/candidate/promote": { "post": { "summary": "Promote candidate" } },
+            "/api/v1/learning/candidate/promote": { "post": { "summary": "Start a 10% canary rollout" } },
             "/api/v1/learning/candidate/reject": { "post": { "summary": "Reject candidate" } },
             "/api/v1/tickets/{ticket_id}/relation-feedback": { "post": { "summary": "Collect relation feedback" } },
             "/api/v1/tickets/{ticket_id}/routing-feedback": { "get": { "summary": "List simulated service routing feedback" }, "post": { "summary": "Record simulated service routing feedback" } },
             "/api/v1/models": { "get": { "summary": "List model versions" } },
             "/api/v1/models/{model_id}": { "get": { "summary": "Get model version" } },
-            "/api/v1/models/{model_id}/promote": { "post": { "summary": "Promote a model version outside controlled learning cycles" } }
+            "/api/v1/models/{model_id}/promote": { "post": { "summary": "Reject direct model promotion outside the canary rollout path" } },
+            "/api/v1/model-rollouts": { "get": { "summary": "List versioned model rollout status and canary evidence" } },
+            "/api/v1/model-rollouts/{rollout_id}/full-production": { "post": { "summary": "Manually move an eligible canary rollout to full production" } }
         }
     }))
 }
@@ -9745,6 +9790,11 @@ mod tests {
         assert!(value["paths"]["/api/v1/learning/{cycle_id}/candidates"]["post"].is_object());
         assert!(value["paths"]["/api/v1/forecast/reforecast"]["post"].is_object());
         assert!(value["paths"]["/api/v1/models/{model_id}/promote"].is_object());
+        assert!(value["paths"]["/api/v1/model-rollouts"]["get"].is_object());
+        assert!(
+            value["paths"]["/api/v1/model-rollouts/{rollout_id}/full-production"]["post"]
+                .is_object()
+        );
         assert!(value["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert!(value["paths"]["/internal/v1/classify"].is_null());
     }

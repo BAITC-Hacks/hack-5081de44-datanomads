@@ -685,7 +685,7 @@ paths:
   /api/v1/learning/candidate/promote:
     post:
       tags: [learning]
-      summary: Human approval of a candidate
+      summary: Human approval to start a 10% canary rollout
       security: [{ pulseRole: [] }, {}]
       requestBody:
         required: true
@@ -694,7 +694,7 @@ paths:
             schema: { $ref: '#/components/schemas/CycleDecisionRequest' }
       responses:
         '200':
-          description: Candidate promoted
+          description: Canary started; the production model pointer is unchanged
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StoredResponse' }
@@ -717,6 +717,48 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/StoredResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/model-rollouts:
+    get:
+      tags: [models]
+      summary: List versioned rollout status and privacy-safe canary evidence
+      description: ML_REVIEWER or ADMIN only. Does not expose ticket text or operator notes.
+      security: [{ pulseRole: [] }, {}]
+      responses:
+        '200':
+          description: Recent canary and completed rollouts with their evidence gates
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelRolloutPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/model-rollouts/{rollout_id}/full-production:
+    post:
+      tags: [models]
+      summary: Manually complete an eligible rollout
+      description: Requires 100 successful canary tickets, 20 canary operator decisions, zero canary inference failures, and correction-rate delta no greater than +0.05. The actor must be ML_REVIEWER or ADMIN.
+      parameters:
+        - name: rollout_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteModelRolloutRequest' }
+      responses:
+        '200':
+          description: Candidate became production after an explicit reviewer action
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CompleteModelRolloutResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /api/v1/models:
     get:
       tags: [models]
@@ -1267,8 +1309,8 @@ paths:
   /api/v1/models/{model_id}/promote:
     post:
       tags: [models]
-      summary: Promote a model version outside controlled learning cycles
-      description: Cycle candidates must use the learning promotion route after all evidence gates pass.
+      summary: Legacy direct promotion route
+      description: Direct promotion is disabled. Use a learning-cycle canary and complete its rollout after evidence gates pass.
       parameters:
         - name: model_id
           in: path
@@ -1276,7 +1318,7 @@ paths:
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
       responses:
-        '200': { description: Request completed }
+        '200': { description: Existing production version returned without changing the production pointer }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
@@ -2296,7 +2338,7 @@ components:
       properties:
         id: { type: string }
         cycle_id: { type: string }
-        state: { type: string, enum: [COLLECT, TRAINING, TRAINING_FAILED, EVALUATE, DECISION, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK, DATASET_BUILD_FAILED] }
+        state: { type: string, enum: [COLLECT, TRAINING, TRAINING_FAILED, EVALUATE, DECISION, CANARY, MONITORING, PROMOTED, REJECTED, INSUFFICIENT_FEEDBACK, DATASET_BUILD_FAILED] }
         dataset_version: { type: string }
         candidate_model_version: { type: string }
         collect_started_at: { type: string, format: date-time }
@@ -2528,3 +2570,48 @@ components:
         dataset_version: { type: string }
         artifact_checksum: { type: string }
         status: { type: string, enum: [candidate, production, rejected, archived] }
+    CompleteModelRolloutRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    ModelRolloutMetrics:
+      type: object
+      required: [canary_ticket_count, canary_decision_count, failed_inference_count, candidate_correction_rate, production_correction_rate, correction_rate_delta]
+      properties:
+        canary_ticket_count: { type: integer, minimum: 0 }
+        canary_decision_count: { type: integer, minimum: 0 }
+        failed_inference_count: { type: integer, minimum: 0 }
+        candidate_correction_rate: { type: number, nullable: true }
+        production_correction_rate: { type: number, nullable: true }
+        correction_rate_delta: { type: number, nullable: true }
+    ModelRollout:
+      type: object
+      required: [rollout_id, status, candidate_model_version, previous_production_model_version, metrics]
+      properties:
+        rollout_id: { type: string }
+        status: { type: string, enum: [CANARY, MONITORING, FULL_PRODUCTION, ROLLED_BACK, CANCELLED] }
+        candidate_model_version: { type: string }
+        previous_production_model_version: { type: string }
+        canary_traffic_percent: { type: integer, minimum: 1, maximum: 25 }
+        policy_version: { type: string }
+        policy_snapshot: { type: object, additionalProperties: true }
+        metrics: { $ref: '#/components/schemas/ModelRolloutMetrics' }
+        full_rollout_eligible: { type: boolean }
+        blocking_gates: { type: array, items: { type: string } }
+    ModelRolloutPage:
+      type: object
+      required: [items, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ModelRollout' } }
+        total: { type: integer, minimum: 0 }
+    CompleteModelRolloutResponse:
+      type: object
+      required: [rollout_id, status, candidate_model_version, previous_production_model_version, metrics]
+      properties:
+        rollout_id: { type: string }
+        status: { type: string, enum: [FULL_PRODUCTION] }
+        candidate_model_version: { type: string }
+        previous_production_model_version: { type: string }
+        metrics: { $ref: '#/components/schemas/ModelRolloutMetrics' }
