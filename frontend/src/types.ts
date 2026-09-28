@@ -333,6 +333,53 @@ export interface ForecastBacktest {
   smape?: number | null
 }
 
+export interface ForecastActualObservation {
+  date: string
+  previousForecast: number
+  actual: number
+  absoluteError: number
+}
+
+export interface ForecastFutureComparison {
+  date: string
+  previousForecast: number
+  updatedForecast: number
+  delta: number
+}
+
+export interface ForecastPeakChange {
+  previousPeakDate: string
+  updatedPeakDate: string
+  previousPeak: number
+  updatedPeak: number
+  delta: number
+  policyVersion: string
+  threshold?: number | null
+  status: string
+  managerSignalId?: string | null
+}
+
+export interface ForecastReforecast {
+  previousRunId: string
+  previousModelVersion: string
+  previousIssuedAt: string
+  actualObservations: ForecastActualObservation[]
+  futureComparisons: ForecastFutureComparison[]
+  peakChange?: ForecastPeakChange | null
+}
+
+export interface ForecastManagerSignal {
+  id: string
+  runId: string
+  previousRunId: string
+  createdAt: string
+  previousPeak: number
+  updatedPeak: number
+  delta: number
+  threshold: number
+  policyVersion: string
+}
+
 export interface ModelStatus {
   name: string
   version: string
@@ -426,6 +473,11 @@ export interface DashboardData {
   forecastStart?: string
   forecastExpectedPeaks?: string[]
   forecastBacktest?: ForecastBacktest
+  forecastRunId?: string
+  forecastIssuedAt?: string
+  forecastReforecast?: ForecastReforecast
+  forecastPreviousPoints?: ForecastPoint[]
+  forecastManagerSignals?: ForecastManagerSignal[]
   datasetProvenance?: DatasetProvenance
   filterOptions: {
     regions: Array<{ id: string; label: string }>

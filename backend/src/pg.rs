@@ -19,14 +19,16 @@ use crate::{
     AnalyticsDrilldownTicket, AnalyticsQuery, AnalyticsResponse, AssistOrchestration,
     AssistPreviewResponse, AssistStage, CloseLearningCycleRequest, Config,
     ContextHandoffLocationSource, ContextHandoffPackage, CreateLearningCycleRequest,
-    DatasetProvenance, DecisionRequest, DecisionResponse, ForecastQuery, ForecastResponse,
-    ImportRequest, ImportResponse, LearningCycle, LearningFeedback, LearningFeedbackRequest,
-    LearningMetrics, LearningOverview, MetricBucket, ModelQuery, ModelVersion, OperatorDecision,
-    OutcomeVerificationEvidence, OutcomeVerificationRecord, OutcomeVerificationSnapshot,
-    OutcomeVerificationState, Prediction, QueryIntentRequest, RelatedTicketMetadata,
-    RelationSuggestionSnapshot, ResponseTemplate, ResponseTemplateInput, ResponseTemplateRecord,
-    ResponseTemplatesResponse, RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics,
-    Ticket, TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
+    DatasetProvenance, DecisionRequest, DecisionResponse, ForecastActualObservation,
+    ForecastFutureComparison, ForecastManagerSignal, ForecastPeakChange, ForecastQuery,
+    ForecastReforecast, ForecastResponse, ImportRequest, ImportResponse, LearningCycle,
+    LearningFeedback, LearningFeedbackRequest, LearningMetrics, LearningOverview, MetricBucket,
+    ModelQuery, ModelVersion, OperatorDecision, OutcomeVerificationEvidence,
+    OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Prediction,
+    QueryIntentRequest, RelatedTicketMetadata, RelationSuggestionSnapshot, ResponseTemplate,
+    ResponseTemplateInput, ResponseTemplateRecord, ResponseTemplatesResponse,
+    RoutingFeedbackRecord, RuleProvenance, RuleSource, RuntimeMetrics, Ticket,
+    TicketDetailResponse, TicketListResponse, TicketQuery, TimeSeriesPoint, Topic,
     ROUTING_FEEDBACK_DEMO_SOURCE_SYSTEM, ROUTING_FEEDBACK_PENDING_STATUS,
 };
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
@@ -36,6 +38,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{
     migrate::Migrator, postgres::PgPoolOptions, FromRow, PgPool, Postgres, QueryBuilder, Row,
+    Transaction,
 };
 use std::{
     collections::HashMap,
@@ -47,6 +50,8 @@ const DEFAULT_EMBEDDING_DIMENSION: usize = 32;
 const DEFAULT_QDRANT_COLLECTION: &str = "pulse109_tickets_v1";
 const DEFAULT_EMBEDDER_VERSION: &str = "embedder-demo-2026-09-21-001";
 const DEFAULT_FORECAST_MODEL_VERSION: &str = "forecast-statsforecast-seasonal-naive-2026-09-24-001";
+const FORECAST_PEAK_CHANGE_POLICY_VERSION: &str = "peak-change-backtest-mae-v1";
+const FORECAST_SIGNAL_HISTORY_LIMIT: i64 = 10;
 const READINESS_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(2);
 static MIGRATOR: Migrator = sqlx::migrate!("../migrations");
 
@@ -3613,6 +3618,10 @@ impl PgRepository {
                     "observed_days": observed_days,
                     "required_days": crate::FORECAST_SEASON_LENGTH_DAYS,
                 }),
+                run_id: None,
+                issued_at: None,
+                reforecast: None,
+                manager_signals: Vec::new(),
             });
         }
         let payload = self
@@ -3709,7 +3718,259 @@ impl PgRepository {
                 .get("backtest")
                 .cloned()
                 .unwrap_or_else(|| json!({})),
+            run_id: None,
+            issued_at: None,
+            reforecast: None,
+            manager_signals: Vec::new(),
         })
+    }
+
+    pub async fn reforecast(&self, query: &ForecastQuery) -> Result<ForecastResponse, String> {
+        let mut response = self.forecast(query).await?;
+        let issued_at = Utc::now();
+        let issued_on = issued_at.date_naive();
+        let filter_state = forecast_filter_state(query);
+        let filter_lock = format!(
+            "rolling-forecast:{}:{}",
+            filter_state, response.horizon_days
+        );
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| format!("begin rolling forecast persistence: {error}"))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(filter_lock)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("lock rolling forecast slice: {error}"))?;
+
+        let existing = sqlx::query(
+            "SELECT response FROM forecast_runs WHERE filter_state = $1 AND horizon_days = $2 AND model_version = $3 AND issued_on = $4",
+        )
+        .bind(&filter_state)
+        .bind(i32::try_from(response.horizon_days).map_err(|error| format!("forecast horizon range: {error}"))?)
+        .bind(&response.model_version)
+        .bind(issued_on)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("find rolling forecast for today: {error}"))?;
+        if let Some(existing) = existing {
+            let stored: Value = existing
+                .try_get("response")
+                .map_err(|error| format!("read saved rolling forecast: {error}"))?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| format!("finish repeated rolling forecast: {error}"))?;
+            return serde_json::from_value(stored)
+                .map_err(|error| format!("decode saved rolling forecast: {error}"));
+        }
+
+        let previous = sqlx::query(
+            "SELECT id, model_version, issued_at, response FROM forecast_runs WHERE filter_state = $1 AND horizon_days = $2 ORDER BY issued_on DESC, issued_at DESC, id DESC LIMIT 1",
+        )
+        .bind(&filter_state)
+        .bind(i32::try_from(response.horizon_days).map_err(|error| format!("forecast horizon range: {error}"))?)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("find previous rolling forecast: {error}"))?;
+        let previous = if let Some(row) = previous {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|error| format!("previous forecast id: {error}"))?;
+            let model_version: String = row
+                .try_get("model_version")
+                .map_err(|error| format!("previous forecast model version: {error}"))?;
+            let previous_issued_at: DateTime<Utc> = row
+                .try_get("issued_at")
+                .map_err(|error| format!("previous forecast issue time: {error}"))?;
+            let previous_response_value: Value = row
+                .try_get("response")
+                .map_err(|error| format!("previous forecast snapshot: {error}"))?;
+            let previous_response =
+                serde_json::from_value::<ForecastResponse>(previous_response_value)
+                    .map_err(|error| format!("decode previous forecast snapshot: {error}"))?;
+            Some((id, model_version, previous_issued_at, previous_response))
+        } else {
+            None
+        };
+
+        let mut comparison = previous
+            .as_ref()
+            .map(|(id, model, at, previous_response)| {
+                build_forecast_reforecast(
+                    &id.to_string(),
+                    model,
+                    &at.to_rfc3339(),
+                    previous_response,
+                    &response,
+                    issued_on,
+                )
+            })
+            .transpose()?;
+        let source_is_verified_real = if comparison
+            .as_ref()
+            .and_then(|item| item.peak_change.as_ref())
+            .is_some_and(|peak| peak.status == "SIGNIFICANT")
+        {
+            self.forecast_slice_is_verified_real(query, &mut transaction)
+                .await?
+        } else {
+            false
+        };
+
+        let previous_run_id = previous.as_ref().map(|(id, _, _, _)| *id);
+        let run_id: i64 = sqlx::query_scalar(
+            "INSERT INTO forecast_runs (filter_state, horizon_days, model_version, issued_on, issued_at, previous_run_id, response, comparison) VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7) RETURNING id",
+        )
+        .bind(&filter_state)
+        .bind(i32::try_from(response.horizon_days).map_err(|error| format!("forecast horizon range: {error}"))?)
+        .bind(&response.model_version)
+        .bind(issued_on)
+        .bind(issued_at)
+        .bind(previous_run_id)
+        .bind(comparison.as_ref().map(serde_json::to_value).transpose().map_err(|error| format!("encode forecast comparison: {error}"))?)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| format!("persist rolling forecast snapshot: {error}"))?;
+
+        if let Some(peak_change) = comparison
+            .as_mut()
+            .and_then(|item| item.peak_change.as_mut())
+        {
+            if peak_change.status == "SIGNIFICANT" && !source_is_verified_real {
+                peak_change.status = "SOURCE_NOT_VERIFIED_REAL".to_owned();
+            } else if peak_change.status == "SIGNIFICANT" {
+                let previous_run_id = previous_run_id
+                    .ok_or_else(|| "significant forecast change has no previous run".to_owned())?;
+                let signal_id: i64 = sqlx::query_scalar(
+                    "INSERT INTO forecast_manager_signals (run_id, previous_run_id, policy_version, previous_peak_date, updated_peak_date, previous_peak, updated_peak, delta, threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                )
+                .bind(run_id)
+                .bind(previous_run_id)
+                .bind(&peak_change.policy_version)
+                .bind(NaiveDate::parse_from_str(&peak_change.previous_peak_date, "%Y-%m-%d").map_err(|error| format!("previous forecast peak date: {error}"))?)
+                .bind(NaiveDate::parse_from_str(&peak_change.updated_peak_date, "%Y-%m-%d").map_err(|error| format!("updated forecast peak date: {error}"))?)
+                .bind(i32::try_from(peak_change.previous_peak).map_err(|error| format!("previous forecast peak range: {error}"))?)
+                .bind(i32::try_from(peak_change.updated_peak).map_err(|error| format!("updated forecast peak range: {error}"))?)
+                .bind(peak_change.delta)
+                .bind(peak_change.threshold.ok_or_else(|| "significant forecast change has no backtest threshold".to_owned())?)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|error| format!("persist forecast manager signal: {error}"))?;
+                peak_change.manager_signal_id = Some(signal_id.to_string());
+                peak_change.status = "SIGNAL_CREATED".to_owned();
+            }
+        }
+
+        let recent_signals = sqlx::query(
+            "SELECT s.id, s.run_id, s.previous_run_id, s.created_at, s.previous_peak, s.updated_peak, s.delta, s.threshold::double precision AS threshold, s.policy_version FROM forecast_manager_signals s JOIN forecast_runs r ON r.id = s.run_id WHERE r.filter_state = $1 AND r.horizon_days = $2 ORDER BY s.created_at DESC, s.id DESC LIMIT $3",
+        )
+        .bind(&filter_state)
+        .bind(i32::try_from(response.horizon_days).map_err(|error| format!("forecast horizon range: {error}"))?)
+        .bind(FORECAST_SIGNAL_HISTORY_LIMIT)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|error| format!("read recent forecast manager signals: {error}"))?;
+        response.run_id = Some(run_id.to_string());
+        response.issued_at = Some(issued_at.to_rfc3339());
+        response.reforecast = comparison;
+        response.manager_signals = recent_signals
+            .into_iter()
+            .map(|row| {
+                Ok(ForecastManagerSignal {
+                    id: row
+                        .try_get::<i64, _>("id")
+                        .map_err(|error| format!("forecast signal id: {error}"))?
+                        .to_string(),
+                    run_id: row
+                        .try_get::<i64, _>("run_id")
+                        .map_err(|error| format!("forecast signal run id: {error}"))?
+                        .to_string(),
+                    previous_run_id: row
+                        .try_get::<i64, _>("previous_run_id")
+                        .map_err(|error| format!("forecast signal previous run id: {error}"))?
+                        .to_string(),
+                    created_at: row
+                        .try_get::<DateTime<Utc>, _>("created_at")
+                        .map_err(|error| format!("forecast signal time: {error}"))?
+                        .to_rfc3339(),
+                    previous_peak: row
+                        .try_get::<i32, _>("previous_peak")
+                        .map_err(|error| format!("forecast signal previous peak: {error}"))?
+                        .max(0) as u32,
+                    updated_peak: row
+                        .try_get::<i32, _>("updated_peak")
+                        .map_err(|error| format!("forecast signal updated peak: {error}"))?
+                        .max(0) as u32,
+                    delta: row
+                        .try_get("delta")
+                        .map_err(|error| format!("forecast signal delta: {error}"))?,
+                    threshold: row
+                        .try_get("threshold")
+                        .map_err(|error| format!("forecast signal threshold: {error}"))?,
+                    policy_version: row
+                        .try_get("policy_version")
+                        .map_err(|error| format!("forecast signal policy: {error}"))?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let stored_response = serde_json::to_value(&response)
+            .map_err(|error| format!("encode rolling forecast response: {error}"))?;
+        let stored_comparison = response
+            .reforecast
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("encode persisted forecast comparison: {error}"))?;
+        sqlx::query("UPDATE forecast_runs SET response = $2, comparison = $3 WHERE id = $1")
+            .bind(run_id)
+            .bind(stored_response)
+            .bind(stored_comparison)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| format!("finish rolling forecast snapshot: {error}"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit rolling forecast snapshot: {error}"))?;
+        Ok(response)
+    }
+
+    async fn forecast_slice_is_verified_real(
+        &self,
+        query: &ForecastQuery,
+        transaction: &mut Transaction<'_, Postgres>,
+    ) -> Result<bool, String> {
+        let filters = AnalyticsQuery {
+            region_id: query.region_id.clone(),
+            topic_id: query.topic_id.clone(),
+            service_id: query.service_id.clone(),
+            status: query.status.clone(),
+            district: query.district.clone(),
+            channel: query.channel.clone(),
+            range: Some("366d".to_owned()),
+        };
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "WITH provenance AS (SELECT dtl.ticket_id, BOOL_OR(dv.is_synthetic) AS has_synthetic, BOOL_OR(NOT dv.is_synthetic) AS has_real FROM dataset_ticket_links dtl JOIN dataset_versions dv USING (dataset_version) GROUP BY dtl.ticket_id) SELECT COUNT(*)::bigint AS total_count, COUNT(*) FILTER (WHERE provenance.ticket_id IS NOT NULL AND provenance.has_real AND NOT provenance.has_synthetic)::bigint AS verified_real_count FROM tickets t LEFT JOIN provenance ON provenance.ticket_id = t.id WHERE t.created_at >= ",
+        );
+        builder
+            .push_bind(Utc::now() - ChronoDuration::days(366))
+            .push(" AND t.created_at <= now()");
+        push_analytics_filters(&mut builder, &filters, "t");
+        let row = builder
+            .build()
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|error| format!("verify rolling forecast data provenance: {error}"))?;
+        let total_count: i64 = row
+            .try_get("total_count")
+            .map_err(|error| format!("forecast provenance total: {error}"))?;
+        let verified_real_count: i64 = row
+            .try_get("verified_real_count")
+            .map_err(|error| format!("forecast provenance verified count: {error}"))?;
+        Ok(total_count > 0 && total_count == verified_real_count)
     }
 
     pub async fn analytics_query(&self, query: &QueryIntentRequest) -> Result<Value, String> {
@@ -7146,6 +7407,140 @@ fn percent_change(current: i64, previous: i64) -> Option<f64> {
     }
 }
 
+fn forecast_filter_state(query: &ForecastQuery) -> Value {
+    json!({
+        "region_id": query.region_id.as_deref().map(normalize_region_id),
+        "topic_id": query.topic_id.as_deref().map(normalize_topic_id),
+        "service_id": query.service_id.as_deref().map(|value| value.trim()),
+        "status": query.status.as_deref().map(|value| value.trim().to_ascii_uppercase()),
+        "district": query.district.as_deref().map(|value| value.trim()),
+        "channel": query.channel.as_deref().map(|value| value.trim()),
+        "history_days": 366,
+        "granularity": "DAY",
+    })
+}
+
+fn forecast_backtest_mae(response: &ForecastResponse) -> Option<f64> {
+    if response.status != "OK"
+        || response
+            .backtest
+            .get("sample_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+            == 0
+    {
+        return None;
+    }
+    response
+        .backtest
+        .get("mae")
+        .and_then(Value::as_f64)
+        .filter(|mae| mae.is_finite() && *mae >= 0.0)
+}
+
+fn build_forecast_reforecast(
+    previous_run_id: &str,
+    previous_model_version: &str,
+    previous_issued_at: &str,
+    previous: &ForecastResponse,
+    updated: &ForecastResponse,
+    as_of: NaiveDate,
+) -> Result<ForecastReforecast, String> {
+    let actuals = updated
+        .history
+        .iter()
+        .map(|point| (point.date.as_str(), point.tickets))
+        .collect::<HashMap<_, _>>();
+    let mut actual_observations = Vec::new();
+    for point in &previous.points {
+        let point_date = NaiveDate::parse_from_str(&point.date, "%Y-%m-%d")
+            .map_err(|error| format!("previous forecast point date: {error}"))?;
+        if point_date < as_of {
+            if let Some(actual) = actuals.get(point.date.as_str()) {
+                actual_observations.push(ForecastActualObservation {
+                    date: point.date.clone(),
+                    previous_forecast: point.tickets,
+                    actual: *actual,
+                    absolute_error: point.tickets.abs_diff(*actual),
+                });
+            }
+        }
+    }
+
+    let mut previous_future = HashMap::new();
+    for point in &previous.points {
+        let point_date = NaiveDate::parse_from_str(&point.date, "%Y-%m-%d")
+            .map_err(|error| format!("previous forecast future date: {error}"))?;
+        if point_date > as_of {
+            previous_future.insert(point.date.as_str(), point.tickets);
+        }
+    }
+    let mut future_comparisons = Vec::new();
+    for point in &updated.points {
+        let point_date = NaiveDate::parse_from_str(&point.date, "%Y-%m-%d")
+            .map_err(|error| format!("updated forecast future date: {error}"))?;
+        if point_date <= as_of {
+            continue;
+        }
+        if let Some(previous_forecast) = previous_future.get(point.date.as_str()) {
+            future_comparisons.push(ForecastFutureComparison {
+                date: point.date.clone(),
+                previous_forecast: *previous_forecast,
+                updated_forecast: point.tickets,
+                delta: i64::from(point.tickets) - i64::from(*previous_forecast),
+            });
+        }
+    }
+
+    let peak_change = if future_comparisons.is_empty() {
+        None
+    } else {
+        let previous_peak_point = future_comparisons
+            .iter()
+            .max_by_key(|point| point.previous_forecast)
+            .expect("future comparison is non-empty");
+        let updated_peak_point = future_comparisons
+            .iter()
+            .max_by_key(|point| point.updated_forecast)
+            .expect("future comparison is non-empty");
+        let previous_peak = previous_peak_point.previous_forecast;
+        let updated_peak = updated_peak_point.updated_forecast;
+        let threshold = forecast_backtest_mae(previous)
+            .zip(forecast_backtest_mae(updated))
+            .map(|(previous_mae, updated_mae)| previous_mae.max(updated_mae));
+        let status = match threshold {
+            Some(threshold)
+                if (i64::from(updated_peak) - i64::from(previous_peak)).abs() as f64
+                    > threshold =>
+            {
+                "SIGNIFICANT"
+            }
+            Some(_) => "WITHIN_BACKTEST_ERROR",
+            None => "BACKTEST_UNAVAILABLE",
+        };
+        Some(ForecastPeakChange {
+            previous_peak_date: previous_peak_point.date.clone(),
+            updated_peak_date: updated_peak_point.date.clone(),
+            previous_peak,
+            updated_peak,
+            delta: i64::from(updated_peak) - i64::from(previous_peak),
+            policy_version: FORECAST_PEAK_CHANGE_POLICY_VERSION.to_owned(),
+            threshold,
+            status: status.to_owned(),
+            manager_signal_id: None,
+        })
+    };
+
+    Ok(ForecastReforecast {
+        previous_run_id: previous_run_id.to_owned(),
+        previous_model_version: previous_model_version.to_owned(),
+        previous_issued_at: previous_issued_at.to_owned(),
+        actual_observations,
+        future_comparisons,
+        peak_change,
+    })
+}
+
 fn push_analytics_filters(
     builder: &mut QueryBuilder<'_, Postgres>,
     query: &AnalyticsQuery,
@@ -7637,5 +8032,141 @@ mod persisted_confidence_state_tests {
             persisted_confidence_state(&json!({}), false, 0.42),
             "confident"
         );
+    }
+}
+
+#[cfg(test)]
+mod rolling_forecast_tests {
+    use super::*;
+
+    fn response(
+        points: &[(&str, u32)],
+        history: &[(&str, u32)],
+        mae: Option<f64>,
+    ) -> ForecastResponse {
+        ForecastResponse {
+            source: "postgres+ml".to_owned(),
+            model_version: "forecast-test-v1".to_owned(),
+            model: "seasonal_naive".to_owned(),
+            status: "OK".to_owned(),
+            insufficient_history: false,
+            horizon_days: 30,
+            history: history
+                .iter()
+                .map(|(date, tickets)| TimeSeriesPoint {
+                    date: (*date).to_owned(),
+                    tickets: *tickets,
+                    resolved: 0,
+                })
+                .collect(),
+            forecast_start: points.first().map(|(date, _)| (*date).to_owned()),
+            points: points
+                .iter()
+                .map(|(date, tickets)| TimeSeriesPoint {
+                    date: (*date).to_owned(),
+                    tickets: *tickets,
+                    resolved: 0,
+                })
+                .collect(),
+            expected_peaks: Vec::new(),
+            backtest: json!({"sample_count": if mae.is_some() { 10 } else { 0 }, "mae": mae}),
+            run_id: None,
+            issued_at: None,
+            reforecast: None,
+            manager_signals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rolling_forecast_compares_previous_values_to_facts_and_updated_values() {
+        let previous = response(
+            &[
+                ("2026-09-29", 10),
+                ("2026-09-30", 12),
+                ("2026-10-01", 20),
+                ("2026-10-02", 100),
+                ("2026-10-03", 20),
+            ],
+            &[],
+            Some(10.0),
+        );
+        let updated = response(
+            &[("2026-10-01", 20), ("2026-10-02", 130), ("2026-10-03", 20)],
+            &[("2026-09-29", 12), ("2026-09-30", 11)],
+            Some(15.0),
+        );
+
+        let comparison = build_forecast_reforecast(
+            "41",
+            "forecast-test-v1",
+            "2026-09-28T09:00:00Z",
+            &previous,
+            &updated,
+            NaiveDate::from_ymd_opt(2026, 9, 30).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(comparison.previous_run_id, "41");
+        assert_eq!(comparison.actual_observations.len(), 1);
+        assert_eq!(comparison.actual_observations[0].previous_forecast, 10);
+        assert_eq!(comparison.actual_observations[0].actual, 12);
+        assert_eq!(comparison.actual_observations[0].absolute_error, 2);
+        assert_eq!(comparison.future_comparisons.len(), 3);
+        let peak = comparison.peak_change.unwrap();
+        assert_eq!(peak.previous_peak_date, "2026-10-02");
+        assert_eq!(peak.updated_peak_date, "2026-10-02");
+        assert_eq!(peak.delta, 30);
+        assert_eq!(peak.threshold, Some(15.0));
+        assert_eq!(peak.status, "SIGNIFICANT");
+    }
+
+    #[test]
+    fn peak_change_policy_withholds_signal_without_backtest_or_above_threshold_delta() {
+        let previous = response(&[("2026-10-01", 100)], &[], Some(10.0));
+        let within_error = response(&[("2026-10-01", 110)], &[], Some(10.0));
+        let without_backtest = response(&[("2026-10-01", 111)], &[], None);
+        let as_of = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+
+        let within = build_forecast_reforecast(
+            "1",
+            "forecast-test-v1",
+            "2026-09-29T09:00:00Z",
+            &previous,
+            &within_error,
+            as_of,
+        )
+        .unwrap();
+        assert_eq!(within.peak_change.unwrap().status, "WITHIN_BACKTEST_ERROR");
+
+        let unavailable = build_forecast_reforecast(
+            "1",
+            "forecast-test-v1",
+            "2026-09-29T09:00:00Z",
+            &previous,
+            &without_backtest,
+            as_of,
+        )
+        .unwrap();
+        assert_eq!(
+            unavailable.peak_change.unwrap().status,
+            "BACKTEST_UNAVAILABLE"
+        );
+    }
+
+    #[test]
+    fn rolling_forecast_without_shared_future_dates_has_no_peak_delta() {
+        let previous = response(&[("2026-09-29", 100)], &[], Some(5.0));
+        let updated = response(&[("2026-09-30", 120)], &[], Some(5.0));
+        let comparison = build_forecast_reforecast(
+            "1",
+            "forecast-test-v1",
+            "2026-09-28T09:00:00Z",
+            &previous,
+            &updated,
+            NaiveDate::from_ymd_opt(2026, 9, 29).unwrap(),
+        )
+        .unwrap();
+        assert!(comparison.future_comparisons.is_empty());
+        assert!(comparison.peak_change.is_none());
     }
 }

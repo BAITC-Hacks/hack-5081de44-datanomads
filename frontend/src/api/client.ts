@@ -1,5 +1,5 @@
 import { demoData } from '../data/demo'
-import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastPoint, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
+import type { ActionableContext, Alert, AssistPreviewState, ConfirmedDecisionSummary, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastBacktest, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OperatorRuntimeMetrics, OutcomeVerificationRecord, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, SimilarTicket, Ticket, TopicMetric } from '../types'
 import { mapLanguage } from '../language'
 import { classificationAlternatives, normalizeConfidenceState } from '../classification'
 import { mapPriority, mapRuleProvenance } from '../routing'
@@ -296,6 +296,37 @@ interface BackendForecast {
   model?: string
   expected_peaks?: string[]
   backtest?: ForecastBacktest
+  run_id?: string
+  issued_at?: string
+  reforecast?: {
+    previous_run_id: string
+    previous_model_version: string
+    previous_issued_at: string
+    actual_observations: Array<{ date: string; previous_forecast: number; actual: number; absolute_error: number }>
+    future_comparisons: Array<{ date: string; previous_forecast: number; updated_forecast: number; delta: number }>
+    peak_change?: {
+      previous_peak_date: string
+      updated_peak_date: string
+      previous_peak: number
+      updated_peak: number
+      delta: number
+      policy_version: string
+      threshold?: number | null
+      status: string
+      manager_signal_id?: string | null
+    } | null
+  } | null
+  manager_signals?: Array<{
+    id: string
+    run_id: string
+    previous_run_id: string
+    created_at: string
+    previous_peak: number
+    updated_peak: number
+    delta: number
+    threshold: number
+    policy_version: string
+  }>
 }
 interface BackendAlertDetail {
   historical_counts?: number[]
@@ -632,12 +663,24 @@ export async function loadRelatedTicketDetail(ticketId: string): Promise<Related
 
 async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardData> {
   const analyticsQuery = queryString(filters)
-  const forecastQuery = new URLSearchParams({ horizon: String(filters.forecastHorizon ?? 30), ...(filters.regionId ? { region_id: filters.regionId } : {}), ...(filters.topicId ? { topic_id: filters.topicId } : {}), ...(filters.serviceId ? { service_id: filters.serviceId } : {}), ...(filters.status ? { status: filters.status } : {}), ...(filters.district ? { district: filters.district } : {}), ...(filters.channel ? { channel: filters.channel } : {}) }).toString()
+  const forecastRequest = {
+    horizon: filters.forecastHorizon ?? 30,
+    region_id: filters.regionId,
+    topic_id: filters.topicId,
+    service_id: filters.serviceId,
+    status: filters.status,
+    district: filters.district,
+    channel: filters.channel,
+  }
   const alertsQuery = filters.regionId ? `?region_id=${encodeURIComponent(filters.regionId)}` : ''
   const [ticketResponse, analytics, forecast, alertsResponse, learning, models, taxonomy, datasetProvenance] = await Promise.all([
     request<{ items: BackendTicket[] }>('/tickets?limit=50'),
     request<BackendAnalytics>(`/analytics?${analyticsQuery}`),
-    request<BackendForecast>(`/forecast?${forecastQuery}`),
+    request<BackendForecast>('/forecast/reforecast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(forecastRequest),
+    }),
     request<BackendAlerts>(`/alerts${alertsQuery}`),
     request<BackendLearning>('/learning'),
     request<BackendModels>('/models'),
@@ -686,6 +729,51 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
   })
   const forecastPoints: ForecastPoint[] = forecast.points.map((point) => ({ label: point.date, forecast: point.tickets }))
   const forecastHistory: ForecastPoint[] = (forecast.history ?? []).map((point) => ({ label: point.date, actual: point.tickets }))
+  const forecastReforecast: ForecastReforecast | undefined = forecast.reforecast
+    ? {
+      previousRunId: forecast.reforecast.previous_run_id,
+      previousModelVersion: forecast.reforecast.previous_model_version,
+      previousIssuedAt: forecast.reforecast.previous_issued_at,
+      actualObservations: forecast.reforecast.actual_observations.map((observation) => ({
+        date: observation.date,
+        previousForecast: observation.previous_forecast,
+        actual: observation.actual,
+        absoluteError: observation.absolute_error,
+      })),
+      futureComparisons: forecast.reforecast.future_comparisons.map((comparison) => ({
+        date: comparison.date,
+        previousForecast: comparison.previous_forecast,
+        updatedForecast: comparison.updated_forecast,
+        delta: comparison.delta,
+      })),
+      peakChange: forecast.reforecast.peak_change ? {
+        previousPeakDate: forecast.reforecast.peak_change.previous_peak_date,
+        updatedPeakDate: forecast.reforecast.peak_change.updated_peak_date,
+        previousPeak: forecast.reforecast.peak_change.previous_peak,
+        updatedPeak: forecast.reforecast.peak_change.updated_peak,
+        delta: forecast.reforecast.peak_change.delta,
+        policyVersion: forecast.reforecast.peak_change.policy_version,
+        threshold: forecast.reforecast.peak_change.threshold,
+        status: forecast.reforecast.peak_change.status,
+        managerSignalId: forecast.reforecast.peak_change.manager_signal_id,
+      } : undefined,
+    }
+    : undefined
+  const forecastPreviousPoints: ForecastPoint[] = [
+    ...(forecastReforecast?.actualObservations ?? []).map((observation) => ({ label: observation.date, forecast: observation.previousForecast })),
+    ...(forecastReforecast?.futureComparisons ?? []).map((comparison) => ({ label: comparison.date, forecast: comparison.previousForecast })),
+  ]
+  const forecastManagerSignals: ForecastManagerSignal[] = (forecast.manager_signals ?? []).map((signal) => ({
+    id: signal.id,
+    runId: signal.run_id,
+    previousRunId: signal.previous_run_id,
+    createdAt: signal.created_at,
+    previousPeak: signal.previous_peak,
+    updatedPeak: signal.updated_peak,
+    delta: signal.delta,
+    threshold: signal.threshold,
+    policyVersion: signal.policy_version,
+  }))
   const cycle = learning.active_cycle ?? learning.items?.[0]
   const learningData: LearningCycle = cycle ? { id: cycle.id, stage: mapLearningStage(cycle.state), dataset: cycle.dataset_version, feedbackCount: cycle.feedback_count, candidate: cycle.candidate_model_version, collectStartedAt: cycle.collect_started_at, collectEndsAt: cycle.collect_ends_at, evaluationStartedAt: cycle.evaluation_started_at ?? undefined, evaluationEndsAt: cycle.evaluation_ends_at ?? undefined, shadowPredictionCount: cycle.shadow_prediction_count, shadowInferenceFailures: cycle.shadow_inference_failures, shadowOperatorDecisionCount: cycle.shadow_operator_decision_count, blindAbEnabled: cycle.blind_ab_enabled, productionModelVersion: cycle.production_model_version ?? undefined, frozenEvaluationDatasetVersion: cycle.frozen_evaluation_dataset_version ?? undefined, candidateDatasetChecksum: cycle.candidate_dataset_checksum ?? undefined, minFeedbackCount: cycle.min_feedback_count, promotionPolicyVersion: cycle.promotion_policy_version, manualCloseEnabled: cycle.manual_close_enabled, updatedAt: cycle.updated_at, decisionNote: cycle.decision_note } : { id: 'нет данных', stage: 'COLLECT', dataset: 'нет данных', feedbackCount: 0, candidate: 'нет данных', collectStartedAt: '', collectEndsAt: '', shadowPredictionCount: 0, shadowInferenceFailures: 0, shadowOperatorDecisionCount: 0, blindAbEnabled: false, minFeedbackCount: 0, promotionPolicyVersion: 'policy-v1', manualCloseEnabled: false, updatedAt: 'нет данных' }
   const modelData: ModelStatus[] = models.items.map((model) => {
@@ -753,6 +841,11 @@ async function loadApiDashboard(filters: DashboardFilters): Promise<DashboardDat
     forecastStart: forecast.forecast_start ?? undefined,
     forecastExpectedPeaks: forecast.expected_peaks ?? [],
     forecastBacktest: forecast.backtest,
+    forecastRunId: forecast.run_id,
+    forecastIssuedAt: forecast.issued_at,
+    forecastReforecast,
+    forecastPreviousPoints,
+    forecastManagerSignals,
     datasetProvenance,
     filterOptions: {
       regions: taxonomy.regions ?? analytics.by_region.map((region) => ({ id: region.id, label: region.label })),

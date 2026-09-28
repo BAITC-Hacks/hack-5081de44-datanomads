@@ -722,6 +722,37 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
             f"forecast {horizon} is missing rolling backtest metrics: {backtest}",
         )
 
+    reforecast_request = {"horizon": 30}
+    status, _, reforecast = json_request(
+        base_url,
+        "POST",
+        "/api/v1/forecast/reforecast",
+        role="MANAGER",
+        body=reforecast_request,
+        timeout=timeout,
+    )
+    expect(
+        status == 200
+        and reforecast.get("run_id")
+        and reforecast.get("issued_at")
+        and isinstance(reforecast.get("manager_signals"), list),
+        f"rolling forecast was not persisted with signal history: {reforecast}",
+    )
+    status, _, repeated_reforecast = json_request(
+        base_url,
+        "POST",
+        "/api/v1/forecast/reforecast",
+        role="MANAGER",
+        body=reforecast_request,
+        timeout=timeout,
+    )
+    expect(
+        status == 200
+        and repeated_reforecast.get("run_id") == reforecast.get("run_id")
+        and repeated_reforecast.get("issued_at") == reforecast.get("issued_at"),
+        f"same-day rolling forecast request was not idempotent: {repeated_reforecast}",
+    )
+
     status, _, detected = json_request(base_url, "POST", "/api/v1/alerts/detect", role="MANAGER", timeout=timeout)
     expect(
         status == 200

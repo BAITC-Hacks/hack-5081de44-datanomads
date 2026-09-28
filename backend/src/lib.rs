@@ -1865,6 +1865,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/reports", get(reports))
         .route("/api/v1/events", get(events))
         .route("/api/v1/forecast", get(forecast))
+        .route("/api/v1/forecast/reforecast", post(reforecast))
         .route("/api/v1/alerts", get(list_alerts))
         .route("/api/v1/alerts/detect", post(detect_alerts))
         .route("/api/v1/alerts/{alert_id}", get(get_alert))
@@ -4341,7 +4342,7 @@ pub struct MetricBucket {
     pub change_pct: Option<f32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TimeSeriesPoint {
     pub date: String,
     pub tickets: u32,
@@ -5634,6 +5635,10 @@ fn memory_report_slice(store: &Store, query: &AnalyticsQuery) -> Result<ReportSl
             points: Vec::new(),
             expected_peaks: Vec::new(),
             backtest: json!({"status": "DEMO_ONLY", "reason": "memory report has no forecast history"}),
+            run_id: None,
+            issued_at: None,
+            reforecast: None,
+            manager_signals: Vec::new(),
         },
     })
 }
@@ -6693,7 +6698,7 @@ fn metric_bucket(
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ForecastResponse {
     pub source: String,
     pub model_version: String,
@@ -6706,6 +6711,66 @@ pub struct ForecastResponse {
     pub points: Vec<TimeSeriesPoint>,
     pub expected_peaks: Vec<String>,
     pub backtest: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reforecast: Option<ForecastReforecast>,
+    #[serde(default)]
+    pub manager_signals: Vec<ForecastManagerSignal>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForecastReforecast {
+    pub previous_run_id: String,
+    pub previous_model_version: String,
+    pub previous_issued_at: String,
+    pub actual_observations: Vec<ForecastActualObservation>,
+    pub future_comparisons: Vec<ForecastFutureComparison>,
+    pub peak_change: Option<ForecastPeakChange>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForecastActualObservation {
+    pub date: String,
+    pub previous_forecast: u32,
+    pub actual: u32,
+    pub absolute_error: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForecastFutureComparison {
+    pub date: String,
+    pub previous_forecast: u32,
+    pub updated_forecast: u32,
+    pub delta: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForecastPeakChange {
+    pub previous_peak_date: String,
+    pub updated_peak_date: String,
+    pub previous_peak: u32,
+    pub updated_peak: u32,
+    pub delta: i64,
+    pub policy_version: String,
+    pub threshold: Option<f64>,
+    pub status: String,
+    pub manager_signal_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ForecastManagerSignal {
+    pub id: String,
+    pub run_id: String,
+    pub previous_run_id: String,
+    pub created_at: String,
+    pub previous_peak: u32,
+    pub updated_peak: u32,
+    pub delta: i64,
+    pub threshold: f64,
+    pub policy_version: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -6735,6 +6800,33 @@ async fn forecast(
     if let Some(repository) = state.repository() {
         return repository
             .forecast(&query)
+            .await
+            .map(Json)
+            .map_err(ApiError::Internal);
+    }
+    let store = state.read_store()?;
+    Ok(Json(memory_forecast_response(
+        &store,
+        &query,
+        horizon_days,
+    )?))
+}
+
+async fn reforecast(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(query): Json<ForecastQuery>,
+) -> Result<Json<ForecastResponse>, ApiError> {
+    require_role(&headers, &state.config, &[Role::Manager, Role::Admin])?;
+    let horizon_days = query.horizon.or(query.horizon_days).unwrap_or(30);
+    if !matches!(horizon_days, 30 | 60 | 90) {
+        return Err(ApiError::BadRequest(
+            "horizon must be 30, 60 or 90 days".to_owned(),
+        ));
+    }
+    if let Some(repository) = state.repository() {
+        return repository
+            .reforecast(&query)
             .await
             .map(Json)
             .map_err(ApiError::Internal);
@@ -6787,6 +6879,10 @@ fn memory_forecast_response(
             points: Vec::new(),
             expected_peaks: Vec::new(),
             backtest: json!({"sample_count": 0}),
+            run_id: None,
+            issued_at: None,
+            reforecast: None,
+            manager_signals: Vec::new(),
         });
     }
 
@@ -6814,6 +6910,10 @@ fn memory_forecast_response(
                 "observed_days": active_days,
                 "required_days": FORECAST_SEASON_LENGTH_DAYS,
             }),
+            run_id: None,
+            issued_at: None,
+            reforecast: None,
+            manager_signals: Vec::new(),
         });
     }
     let seasonal_pattern = history
@@ -6859,6 +6959,10 @@ fn memory_forecast_response(
         points,
         expected_peaks,
         backtest: json!({"status": "DEMO_ONLY", "history_days": FORECAST_HISTORY_DAYS}),
+        run_id: None,
+        issued_at: None,
+        reforecast: None,
+        manager_signals: Vec::new(),
     })
 }
 
@@ -8591,6 +8695,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/reports": { "get": { "summary": "List generated reports" } },
             "/api/v1/events": { "get": { "summary": "SSE notifications" } },
             "/api/v1/forecast": { "get": { "summary": "Forecast baseline" } },
+            "/api/v1/forecast/reforecast": { "post": { "summary": "Persist a rolling forecast version and compare it with the previous run" } },
             "/api/v1/alerts": { "get": { "summary": "List alerts" } },
             "/api/v1/alerts/detect": { "post": { "summary": "Detect and persist region/topic anomaly alerts" } },
             "/api/v1/alerts/{alert_id}": { "get": { "summary": "Get alert detail and linked tickets" } },
@@ -9200,6 +9305,7 @@ mod tests {
         assert!(value["paths"]["/api/v1/audit"].is_object());
         assert!(value["paths"]["/api/v1/assist/preview"].is_object());
         assert!(value["paths"]["/api/v1/learning/{cycle_id}/feedback"].is_object());
+        assert!(value["paths"]["/api/v1/forecast/reforecast"]["post"].is_object());
         assert!(value["paths"]["/api/v1/models/{model_id}/promote"].is_object());
         assert!(value["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert!(value["paths"]["/internal/v1/classify"].is_null());
@@ -9441,6 +9547,27 @@ mod tests {
             assert_eq!(value["points"].as_array().unwrap().len(), horizon as usize);
             assert_eq!(value["forecast_start"], value["points"][0]["date"]);
         }
+    }
+
+    #[tokio::test]
+    async fn demo_reforecast_does_not_persist_or_emit_manager_signals() {
+        let app = app(AppState::demo());
+        let response = app
+            .oneshot(
+                Request::post("/api/v1/forecast/reforecast")
+                    .header("content-type", "application/json")
+                    .header("x-pulse-role", "MANAGER")
+                    .body(Body::from(r#"{"horizon":30}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let value = body_json(response).await;
+        assert!(value["run_id"].is_null());
+        assert_eq!(value["manager_signals"], json!([]));
+        assert_eq!(value["source"], "deterministic-demo");
     }
 
     #[test]

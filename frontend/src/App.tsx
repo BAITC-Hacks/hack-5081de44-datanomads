@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
 import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
 import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
-import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastPoint, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
+import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
 import { QueryIntentResultView } from './components/QueryIntentResultView'
@@ -323,7 +323,7 @@ function RouteContent({ route, data, onDataChange, onRefresh, onToast, filters, 
     case '/situation/topics': content = <CleanTopicsPage topics={data.topics} onDrilldown={onDrilldown} />; break
     case '/situation/time-series': content = <CleanTimeSeriesPage timeSeries={data.timeSeries} onDrilldown={onDrilldown} />; break
     case '/situation/alerts': content = <CleanAlertsPage alerts={data.alerts} onRefresh={onRefresh} onToast={onToast} onDrilldown={onDrilldown} />; break
-    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
+    case '/situation/forecast': content = <CleanForecastPage forecast={data.forecast} history={data.forecastHistory ?? []} previousForecast={data.forecastPreviousPoints ?? []} reforecast={data.forecastReforecast} managerSignals={data.forecastManagerSignals ?? []} runId={data.forecastRunId} issuedAt={data.forecastIssuedAt} status={data.forecastStatus} modelVersion={data.forecastModelVersion} model={data.forecastModel} source={data.forecastSource} insufficientHistory={data.forecastInsufficientHistory ?? false} forecastStart={data.forecastStart} expectedPeaks={data.forecastExpectedPeaks ?? []} backtest={data.forecastBacktest} horizon={filters.forecastHorizon ?? 30} filters={filters} filterOptions={data.filterOptions} onHorizonChange={(horizon) => onFiltersChange({ ...filters, forecastHorizon: horizon })} />; break
     case '/situation/reports': content = <CleanReportsPage filters={filters} />; break
     case '/situation/learning': content = <CleanLearningPage learning={data.learning} onRefresh={onRefresh} onToast={onToast} />; break
     case '/situation/models': content = <CleanModelsPage models={data.models} />; break
@@ -1527,36 +1527,42 @@ function formatForecastRate(value: number | null | undefined): string {
     : new Intl.NumberFormat('ru-RU', { style: 'percent', maximumFractionDigits: 1 }).format(value)
 }
 
-function forecastChartOption(history: ForecastPoint[], forecast: ForecastPoint[], forecastStart?: string): EChartsOption | undefined {
+function forecastChartOption(history: ForecastPoint[], forecast: ForecastPoint[], forecastStart?: string, previousForecast: ForecastPoint[] = []): EChartsOption | undefined {
   const hasHistory = history.length > 0
   const hasForecast = forecast.length > 0
-  if (!hasHistory && !hasForecast) return undefined
+  const hasPreviousForecast = previousForecast.length > 0
+  if (!hasHistory && !hasForecast && !hasPreviousForecast) return undefined
 
-  const labels = [...history, ...forecast].map((point) => point.label)
-  const historicalValues = [
-    ...history.map((point) => point.actual ?? null),
-    ...forecast.map(() => null),
-  ]
-  const futureValues = [
-    ...history.map(() => null),
-    ...forecast.map((point) => point.forecast ?? null),
-  ]
+  const labels = [...new Set([...history, ...previousForecast, ...forecast].map((point) => point.label))].sort()
+  const historicalByDate = new Map(history.map((point) => [point.label, point.actual ?? null]))
+  const previousByDate = new Map(previousForecast.map((point) => [point.label, point.forecast ?? null]))
+  const forecastByDate = new Map(forecast.map((point) => [point.label, point.forecast ?? null]))
   const series: NonNullable<EChartsOption['series']> = []
   if (hasHistory) {
     series.push({
-      name: 'История',
+      name: hasPreviousForecast ? 'Факт' : 'История',
       type: 'line',
-      data: historicalValues,
+      data: labels.map((label) => historicalByDate.get(label) ?? null),
       showSymbol: false,
       lineStyle: { width: 2 },
       itemStyle: { color: '#8cf0c8' },
     })
   }
+  if (hasPreviousForecast) {
+    series.push({
+      name: 'Предыдущий прогноз',
+      type: 'line',
+      data: labels.map((label) => previousByDate.get(label) ?? null),
+      showSymbol: false,
+      lineStyle: { width: 1, type: 'dotted' },
+      itemStyle: { color: '#f8d488' },
+    })
+  }
   if (hasForecast) {
     series.push({
-      name: 'Прогноз',
+      name: hasPreviousForecast ? 'Обновлённый прогноз' : 'Прогноз',
       type: 'line',
-      data: futureValues,
+      data: labels.map((label) => forecastByDate.get(label) ?? null),
       showSymbol: false,
       lineStyle: { width: 2, type: 'dashed' },
       areaStyle: { color: 'rgba(167, 217, 255, .12)' },
@@ -1582,9 +1588,14 @@ function forecastChartOption(history: ForecastPoint[], forecast: ForecastPoint[]
   }
 }
 
-function CleanForecastPage({ forecast, history, status, modelVersion, model, source, insufficientHistory, forecastStart, expectedPeaks, backtest, horizon, filters, filterOptions, onHorizonChange }: {
+function CleanForecastPage({ forecast, history, previousForecast, reforecast, managerSignals, runId, issuedAt, status, modelVersion, model, source, insufficientHistory, forecastStart, expectedPeaks, backtest, horizon, filters, filterOptions, onHorizonChange }: {
   forecast: ForecastPoint[]
   history: ForecastPoint[]
+  previousForecast: ForecastPoint[]
+  reforecast?: ForecastReforecast
+  managerSignals: ForecastManagerSignal[]
+  runId?: string
+  issuedAt?: string
   status?: string
   modelVersion?: string
   model?: string
@@ -1599,7 +1610,7 @@ function CleanForecastPage({ forecast, history, status, modelVersion, model, sou
   onHorizonChange: (horizon: 30 | 60 | 90) => void
 }) {
   const forecastAvailable = !insufficientHistory && (status === 'OK' || status === 'DEMO_ONLY') && forecast.length > 0
-  const chart = forecastChartOption(history, forecastAvailable ? forecast : [], forecastStart ?? forecast[0]?.label)
+  const chart = forecastChartOption(history, forecastAvailable ? forecast : [], forecastStart ?? forecast[0]?.label, previousForecast)
   const values = forecastAvailable
     ? forecast.map((point) => point.forecast).filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
     : []
@@ -1663,6 +1674,67 @@ function CleanForecastPage({ forecast, history, status, modelVersion, model, sou
         </div>
         <p className="forecast-filter-summary">Применённый срез: {activeFilters.join(' · ')}</p>
         <p className="panel-note">Используется дневной ряд за доступную часть окна до 366 дней. Почасовая детализация для текущего ряда недоступна.</p>
+        {runId && <p className="forecast-run-version">Сохранённый запуск: {runId} · {issuedAt ? formatForecastDate(issuedAt.slice(0, 10)) : 'дата не указана'}</p>}
+
+        {reforecast && (
+          <section className="forecast-reforecast" aria-label="Сравнение версий прогноза">
+            <div>
+              <div className="field-label">Скользящий пересчёт</div>
+              <strong>forecast_v1 · {reforecast.previousModelVersion} → forecast_v2 · {modelVersion ?? 'версия не указана'}</strong>
+              <p>Сопоставляются сохранённый предыдущий прогноз, уже наблюдённый факт и обновлённый прогноз на общих будущих датах.</p>
+              <small>Предыдущая версия {reforecast.previousRunId} · расчёт {formatForecastDate(reforecast.previousIssuedAt.slice(0, 10))}</small>
+            </div>
+            {reforecast.peakChange && (
+              <div className="forecast-peak-change">
+                <span>Изменение пикового объёма на общих будущих датах</span>
+                <strong>{formatForecastNumber(reforecast.peakChange.previousPeak)} → {formatForecastNumber(reforecast.peakChange.updatedPeak)} обращений в день</strong>
+                <small>{formatForecastDate(reforecast.peakChange.previousPeakDate)} → {formatForecastDate(reforecast.peakChange.updatedPeakDate)} · Δ {reforecast.peakChange.delta > 0 ? '+' : ''}{formatForecastNumber(reforecast.peakChange.delta)} · policy {reforecast.peakChange.policyVersion}{reforecast.peakChange.threshold == null ? '' : ` · порог MAE ${formatForecastNumber(reforecast.peakChange.threshold)}`}</small>
+                <p>
+                  {reforecast.peakChange.status === 'SIGNAL_CREATED'
+                    ? `Создан manager signal ${reforecast.peakChange.managerSignalId ?? ''}: изменение больше backtest MAE обеих версий.`
+                    : reforecast.peakChange.status === 'SOURCE_NOT_VERIFIED_REAL'
+                      ? 'Manager signal не создан: происхождение всех записей среза не подтверждено как реальное.'
+                      : reforecast.peakChange.status === 'WITHIN_BACKTEST_ERROR'
+                        ? 'Сигнал не создан: изменение не превышает backtest MAE обеих версий.'
+                        : 'Сигнал не создан: для обеих версий нет пригодных backtest MAE.'}
+                </p>
+              </div>
+            )}
+            <details>
+              <summary>Сверить предыдущий прогноз с фактами и обновлённой версией</summary>
+              {reforecast.actualObservations.length > 0 && (
+                <>
+                  <div className="field-label">Прошлый прогноз → факт</div>
+                  <table>
+                    <thead><tr><th>Дата</th><th>forecast_v1</th><th>Факт</th><th>Абс. ошибка</th></tr></thead>
+                    <tbody>{reforecast.actualObservations.map((item) => <tr key={`observed-${item.date}`}><td>{item.date}</td><td>{item.previousForecast}</td><td>{item.actual}</td><td>{item.absoluteError}</td></tr>)}</tbody>
+                  </table>
+                </>
+              )}
+              {reforecast.futureComparisons.length > 0 && (
+                <>
+                  <div className="field-label">Прошлый прогноз → обновлённый прогноз</div>
+                  <table>
+                    <thead><tr><th>Дата</th><th>forecast_v1</th><th>forecast_v2</th><th>Δ</th></tr></thead>
+                    <tbody>{reforecast.futureComparisons.map((item) => <tr key={`future-${item.date}`}><td>{item.date}</td><td>{item.previousForecast}</td><td>{item.updatedForecast}</td><td>{item.delta > 0 ? '+' : ''}{item.delta}</td></tr>)}</tbody>
+                  </table>
+                </>
+              )}
+              {!reforecast.actualObservations.length && !reforecast.futureComparisons.length && <p className="forecast-empty-history">У версий нет перекрывающихся дат для сравнения.</p>}
+            </details>
+          </section>
+        )}
+
+        {managerSignals.length > 0 && (
+          <section className="forecast-manager-signals" aria-label="Сигналы изменения прогноза">
+            <div className="field-label">Сохранённые manager signals по этому срезу</div>
+            {managerSignals.map((signal) => (
+              <p key={signal.id}>
+                {formatForecastDate(signal.createdAt.slice(0, 10))}: пиковое значение изменилось с {formatForecastNumber(signal.previousPeak)} на {formatForecastNumber(signal.updatedPeak)} обращений в день (Δ {signal.delta > 0 ? '+' : ''}{signal.delta}, порог MAE {formatForecastNumber(signal.threshold)}, {signal.policyVersion}).
+              </p>
+            ))}
+          </section>
+        )}
 
         {insufficientHistory && (
           <div className="forecast-insufficient" role="status">

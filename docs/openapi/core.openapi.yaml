@@ -577,6 +577,26 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ForecastResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/forecast/reforecast:
+    post:
+      tags: [forecast]
+      summary: Persist a rolling forecast version and compare it with the previous run
+      description: Saves one version per filter slice, horizon, model version and UTC day. Manager signals require a peak delta larger than the backtest MAE of both versions and fully verified real-data provenance.
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ForecastReforecastRequest' }
+      responses:
+        '200':
+          description: Persisted forecast version with any actual and forecast comparisons
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ForecastResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/analytics/export.pdf:
     get:
       tags: [analytics]
@@ -1984,7 +2004,7 @@ components:
         dispersion_method: { type: string, enum: [median_absolute_deviation] }
     ForecastResponse:
       type: object
-      required: [source, model_version, model, status, insufficient_history, horizon_days, history, forecast_start, points, expected_peaks, backtest]
+      required: [source, model_version, model, status, insufficient_history, horizon_days, history, forecast_start, points, expected_peaks, backtest, manager_signals]
       properties:
         source: { type: string }
         model_version: { type: string, description: Forecast provider version; never the embedding version. }
@@ -1997,6 +2017,74 @@ components:
         points: { type: array, items: { $ref: '#/components/schemas/TimeSeriesPoint' } }
         expected_peaks: { type: array, items: { type: string } }
         backtest: { $ref: '#/components/schemas/ForecastBacktest' }
+        run_id: { type: string, nullable: true }
+        issued_at: { type: string, format: date-time, nullable: true }
+        reforecast: { allOf: [{ $ref: '#/components/schemas/ForecastReforecast' }], nullable: true }
+        manager_signals: { type: array, items: { $ref: '#/components/schemas/ForecastManagerSignal' } }
+    ForecastReforecastRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        horizon: { type: integer, enum: [30, 60, 90], default: 30 }
+        horizon_days: { type: integer, enum: [30, 60, 90], description: Compatibility alias for horizon. }
+        region_id: { type: string }
+        topic_id: { type: string }
+        service_id: { type: string }
+        status: { type: string }
+        district: { type: string }
+        channel: { type: string }
+    ForecastReforecast:
+      type: object
+      required: [previous_run_id, previous_model_version, previous_issued_at, actual_observations, future_comparisons, peak_change]
+      properties:
+        previous_run_id: { type: string }
+        previous_model_version: { type: string }
+        previous_issued_at: { type: string, format: date-time }
+        actual_observations: { type: array, items: { $ref: '#/components/schemas/ForecastActualObservation' } }
+        future_comparisons: { type: array, items: { $ref: '#/components/schemas/ForecastFutureComparison' } }
+        peak_change: { allOf: [{ $ref: '#/components/schemas/ForecastPeakChange' }], nullable: true }
+    ForecastActualObservation:
+      type: object
+      required: [date, previous_forecast, actual, absolute_error]
+      properties:
+        date: { type: string, format: date }
+        previous_forecast: { type: integer, minimum: 0 }
+        actual: { type: integer, minimum: 0 }
+        absolute_error: { type: integer, minimum: 0 }
+    ForecastFutureComparison:
+      type: object
+      required: [date, previous_forecast, updated_forecast, delta]
+      properties:
+        date: { type: string, format: date }
+        previous_forecast: { type: integer, minimum: 0 }
+        updated_forecast: { type: integer, minimum: 0 }
+        delta: { type: integer }
+    ForecastPeakChange:
+      type: object
+      required: [previous_peak_date, updated_peak_date, previous_peak, updated_peak, delta, policy_version, threshold, status, manager_signal_id]
+      properties:
+        previous_peak_date: { type: string, format: date }
+        updated_peak_date: { type: string, format: date }
+        previous_peak: { type: integer, minimum: 0 }
+        updated_peak: { type: integer, minimum: 0 }
+        delta: { type: integer }
+        policy_version: { type: string }
+        threshold: { type: number, nullable: true, minimum: 0, description: Maximum of the previous and updated rolling backtest MAE. }
+        status: { type: string, enum: [SIGNIFICANT, WITHIN_BACKTEST_ERROR, BACKTEST_UNAVAILABLE, SOURCE_NOT_VERIFIED_REAL, SIGNAL_CREATED] }
+        manager_signal_id: { type: string, nullable: true }
+    ForecastManagerSignal:
+      type: object
+      required: [id, run_id, previous_run_id, created_at, previous_peak, updated_peak, delta, threshold, policy_version]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        previous_run_id: { type: string }
+        created_at: { type: string, format: date-time }
+        previous_peak: { type: integer, minimum: 0 }
+        updated_peak: { type: integer, minimum: 0 }
+        delta: { type: integer }
+        threshold: { type: number, minimum: 0 }
+        policy_version: { type: string }
     ForecastBacktest:
       type: object
       properties:

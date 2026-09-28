@@ -489,6 +489,22 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .forecast-provenance small { color: #65796f; font-size: 9px; }
 .forecast-provenance strong { overflow-wrap: anywhere; color: #bfd0c7; font-size: 10px; font-weight: 550; line-height: 1.35; }
 .forecast-filter-summary { margin-top: 12px; color: #9aaca2; font-size: 10px; line-height: 1.5; }
+.forecast-run-version { margin: 8px 0 0; color: #74897e; font-size: 9px; }
+.forecast-reforecast, .forecast-manager-signals { display: grid; gap: 11px; margin-top: 14px; padding: 13px; border: 1px solid rgba(167,217,255,.14); border-radius: 7px; background: rgba(167,217,255,.035); }
+.forecast-reforecast > div { display: grid; gap: 6px; }
+.forecast-reforecast > div > strong { color: #c8d9e4; font-size: 10px; line-height: 1.4; }
+.forecast-reforecast p, .forecast-manager-signals p { margin: 0; color: #91a69b; font-size: 9px; line-height: 1.5; }
+.forecast-reforecast small { color: #74897e; font-size: 9px; line-height: 1.45; }
+.forecast-reforecast details { overflow-x: auto; }
+.forecast-reforecast summary { color: #a7d9ff; font-size: 10px; cursor: pointer; }
+.forecast-reforecast table { width: 100%; margin-top: 9px; border-collapse: collapse; font-size: 9px; }
+.forecast-reforecast th, .forecast-reforecast td { padding: 6px 8px; border-bottom: 1px solid rgba(214,236,225,.07); color: #a9bcb2; text-align: right; white-space: nowrap; }
+.forecast-reforecast th:first-child, .forecast-reforecast td:first-child { text-align: left; }
+.forecast-peak-change { padding: 11px; border: 1px solid rgba(248,212,136,.14); border-radius: 6px; background: rgba(248,212,136,.035); }
+.forecast-peak-change > span { color: #879a90; font-size: 9px; }
+.forecast-peak-change > strong { color: #f1ddb1 !important; font-size: 15px !important; }
+.forecast-manager-signals { border-color: rgba(248,212,136,.2); background: rgba(248,212,136,.035); }
+.forecast-manager-signals p { padding-top: 7px; border-top: 1px solid rgba(214,236,225,.07); }
 .forecast-panel-main > .panel-note { margin-top: 7px; }
 .forecast-volume-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 19px 0 14px; }
 .forecast-volume-grid > div, .forecast-backtest-grid > div { display: grid; align-content: start; gap: 5px; min-width: 0; padding: 13px; border: 1px solid rgba(140,240,200,.1); border-radius: 7px; background: rgba(140,240,200,.035); }

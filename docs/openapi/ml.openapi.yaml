@@ -10,6 +10,8 @@ info:
     does not classify recurrence. Core owns persisted anomaly evidence and
     manager-led signal monitoring; ML inference does not turn ACK/CLOSE actions
     into detector quality metrics or claim that an action resolved a cause.
+    Forecast inference remains stateless; Core stores forecast versions, actual
+    comparisons and any manager signal under a versioned peak-change policy.
   version: 0.1.0
 paths:
   /healthz:
