@@ -979,8 +979,17 @@ class EvaluationService:
 
 def make_services() -> tuple[ModelRegistry, ClassifierService, EmbeddingService, ForecastService, AnomalyService, TrainingService, EvaluationService]:
     registry = ModelRegistry()
+    model_dir = os.environ.get("PULSE_CLASSIFIER_MODEL_DIR")
+    if model_dir:
+        from .trained_classifier import TrainedClassifierService
+
+        classifier = TrainedClassifierService(Path(model_dir))
+        if registry.manifest is None:
+            raise ValueError("model manifest is not loaded")
+        registry.manifest.models["classifier"] = classifier.metadata
     versions = registry.model_versions()
-    classifier = ClassifierService(model_version=versions.get("classifier", MODEL_VERSIONS["classifier"]))
+    if not model_dir:
+        classifier = ClassifierService(model_version=versions.get("classifier", MODEL_VERSIONS["classifier"]))
     embedding = EmbeddingService(model_version=versions.get("embedder", MODEL_VERSIONS["embedder"]))
     forecast = ForecastService(model_version=versions.get("forecast", MODEL_VERSIONS["forecast"]))
     anomaly = AnomalyService(model_version=versions.get("anomaly", MODEL_VERSIONS["anomaly"]))

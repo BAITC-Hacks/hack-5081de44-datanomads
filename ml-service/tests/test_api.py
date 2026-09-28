@@ -151,6 +151,11 @@ def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:
     assert kz.json()["language"] == "KZ"
     assert kz.json()["topic_id"] == "street_lighting"
 
+    waste = client.post("/internal/v1/classify", json={"text": "Не вывозят мусор из контейнера"})
+    environment = client.post("/internal/v1/classify", json={"text": "Загрязнение воздуха и выбросы"})
+    assert waste.json()["topic_id"] == "waste_management"
+    assert environment.json()["topic_id"] == "environment"
+
 
 def test_mixed_unknown_and_low_confidence_classifications_require_review() -> None:
     for text, language in (("әлеуметтік мәселе", "MIXED"), ("ticket 123", "UNKNOWN")):

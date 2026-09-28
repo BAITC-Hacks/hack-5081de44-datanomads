@@ -566,6 +566,24 @@ mod promotion_safety_tests {
     }
 }
 
+async fn enqueue_classifier_shadow_job(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    ticket_id: i64,
+    production_prediction_id: i64,
+    production_model_version: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO background_jobs (job_type, payload, state) SELECT 'SHADOW_CLASSIFIER', jsonb_build_object('cycle_id', lc.id::text, 'ticket_id', $1::text, 'production_prediction_id', $2::text, 'production_model_version', $3, 'candidate_model_version', lc.candidate_model_version, 'candidate_artifact_checksum', mv.artifact_checksum), 'QUEUED' FROM learning_cycles lc JOIN tickets t ON t.id = $1 JOIN model_versions mv ON mv.model_version = lc.candidate_model_version JOIN model_evaluations me ON me.model_version = mv.model_version WHERE lc.state = 'EVALUATE' AND lc.production_model_version = $3 AND lc.evaluation_started_at IS NOT NULL AND t.created_at >= lc.evaluation_started_at AND (lc.evaluation_ends_at IS NULL OR t.created_at < lc.evaluation_ends_at) AND mv.status IN ('CANDIDATE', 'SHADOW') AND mv.manifest_uri IS NOT NULL AND mv.artifact_checksum LIKE 'sha256:%' AND me.metrics_json->>'report_version' = 'classifier-pair-evaluation.v1' ORDER BY lc.updated_at DESC, lc.id DESC LIMIT 1",
+    )
+    .bind(ticket_id)
+    .bind(production_prediction_id)
+    .bind(production_model_version)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("queue classifier shadow: {error}"))?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum ImportError {
     Invalid(String),
@@ -2857,8 +2875,8 @@ impl PgRepository {
         .map_err(|error| format!("insert ticket: {error}"))?;
 
         let prediction = prediction_for_db(ticket_id, &classification, &routing);
-        sqlx::query(
-            "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        let production_prediction_id: i64 = sqlx::query_scalar(
+            "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
         )
         .bind(ticket_id)
         .bind(&classification.model_version)
@@ -2878,7 +2896,7 @@ impl PgRepository {
             "priority_provenance": &routing.priority_provenance,
         }))
         .bind(classification.prediction.needs_review)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|error| format!("insert prediction: {error}"))?;
 
@@ -2974,6 +2992,13 @@ impl PgRepository {
                 }
             }
         }
+        enqueue_classifier_shadow_job(
+            &mut tx,
+            ticket_id,
+            production_prediction_id,
+            &classification.model_version,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| format!("commit ticket transaction: {error}"))?;
@@ -3315,8 +3340,8 @@ impl PgRepository {
             let is_new_ticket = inserted_id.is_some();
             let ticket_id = if let Some(id) = inserted_id {
                 imported_rows += 1;
-                sqlx::query(
-                    "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                let production_prediction_id: i64 = sqlx::query_scalar(
+                    "INSERT INTO ticket_predictions (ticket_id, model_version, topic_id, service_id, priority, confidence, alternatives, prediction, needs_review) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
                 )
                 .bind(id)
                 .bind(&classification.model_version)
@@ -3335,9 +3360,16 @@ impl PgRepository {
                     "priority_provenance": &routing.priority_provenance,
                 }))
                 .bind(classification.prediction.needs_review)
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|error| format!("insert imported prediction {external_id}: {error}"))?;
+                enqueue_classifier_shadow_job(
+                    &mut tx,
+                    id,
+                    production_prediction_id,
+                    &classification.model_version,
+                )
+                .await?;
                 id
             } else {
                 let existing = sqlx::query(
@@ -5958,7 +5990,7 @@ impl PgRepository {
             } else {
                 "ACCEPTED"
             };
-        let id: i64 = sqlx::query_scalar("INSERT INTO learning_feedback (cycle_id, ticket_id, production_model_version, production_prediction, operator_confirmed_decision, accepted_or_corrected) VALUES ($1, $2, $3, '{}'::jsonb, $4, $5) RETURNING id")
+        let id: i64 = sqlx::query_scalar("INSERT INTO learning_feedback (cycle_id, ticket_id, production_model_version, production_prediction, operator_confirmed_decision, accepted_or_corrected, validation_status) VALUES ($1, $2, $3, '{}'::jsonb, $4, $5, 'UNVERIFIED') RETURNING id")
             .bind(cycle_db_id)
             .bind(ticket_id)
             .bind(production_model_version)
@@ -9304,6 +9336,8 @@ fn normalize_topic_id(value: &str) -> String {
         "topic-education" | "education" => "education".to_owned(),
         "topic-transport" | "transport" => "public_transport".to_owned(),
         "topic-environment" | "environment" => "environment".to_owned(),
+        "ecology" => "environment".to_owned(),
+        "waste" => "waste_management".to_owned(),
         "topic-safety" | "street_lighting" | "street-lighting" => "street_lighting".to_owned(),
         "topic-utilities" | "utilities" => "electricity".to_owned(),
         "topic-digital" | "digital" => "telecom".to_owned(),
@@ -9349,6 +9383,81 @@ impl From<DbTicket> for Ticket {
 
 #[allow(dead_code)]
 fn _topic_contract_is_kept_for_docs(_topic: &Topic) {}
+
+fn promotion_evidence_ready(
+    evidence: &Value,
+    candidate_model: &str,
+    production_model: &str,
+    promotion_policy_version: &str,
+    candidate_checksum: &str,
+    production_checksum: &str,
+) -> bool {
+    let valid_checksum = |value: &str| {
+        value.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    };
+    let offline = &evidence["offline_metrics"];
+    let shadow = &evidence["shadow_metrics"];
+    let offline_count = offline["sample_count"].as_u64().unwrap_or(0);
+    let offline_minimum = offline["policy"]["min_total_samples"].as_u64().unwrap_or(0);
+    let shadow_count = shadow["sample_count"].as_u64().unwrap_or(0);
+    let shadow_minimum = shadow["policy"]["min_samples"].as_u64().unwrap_or(0);
+    let real_count = shadow["origin_counts"]["real"].as_u64().unwrap_or(0);
+    let real_minimum = shadow["policy"]["min_real_samples"].as_u64().unwrap_or(0);
+    let real_metrics_valid = match (
+        shadow["real_production_agreement"].as_f64(),
+        shadow["real_candidate_agreement"].as_f64(),
+        shadow["real_correction_rate_delta"].as_f64(),
+        shadow["policy"]["max_correction_rate_increase"].as_f64(),
+    ) {
+        (Some(production), Some(candidate), Some(delta), Some(limit)) => {
+            (0.0..=1.0).contains(&production)
+                && (0.0..=1.0).contains(&candidate)
+                && (0.0..=1.0).contains(&limit)
+                && (delta - (production - candidate)).abs() <= 0.000002
+                && delta <= limit
+        }
+        _ => false,
+    };
+    evidence["decision"] == "READY_TO_REVIEW"
+        && offline["report_version"] == "classifier-pair-evaluation.v1"
+        && offline["decision"] == "PENDING_HUMAN_REVIEW"
+        && offline["candidate"]["model_version"] == candidate_model
+        && offline["production"]["model_version"] == production_model
+        && offline["candidate"]["artifact_checksum"] == candidate_checksum
+        && offline["production"]["artifact_checksum"] == production_checksum
+        && offline["policy"]["policy_version"] == "classifier-critical-regression.v1"
+        && valid_checksum(candidate_checksum)
+        && valid_checksum(production_checksum)
+        && offline_count > 0
+        && offline_minimum > 0
+        && offline_count >= offline_minimum
+        && offline["regressed_critical_topics"] == json!([])
+        && shadow["report_version"] == "classifier-shadow-evaluation.v1"
+        && shadow["gate_population"] == "real_only.v1"
+        && shadow["status"] == "VALID"
+        && shadow["decision"] == "PENDING_HUMAN_REVIEW"
+        && shadow["candidate_model_version"] == candidate_model
+        && shadow["production_model_version"] == production_model
+        && shadow["promotion_policy_version"] == promotion_policy_version
+        && shadow["policy"]["policy_version"] == "classifier-shadow-policy.v1"
+        && shadow["policy"]["promotion_policy_version"] == promotion_policy_version
+        && shadow["blind_ab_enabled"].is_boolean()
+        && shadow_count > 0
+        && shadow_minimum > 0
+        && shadow_count >= shadow_minimum
+        && real_minimum > 0
+        && real_count >= real_minimum
+        && real_metrics_valid
+        && shadow["global_regression"] == false
+        && evidence["sample_size"] == shadow_count
+        && shadow["critical_regressions"] == json!([])
+        && evidence["critical_regressions"] == json!([])
+}
 
 #[cfg(test)]
 mod assist_preview_tests {

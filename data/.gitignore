@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 processed/*
 quarantine/*
+synthetic_raw/*
+reviews/*
 !processed/.gitkeep
 !quarantine/.gitkeep
 !quarantine/records.py

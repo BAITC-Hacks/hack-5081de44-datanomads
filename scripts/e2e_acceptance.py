@@ -1110,6 +1110,23 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
         status == 403,
         f"operator learning-cycle access should be forbidden: {forbidden_learning}",
     )
+    status, _, feedback_note = json_request(
+        base_url,
+        "POST",
+        f"/api/v1/learning/{cycle_id}/feedback",
+        body={"ticket_id": ticket_ids[0], "decision": "confirm"},
+        role="OPERATOR",
+        timeout=timeout,
+    )
+    expect(status == 201, f"learning feedback note failed: {feedback_note}")
+    status, _, collecting = json_request(
+        base_url,
+        "GET",
+        f"/api/v1/learning/{cycle_id}",
+        role="ML_REVIEWER",
+        timeout=timeout,
+    )
+    expect(status == 200 and collecting.get("feedback_count") == 0, f"unverified feedback counted as training evidence: {collecting}")
     status, _, feedback = json_request(
         base_url,
         "POST",

@@ -7573,7 +7573,12 @@ async fn learning_overview(
             .map_err(ApiError::Internal);
     }
     let store = state.read_store()?;
-    let items = store.learning_cycles.values().cloned().collect::<Vec<_>>();
+    let items = store
+        .learning_cycles
+        .values()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
     let active_cycle = items
         .iter()
         .find(|cycle| is_active_learning_cycle_state(&cycle.state))
@@ -8078,10 +8083,6 @@ async fn add_learning_feedback(
     };
     store.next_feedback_number += 1;
     store.learning_feedback.push(feedback.clone());
-    if let Some(cycle) = store.learning_cycles.get_mut(&cycle_id) {
-        cycle.feedback_count += 1;
-        cycle.updated_at = feedback.created_at.clone();
-    }
     Ok((StatusCode::CREATED, Json(feedback)))
 }
 

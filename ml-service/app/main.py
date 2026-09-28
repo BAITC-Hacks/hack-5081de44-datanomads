@@ -103,7 +103,7 @@ registry, classifier, embedder, forecaster, anomaly_detector, trainer, evaluator
 app = FastAPI(
     title="Pulse 109 ML Service",
     version=__version__,
-    description="Local deterministic baseline for classification, retrieval embeddings, forecast and anomaly APIs.",
+    description="Local classification, retrieval embeddings, forecast and anomaly APIs.",
     docs_url="/docs",
     redoc_url="/redoc",
 )

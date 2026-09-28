@@ -1,0 +1,26 @@
+FROM python:3.11.15-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HUB_OFFLINE=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+COPY ml-service/requirements.txt /tmp/runtime-requirements.txt
+COPY ml-service/training/requirements.lock /tmp/training-requirements.txt
+RUN pip install --no-cache-dir torch==2.7.0 --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r /tmp/runtime-requirements.txt -r /tmp/training-requirements.txt
+
+COPY ml-service/app ./app
+COPY ml-service/artifacts ./artifacts
+COPY ml-service/training ./training
+COPY ml-service/worker.py ./worker.py
+COPY scripts/pulse_sdg.py scripts/review_retrieval_relations.py scripts/review_synthetic_classifier.py scripts/strict_json.py ./scripts/
+COPY data/__init__.py ./data/__init__.py
+COPY data/normalization ./data/normalization
+COPY data/schemas ./data/schemas
+RUN python -c "import training.feedback_job"
+
+CMD ["python", "/app/worker.py", "--loop"]

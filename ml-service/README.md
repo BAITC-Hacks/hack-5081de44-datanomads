@@ -7,8 +7,9 @@
 ## Что входит
 
 - `/healthz` и `/readyz` для liveness/readiness;
-- `POST /internal/v1/classify` — детерминированная RU/KZ demo-классификация по
-  17 стабильным labels (16 тем и `other`), confidence state и alternatives;
+- `POST /internal/v1/classify` — RU/KZ классификация по 16 темам, confidence
+  state и alternatives. По умолчанию работает детерминированный baseline с
+  дополнительным ответом `other`; локальный XLM-R включается явно;
 - `POST /internal/v1/embed` — воспроизводимый локальный hashed embedding без
   загрузки внешней модели;
 - `POST /internal/v1/forecast` — StatsForecast `SeasonalNaive` baseline и

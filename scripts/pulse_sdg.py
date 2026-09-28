@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import re
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from data.normalization.pii import scan_pii
+from data.schemas.taxonomy import TOPIC_DEFINITIONS
+from scripts.strict_json import unique_object
+
 DEFAULT_SEEDS = ROOT / "data/sdg/pilot_scenarios.jsonl"
 CATALOG = ROOT / "data/catalogs/almaty_2025_taxonomy_review.json"
+PROMPT_VERSION = "pulse109-appeal.v1"
 LANGUAGES = {"RU", "KZ", "MIXED"}
 STYLES = {"short", "conversational", "neutral"}
 REQUIRED_SEED_FIELDS = {
@@ -22,47 +32,100 @@ REQUIRED_SEED_FIELDS = {
     "source_category",
     "source_service",
     "facts_ru",
+    "critical_facts",
+    "forbidden_invented_facts",
+    "source_provenance",
+    "review_status",
 }
-SENSITIVE_PATTERN = re.compile(
-    r"(?:\b\d{12}\b|(?<!\d)(?:\+?7|8)[\s()\-]*7\d{2}[\s()\-]*\d{3}[\s()\-]*\d{2}[\s()\-]*\d{2}(?!\d)|"
-    r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b)"
+OPTIONAL_SEED_FIELDS = {"object_type", "region_constraints", "time_context", "duplicate_group", "repeat_group"}
+SEED_SOURCE_PROVENANCE = "SYNTHETIC_FROM_CANDIDATE_CATALOG_PAIR"
+AUTHORED_SOURCE_PROVENANCE = "SYNTHETIC_AUTHORED_SCENARIO"
+AUTHORED_SOURCE_MARKER = "SYNTHETIC_AUTHORED"
+TOPIC_IDS = {topic["id"] for topic in TOPIC_DEFINITIONS}
+GENERATION_SEED_FIELDS = (
+    "scenario_id", "topic_id", "subtopic_id", "source_category", "source_service", "facts_ru",
 )
+PROMPT = """Напиши ровно одно вымышленное обращение гражданина в службу 109.
+Факты ситуации: {{ facts_ru }}
+Язык: {{ language }}. RU — русский; KZ — естественный казахский; MIXED — естественное смешение русского и казахского.
+Стиль: {{ style }}. short — коротко; conversational — разговорно; neutral — нейтрально.
+Сохрани все существенные факты. Не добавляй причину, адрес, фамилию, телефон, ИИН, исполнителя,
+срок решения, действия службы или другие непредоставленные сведения.
+Не называй тему, подтип и служебные метки. Верни только текст обращения без кавычек и пояснений."""
 
 
-def read_seeds(path: Path) -> dict[str, dict[str, str]]:
-    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+def source_checksum(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def read_seeds(path: Path) -> dict[str, dict]:
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
     allowed = {
         (pair["source_category"], pair["source_service"]): pair
         for pair in catalog["pairs"]
         if pair["proposal_status"] == "CANDIDATE" and pair["suggested_subtopic_id"]
     }
-    seeds: dict[str, dict[str, str]] = {}
+    seeds: dict[str, dict] = {}
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
-            seed = json.loads(line)
-            if not isinstance(seed, dict) or set(seed) != REQUIRED_SEED_FIELDS:
+            try:
+                seed = json.loads(line, object_pairs_hook=unique_object)
+            except ValueError as error:
+                raise ValueError(f"seed line {line_number}: {error}") from error
+            if (not isinstance(seed, dict) or not REQUIRED_SEED_FIELDS <= set(seed) or
+                    set(seed) - REQUIRED_SEED_FIELDS - OPTIONAL_SEED_FIELDS):
                 raise ValueError(f"seed line {line_number}: unexpected fields")
             if any(
                 not isinstance(value, str) or not value.strip()
-                for value in seed.values()
+                for key, value in seed.items()
+                if key not in {"critical_facts", "forbidden_invented_facts", "region_constraints"}
             ):
                 raise ValueError(
-                    f"seed line {line_number}: every field must be nonempty text"
+                    f"seed line {line_number}: text fields must be nonempty"
                 )
+            if (seed["source_provenance"] not in {SEED_SOURCE_PROVENANCE, AUTHORED_SOURCE_PROVENANCE} or
+                    seed["review_status"] != "PENDING"):
+                raise ValueError(f"seed line {line_number}: invalid provenance or review status")
+            for field in ("critical_facts", "forbidden_invented_facts"):
+                values = seed[field]
+                if (not isinstance(values, list) or not values or
+                        any(not isinstance(value, str) or not value.strip() for value in values) or
+                        len(set(values)) != len(values)):
+                    raise ValueError(f"seed line {line_number}: invalid {field}")
+            regions = seed.get("region_constraints", [])
+            if (not isinstance(regions, list) or
+                    any(not isinstance(value, str) or not value.strip() for value in regions) or
+                    len(set(regions)) != len(regions)):
+                raise ValueError(f"seed line {line_number}: invalid region_constraints")
+            if (any(fact not in seed["facts_ru"] for fact in seed["critical_facts"]) or
+                    any(seed[field] not in seed["facts_ru"] for field in ("object_type", "time_context")
+                        if field in seed)):
+                raise ValueError(f"seed line {line_number}: context is not present in facts_ru")
             scenario_id = seed["scenario_id"]
             if scenario_id in seeds:
                 raise ValueError(f"seed line {line_number}: duplicate scenario_id")
-            pair = allowed.get((seed["source_category"], seed["source_service"]))
-            if pair is None or (
-                pair["suggested_topic_id"],
-                pair["suggested_subtopic_id"],
-            ) != (seed["topic_id"], seed["subtopic_id"]):
-                raise ValueError(
-                    f"seed line {line_number}: pair is outside the clear catalog scope"
-                )
-            if SENSITIVE_PATTERN.search(seed["facts_ru"]):
+            if seed["source_provenance"] == AUTHORED_SOURCE_PROVENANCE:
+                if (seed["topic_id"] not in TOPIC_IDS or
+                        (seed["source_category"], seed["source_service"]) !=
+                        (AUTHORED_SOURCE_MARKER, AUTHORED_SOURCE_MARKER)):
+                    raise ValueError(f"seed line {line_number}: invalid authored topic or source marker")
+            else:
+                pair = allowed.get((seed["source_category"], seed["source_service"]))
+                if pair is None or (
+                    pair["suggested_topic_id"], pair["suggested_subtopic_id"]
+                ) != (seed["topic_id"], seed["subtopic_id"]):
+                    raise ValueError(
+                        f"seed line {line_number}: pair is outside the clear catalog scope"
+                    )
+            if any(scan_pii(value).detected for value in (
+                    seed["facts_ru"], *seed["critical_facts"], *seed["forbidden_invented_facts"],
+                    *regions, *(seed[field] for field in ("object_type", "time_context") if field in seed))):
                 raise ValueError(f"seed line {line_number}: sensitive-looking value")
             seeds[scenario_id] = seed
     if not seeds:
@@ -70,7 +133,15 @@ def read_seeds(path: Path) -> dict[str, dict[str, str]]:
     return seeds
 
 
-def build_config(seed_path: Path, model_id: str):
+def write_generation_seeds(seeds: dict[str, dict], path: Path) -> None:
+    """Keep review metadata in source scenarios, not Data Designer's seed columns."""
+    with path.open("x", encoding="utf-8") as stream:
+        for seed in seeds.values():
+            stream.write(json.dumps({key: seed[key] for key in GENERATION_SEED_FIELDS},
+                                    ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def build_config(seed_path: Path, model_id: str, generator_seed: int):
     import data_designer.config as dd
 
     builder = dd.DataDesignerConfigBuilder(
@@ -85,7 +156,7 @@ def build_config(seed_path: Path, model_id: str):
                     max_tokens=220,
                     max_parallel_requests=1,
                     timeout=180,
-                    extra_body={"reasoning_effort": "none"},
+                    extra_body={"reasoning_effort": "none", "seed": generator_seed},
                 ),
             )
         ]
@@ -113,13 +184,7 @@ def build_config(seed_path: Path, model_id: str):
         dd.LLMTextColumnConfig(
             name="appeal_text",
             model_alias="local-generator",
-            prompt="""Напиши ровно одно вымышленное обращение гражданина в службу 109.
-Факты ситуации: {{ facts_ru }}
-Язык: {{ language }}. RU — русский; KZ — естественный казахский; MIXED — естественное смешение русского и казахского.
-Стиль: {{ style }}. short — коротко; conversational — разговорно; neutral — нейтрально.
-Сохрани все существенные факты. Не добавляй причину, адрес, фамилию, телефон, ИИН, исполнителя,
-срок решения, действия службы или другие непредоставленные сведения.
-Не называй тему, подтип и служебные метки. Верни только текст обращения без кавычек и пояснений.""",
+            prompt=PROMPT,
         )
     )
     return builder
@@ -131,20 +196,25 @@ def clean_text(value: object) -> str | None:
     text = " ".join(value.strip().strip('"«»').split())
     if not 15 <= len(text) <= 700:
         return None
-    if SENSITIVE_PATTERN.search(text):
+    if scan_pii(text).detected:
         return None
     if text.casefold().startswith(("вот текст", "конечно", "тема:", "категория:")):
         return None
     return text
 
 
+def candidate_text_key(text: str) -> str:
+    return unicodedata.normalize("NFC", text.casefold())
+
+
 def export_candidates(
-    rows: list[dict], seeds: dict[str, dict[str, str]], output: Path, model_id: str
+    rows: list[dict], seeds: dict[str, dict], output: Path, model_id: str,
+    scenario_checksum: str, generator_seed: int,
 ) -> Counter:
     counts: Counter = Counter()
     seen_texts: set[str] = set()
     with output.open("x", encoding="utf-8") as stream:
-        for index, row in enumerate(rows, start=1):
+        for row in rows:
             scenario_id = row.get("scenario_id")
             seed = seeds.get(scenario_id)
             if seed is None or any(
@@ -160,13 +230,16 @@ def export_candidates(
             if text is None:
                 counts["invalid_text"] += 1
                 continue
-            duplicate_key = text.casefold()
+            duplicate_key = candidate_text_key(text)
             if duplicate_key in seen_texts:
                 counts["exact_duplicate"] += 1
                 continue
             seen_texts.add(duplicate_key)
+            variant_digest = hashlib.sha256(
+                f"{scenario_id}\0{language}\0{style}\0{text}".encode("utf-8")
+            ).hexdigest()[:16]
             candidate = {
-                "variant_id": f"{scenario_id}_{index:04d}",
+                "variant_id": f"{scenario_id}_{variant_digest}",
                 "scenario_id": scenario_id,
                 "split_group": scenario_id,
                 "language": language,
@@ -176,6 +249,9 @@ def export_candidates(
                 "subtopic_id": seed["subtopic_id"],
                 "synthetic": True,
                 "generator_model": model_id,
+                "prompt_version": PROMPT_VERSION,
+                "generator_seed": generator_seed,
+                "source_scenario_sha256": scenario_checksum,
                 "review_status": "PENDING",
             }
             stream.write(json.dumps(candidate, ensure_ascii=False) + "\n")
@@ -192,15 +268,21 @@ def main() -> None:
     )
     parser.add_argument("--endpoint", default="http://localhost:11434/v1")
     parser.add_argument("--num-records", type=int)
+    parser.add_argument("--generator-seed", type=int, default=109)
     parser.add_argument("--run-dir", type=Path)
     args = parser.parse_args()
 
+    scenario_checksum = source_checksum(args.seed_path)
     seeds = read_seeds(args.seed_path)
+    if source_checksum(args.seed_path) != scenario_checksum:
+        raise ValueError("source scenarios changed while loading")
     if args.check_seeds:
         print(f"OK: {len(seeds)} clear synthetic scenarios")
         return
     if not args.model:
         parser.error("--model is required for generation")
+    if args.generator_seed < 0:
+        parser.error("--generator-seed must be nonnegative")
     num_records = len(seeds) if args.num_records is None else args.num_records
     if not 1 <= num_records <= 300:
         parser.error("--num-records must be between 1 and 300 for the pilot")
@@ -217,6 +299,8 @@ def main() -> None:
         timezone.utc
     ).strftime("%Y%m%dT%H%M%SZ")
     run_dir.mkdir(parents=True, exist_ok=False)
+    generation_seeds = run_dir / "generation_seeds.jsonl"
+    write_generation_seeds(seeds, generation_seeds)
     provider = dd.ModelProvider(
         name="local",
         endpoint=args.endpoint,
@@ -226,16 +310,22 @@ def main() -> None:
     designer = DataDesigner(
         model_providers=[provider], artifact_path=run_dir / "artifacts"
     )
-    config = build_config(args.seed_path.resolve(), args.model)
+    config = build_config(generation_seeds.resolve(), args.model, args.generator_seed)
     designer.validate(config)
     result = designer.create(
         config, num_records=num_records, dataset_name="pulse109-pilot"
     )
     dataset = result.load_dataset()
     rows = dataset.to_dict(orient="records")
-    counts = export_candidates(rows, seeds, run_dir / "candidates.jsonl", args.model)
+    if source_checksum(args.seed_path) != scenario_checksum:
+        raise ValueError("source scenarios changed during generation")
+    counts = export_candidates(rows, seeds, run_dir / "candidates.jsonl", args.model,
+                               scenario_checksum, args.generator_seed)
     (run_dir / "summary.json").write_text(
-        json.dumps(dict(counts), indent=2) + "\n", encoding="utf-8"
+        json.dumps({"counts": dict(counts), "source_scenario_sha256": scenario_checksum,
+                    "generation_seed_sha256": source_checksum(generation_seeds),
+                    "prompt_version": PROMPT_VERSION, "generator_model": args.model,
+                    "generator_seed": args.generator_seed}, indent=2) + "\n", encoding="utf-8"
     )
     print(f"Run: {run_dir}")
     print(f"Candidates pending human review: {counts['pending_review']} / {len(rows)}")

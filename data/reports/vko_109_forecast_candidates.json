@@ -1,0 +1,173 @@
+{
+  "calendar_days": 1035,
+  "count_prediction_policy": "clip_negative_to_zero",
+  "first_date": "2023-01-01",
+  "high_load_day_proxy_policy": "strictly_above_pre_origin_observed_history_p90_nearest_rank.v1",
+  "interval_status": "NOT_EVALUATED",
+  "invalid_csv_or_date_row_count": 0,
+  "last_date": "2025-10-31",
+  "longest_observed_run_days": 1021,
+  "minimum_train_days": 365,
+  "missing_day_policy": "fixed_calendar_origins_require_365_consecutive_observed_train_days_and_observed_targets",
+  "origin_step_days": 30,
+  "peak_detection_status": "NO_REVIEWED_PEAK_LABELS",
+  "prophet_config": {
+    "changepoint_prior_scale": 0.05,
+    "daily_seasonality": false,
+    "uncertainty_samples": 0,
+    "weekly_seasonality": true,
+    "yearly_seasonality": false
+  },
+  "prophet_version": "1.4.0",
+  "record_count": 83385,
+  "report_version": "forecast-candidates.v3",
+  "results": [
+    {
+      "best_on_backtest": "prophet",
+      "high_load_day_proxy": {
+        "models": {
+          "prophet": {
+            "f1": 0.1159,
+            "fn": 57,
+            "fp": 65,
+            "precision": 0.1096,
+            "recall": 0.1231,
+            "tn": 500,
+            "tp": 8
+          },
+          "seasonal_naive": {
+            "f1": 0.1031,
+            "fn": 60,
+            "fp": 27,
+            "precision": 0.1562,
+            "recall": 0.0769,
+            "tn": 538,
+            "tp": 5
+          }
+        },
+        "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS"
+      },
+      "horizon_days": 30,
+      "models": {
+        "prophet": {
+          "mae": 39.4856,
+          "rmse": 74.5936,
+          "sample_count": 630,
+          "smape": 0.4058,
+          "wape": 0.4574,
+          "window_count": 21
+        },
+        "seasonal_naive": {
+          "mae": 40.9429,
+          "rmse": 85.8226,
+          "sample_count": 630,
+          "smape": 0.4181,
+          "wape": 0.4742,
+          "window_count": 21
+        }
+      },
+      "selection_status": "PROVISIONAL_BACKTEST_ONLY",
+      "status": "EVALUATED"
+    },
+    {
+      "best_on_backtest": "seasonal_naive",
+      "high_load_day_proxy": {
+        "models": {
+          "prophet": {
+            "f1": 0.0752,
+            "fn": 109,
+            "fp": 137,
+            "precision": 0.068,
+            "recall": 0.084,
+            "tn": 944,
+            "tp": 10
+          },
+          "seasonal_naive": {
+            "f1": 0.1075,
+            "fn": 109,
+            "fp": 57,
+            "precision": 0.1493,
+            "recall": 0.084,
+            "tn": 1024,
+            "tp": 10
+          }
+        },
+        "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS"
+      },
+      "horizon_days": 60,
+      "models": {
+        "prophet": {
+          "mae": 40.6772,
+          "rmse": 69.8927,
+          "sample_count": 1200,
+          "smape": 0.4366,
+          "wape": 0.4857,
+          "window_count": 20
+        },
+        "seasonal_naive": {
+          "mae": 39.0342,
+          "rmse": 76.478,
+          "sample_count": 1200,
+          "smape": 0.4223,
+          "wape": 0.4661,
+          "window_count": 20
+        }
+      },
+      "selection_status": "PROVISIONAL_BACKTEST_ONLY",
+      "status": "EVALUATED"
+    },
+    {
+      "best_on_backtest": "seasonal_naive",
+      "high_load_day_proxy": {
+        "models": {
+          "prophet": {
+            "f1": 0.0657,
+            "fn": 149,
+            "fp": 221,
+            "precision": 0.0556,
+            "recall": 0.0802,
+            "tn": 1327,
+            "tp": 13
+          },
+          "seasonal_naive": {
+            "f1": 0.0956,
+            "fn": 150,
+            "fp": 77,
+            "precision": 0.1348,
+            "recall": 0.0741,
+            "tn": 1471,
+            "tp": 12
+          }
+        },
+        "status": "PROXY_ONLY_NO_REVIEWED_PEAK_LABELS"
+      },
+      "horizon_days": 90,
+      "models": {
+        "prophet": {
+          "mae": 43.2214,
+          "rmse": 71.3172,
+          "sample_count": 1710,
+          "smape": 0.4699,
+          "wape": 0.5209,
+          "window_count": 19
+        },
+        "seasonal_naive": {
+          "mae": 39.055,
+          "rmse": 74.956,
+          "sample_count": 1710,
+          "smape": 0.4262,
+          "wape": 0.4707,
+          "window_count": 19
+        }
+      },
+      "selection_status": "PROVISIONAL_BACKTEST_ONLY",
+      "status": "EVALUATED"
+    }
+  ],
+  "runtime_eligible": false,
+  "scope": "total_daily_appeals_in_one_export",
+  "selection_policy": "lowest_wape_on_same_windows_tie_seasonal_naive.v1",
+  "source_sha256": "bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+  "status": "EVALUATED",
+  "unobserved_calendar_days": 2
+}

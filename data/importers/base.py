@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
+import unicodedata
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
@@ -16,12 +18,28 @@ from data.schemas.taxonomy import canonical_source_system
 from data.schemas.unified_ticket import SchemaValidationError
 
 
+def _unique_json_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    value: Dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON field")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("nonstandard JSON constant")
+
+
 @dataclass
 class ImportResult:
     source_system: str
+    profile_version: str = "synthetic-aliases.v1"
+    profile_status: str = "SYNTHETIC_TEST_ONLY"
     tickets: List[Any] = field(default_factory=list)
     quarantine: List[QuarantineRecord] = field(default_factory=list)
     duplicate_external_ids: List[str] = field(default_factory=list)
+    schema_fingerprints: List[str] = field(default_factory=list)
 
     @property
     def valid_count(self) -> int:
@@ -34,6 +52,9 @@ class ImportResult:
     def to_summary(self) -> Mapping[str, Any]:
         return {
             "source_system": self.source_system,
+            "profile_version": self.profile_version,
+            "profile_status": self.profile_status,
+            "schema_fingerprints": sorted(set(self.schema_fingerprints)),
             "valid_count": self.valid_count,
             "quarantine_count": self.quarantine_count,
             "duplicate_external_ids": len(self.duplicate_external_ids),
@@ -44,8 +65,12 @@ class SourceImporter:
     """Base importer with source-specific aliases supplied by subclasses."""
 
     source_system: str = "unknown"
-    # Canonical field -> accepted source headers.  Header matching is
-    # case/spacing/punctuation insensitive.
+    profile_version: str = "synthetic-aliases.v1"
+    profile_status: str = "SYNTHETIC_TEST_ONLY"
+    csv_delimiter: str = ","
+    required_headers = frozenset({"external_ticket_id", "region_id", "created_at", "original_text"})
+    # These are test hypotheses, not verified production export schemas.
+    # Canonical field -> accepted exact source headers (ignoring case and outer whitespace).
     field_aliases: Mapping[str, Sequence[str]] = {
         "external_ticket_id": ("external_ticket_id", "ticket_id", "id", "appeal_id", "request_id"),
         "region_id": ("region_id", "region", "oblast", "область", "регион"),
@@ -77,36 +102,50 @@ class SourceImporter:
 
     @staticmethod
     def _header_key(value: object) -> str:
-        import re
-        import unicodedata
-
-        text = unicodedata.normalize("NFKC", str(value or "")).strip().lower()
-        text = text.replace("ё", "е")
-        return re.sub(r"[^\w]+", "_", text, flags=re.UNICODE).strip("_")
+        return unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
 
     def _header_map(self, headers: Sequence[str]) -> Mapping[str, str]:
-        normalized = {self._header_key(header): header for header in headers}
+        normalized: Dict[str, str] = {}
+        for header in headers:
+            key = self._header_key(header)
+            if not key or key in normalized:
+                raise SchemaValidationError("UNKNOWN_SCHEMA", "empty or duplicate source header")
+            normalized[key] = header
         result: Dict[str, str] = {}
         for canonical, aliases in self.field_aliases.items():
-            for alias in aliases:
-                candidate = normalized.get(self._header_key(alias))
-                if candidate is not None:
-                    result[canonical] = candidate
-                    break
+            matches = {normalized[self._header_key(alias)] for alias in aliases if self._header_key(alias) in normalized}
+            if len(matches) > 1:
+                raise SchemaValidationError("UNKNOWN_SCHEMA", f"ambiguous source headers for {canonical}")
+            if matches:
+                result[canonical] = next(iter(matches))
+        if not self.required_headers.issubset(result):
+            raise SchemaValidationError("UNKNOWN_SCHEMA", "source headers do not identify all required fields")
+        if len(set(result.values())) != len(result):
+            raise SchemaValidationError("UNKNOWN_SCHEMA", "one source header maps to multiple fields")
         return result
 
+    def schema_fingerprint(self, headers: Sequence[str]) -> str:
+        signature = {
+            "source_system": self.source_system,
+            "profile_version": self.profile_version,
+            "headers": sorted(self._header_key(header) for header in headers),
+        }
+        return hashlib.sha256(json.dumps(signature, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
     def canonicalize_row(self, raw_row: Mapping[str, Any], header_map: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-        mapping = header_map or self._header_map(list(raw_row.keys()))
-        if not mapping:
-            raise SchemaValidationError("UNKNOWN_SCHEMA", "no known columns in source row")
+        mapping = header_map if header_map is not None else self._header_map(list(raw_row.keys()))
         return {canonical: raw_row.get(source_key) for canonical, source_key in mapping.items()}
 
-    def import_rows(self, rows: Iterable[Mapping[str, Any]], *, start_row: int = 1) -> ImportResult:
-        result = ImportResult(source_system=self.source_system)
+    def import_rows(self, rows: Iterable[Mapping[str, Any]], *, start_row: int = 1,
+                    row_numbers: Iterable[int] | None = None) -> ImportResult:
+        result = ImportResult(source_system=self.source_system, profile_version=self.profile_version, profile_status=self.profile_status)
         seen_ids = set()
-        for row_number, raw_row in enumerate(rows, start=start_row):
+        numbered_rows = (enumerate(rows, start=start_row) if row_numbers is None else
+                         zip(row_numbers, rows, strict=True))
+        for row_number, raw_row in numbered_rows:
             try:
-                canonical_row = self.canonicalize_row(raw_row)
+                header_map = self._header_map(list(raw_row.keys()))
+                canonical_row = self.canonicalize_row(raw_row, header_map)
             except SchemaValidationError as error:
                 result.quarantine.append(
                     QuarantineRecord(
@@ -118,6 +157,9 @@ class SourceImporter:
                     )
                 )
                 continue
+            fingerprint = self.schema_fingerprint(list(raw_row.keys()))
+            if fingerprint not in result.schema_fingerprints:
+                result.schema_fingerprints.append(fingerprint)
             normalized: NormalizationResult = normalize_row(
                 canonical_row,
                 source_system=self.source_system,
@@ -132,7 +174,7 @@ class SourceImporter:
                             source_system=self.source_system,
                             row_number=row_number,
                             reason="INVALID_VALUE",
-                            detail=f"duplicate external_ticket_id: {external_id}",
+                            detail="duplicate external_ticket_id",
                             field="external_ticket_id",
                             row=raw_row,
                         )
@@ -144,11 +186,11 @@ class SourceImporter:
                 result.quarantine.append(normalized.quarantine)
         return result
 
-    def _read_csv(self, path: Path) -> Tuple[List[Mapping[str, Any]], List[QuarantineRecord]]:
-        rows: List[Mapping[str, Any]] = []
+    def _read_csv(self, path: Path) -> Tuple[List[Tuple[int, Mapping[str, Any]]], List[QuarantineRecord]]:
+        rows: List[Tuple[int, Mapping[str, Any]]] = []
         errors: List[QuarantineRecord] = []
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.reader(handle, delimiter="\t" if path.suffix.lower() == ".tsv" else ",")
+            reader = csv.reader(handle, delimiter="\t" if path.suffix.lower() == ".tsv" else self.csv_delimiter, strict=True)
             try:
                 headers = next(reader)
             except StopIteration:
@@ -161,6 +203,8 @@ class SourceImporter:
                         {},
                     )
                 ]
+            except (csv.Error, UnicodeError):
+                return rows, [QuarantineRecord(self.source_system, 1, "BAD_CSV_STRUCTURE", "invalid CSV header", {})]
             if not headers or any(not str(header).strip() for header in headers):
                 return rows, [
                     QuarantineRecord(
@@ -171,38 +215,41 @@ class SourceImporter:
                         {str(i): value for i, value in enumerate(headers)},
                     )
                 ]
-            header_map = self._header_map(headers)
-            if not header_map:
+            try:
+                self._header_map(headers)
+            except SchemaValidationError as error:
                 return rows, [
                     QuarantineRecord(
                         self.source_system,
                         1,
                         "UNKNOWN_SCHEMA",
-                        "no supported source columns found",
+                        str(error),
                         {str(i): value for i, value in enumerate(headers)},
                     )
                 ]
-            for row_number, values in enumerate(reader, start=2):
+            while True:
+                row_number = reader.line_num + 1
+                try:
+                    values = next(reader)
+                except StopIteration:
+                    break
+                except (csv.Error, UnicodeError):
+                    return [], [QuarantineRecord(self.source_system, row_number, "BAD_CSV_STRUCTURE",
+                                                 "CSV parsing failed; entire file rejected", {})]
                 if len(values) != len(headers):
-                    errors.append(
-                        QuarantineRecord(
-                            self.source_system,
-                            row_number,
-                            "BAD_CSV_STRUCTURE",
-                            f"expected {len(headers)} columns, got {len(values)}",
-                            {str(i): value for i, value in enumerate(values)},
-                        )
-                    )
-                    continue
-                rows.append(dict(zip(headers, values)))
+                    errors.append(QuarantineRecord(self.source_system, row_number, "BAD_CSV_STRUCTURE", f"expected {len(headers)} columns, got {len(values)}", {str(i): value for i, value in enumerate(values)}))
+                else:
+                    rows.append((row_number, dict(zip(headers, values))))
         return rows, errors
 
-    def _read_json(self, path: Path) -> Tuple[List[Mapping[str, Any]], List[QuarantineRecord]]:
-        rows: List[Mapping[str, Any]] = []
+    def _read_json(self, path: Path) -> Tuple[List[Tuple[int, Mapping[str, Any]]], List[QuarantineRecord]]:
+        rows: List[Tuple[int, Mapping[str, Any]]] = []
         errors: List[QuarantineRecord] = []
         text = path.read_text(encoding="utf-8-sig")
+        numbered_values: List[Tuple[int, Any]] = []
+        parse_lines = False
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
             if isinstance(parsed, list):
                 values = parsed
             elif isinstance(parsed, Mapping) and isinstance(parsed.get("tickets"), list):
@@ -212,13 +259,21 @@ class SourceImporter:
                 values = parsed["tickets"]
             else:
                 values = [parsed]
+            numbered_values = list(enumerate(values, start=1))
         except json.JSONDecodeError:
-            values = []
+            parse_lines = True
+        except ValueError as error:
+            if path.suffix.lower() not in {".jsonl", ".ndjson"} or text.lstrip().startswith("["):
+                return [], [QuarantineRecord(self.source_system, 1, "UNKNOWN_SCHEMA", str(error), {})]
+            parse_lines = True
+        if parse_lines:
             for row_number, line in enumerate(text.splitlines(), start=1):
                 if not line.strip():
                     continue
                 try:
-                    values.append(json.loads(line))
+                    numbered_values.append((row_number, json.loads(
+                        line, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant,
+                    )))
                 except json.JSONDecodeError as exc:
                     errors.append(
                         QuarantineRecord(
@@ -229,7 +284,11 @@ class SourceImporter:
                             {"line": line},
                         )
                     )
-        for row_number, value in enumerate(values, start=1):
+                except ValueError as error:
+                    errors.append(QuarantineRecord(
+                        self.source_system, row_number, "UNKNOWN_SCHEMA", str(error), {"line": line},
+                    ))
+        for row_number, value in numbered_values:
             if not isinstance(value, Mapping):
                 errors.append(
                     QuarantineRecord(
@@ -241,10 +300,10 @@ class SourceImporter:
                     )
                 )
             else:
-                rows.append(value)
+                rows.append((row_number, value))
         return rows, errors
 
-    def _read_xlsx(self, path: Path) -> Tuple[List[Mapping[str, Any]], List[QuarantineRecord]]:
+    def _read_xlsx(self, path: Path) -> Tuple[List[Tuple[int, Mapping[str, Any]]], List[QuarantineRecord]]:
         """Read the first worksheet using only the XLSX ZIP/XML contract.
 
         Government exports are often simple tabular workbooks.  Keeping this
@@ -266,8 +325,9 @@ class SourceImporter:
                 if sheet_name not in archive.namelist():
                     raise ValueError("workbook has no first worksheet")
                 root = ET.fromstring(archive.read(sheet_name))
-                matrix: List[List[str]] = []
-                for row in root.findall(".//main:sheetData/main:row", namespace):
+                matrix: List[Tuple[int, List[str]]] = []
+                for ordinal, row in enumerate(root.findall(".//main:sheetData/main:row", namespace), start=1):
+                    row_number = int(row.attrib.get("r", ordinal))
                     values: List[str] = []
                     for cell in row.findall("main:c", namespace):
                         cell_type = cell.attrib.get("t")
@@ -277,18 +337,18 @@ class SourceImporter:
                         if cell_type == "s" and text:
                             text = shared[int(text)] if int(text) < len(shared) else ""
                         values.append(text or "")
-                    matrix.append(values)
+                    matrix.append((row_number, values))
                 if not matrix:
                     return [], [QuarantineRecord(self.source_system, 1, "BAD_CSV_STRUCTURE", "XLSX has no rows", {})]
-                headers = matrix[0]
+                headers = matrix[0][1]
                 if not headers or any(not str(header).strip() for header in headers):
                     return [], [QuarantineRecord(self.source_system, 1, "BAD_CSV_STRUCTURE", "XLSX contains an empty header", {str(i): value for i, value in enumerate(headers)})]
-                rows: List[Mapping[str, Any]] = []
-                for row_number, values in enumerate(matrix[1:], start=2):
+                rows: List[Tuple[int, Mapping[str, Any]]] = []
+                for row_number, values in matrix[1:]:
                     if len(values) != len(headers):
                         errors.append(QuarantineRecord(self.source_system, row_number, "BAD_CSV_STRUCTURE", f"expected {len(headers)} columns, got {len(values)}", {str(i): value for i, value in enumerate(values)}))
                         continue
-                    rows.append(dict(zip(headers, values)))
+                    rows.append((row_number, dict(zip(headers, values))))
                 return rows, errors
         except (OSError, zipfile.BadZipFile, ET.ParseError, ValueError, IndexError) as error:
             return [], [QuarantineRecord(self.source_system, 1, "UNKNOWN_SCHEMA", f"invalid XLSX: {error}", {"path": str(path)})]
@@ -299,14 +359,16 @@ class SourceImporter:
         source_path = Path(path)
         suffix = source_path.suffix.lower()
         if suffix in {".json", ".jsonl", ".ndjson"}:
-            rows, parse_errors = self._read_json(source_path)
+            numbered_rows, parse_errors = self._read_json(source_path)
         elif suffix in {".csv", ".tsv"}:
-            rows, parse_errors = self._read_csv(source_path)
+            numbered_rows, parse_errors = self._read_csv(source_path)
         elif suffix in {".xlsx", ".xlsm"}:
-            rows, parse_errors = self._read_xlsx(source_path)
+            numbered_rows, parse_errors = self._read_xlsx(source_path)
         else:
             return ImportResult(
                 source_system=self.source_system,
+                profile_version=self.profile_version,
+                profile_status=self.profile_status,
                 quarantine=[
                     QuarantineRecord(
                         self.source_system,
@@ -317,8 +379,9 @@ class SourceImporter:
                     )
                 ],
             )
-        result = self.import_rows(rows, start_row=1 if suffix in {".json", ".jsonl", ".ndjson"} else 2)
-        result.quarantine = parse_errors + result.quarantine
+        result = self.import_rows((row for _, row in numbered_rows),
+                                  row_numbers=(number for number, _ in numbered_rows))
+        result.quarantine = sorted(parse_errors + result.quarantine, key=lambda row: row.row_number)
         return result
 
 

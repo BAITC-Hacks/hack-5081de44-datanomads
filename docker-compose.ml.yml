@@ -1,0 +1,13 @@
+services:
+  ml-service:
+    build:
+      args:
+        WITH_MODEL: "true"
+    image: pulse109/ml-service:model-local
+    environment:
+      PULSE_CLASSIFIER_MODEL_DIR: /app/model
+    volumes:
+      - ./ml-service/artifacts/classifier-synthetic-v1:/app/model:ro
+
+  ml-worker:
+    image: pulse109/ml-service:model-local

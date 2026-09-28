@@ -1,0 +1,8 @@
+# Versions observed in the Python 3.11 training environment. Use with
+# requirements-training.txt; platform-specific PyTorch dependencies follow its wheel.
+huggingface-hub==0.36.2
+numpy==2.4.6
+pydantic-core==2.27.2
+safetensors==0.8.0
+tokenizers==0.22.2
+typing-extensions==4.16.0

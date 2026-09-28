@@ -1,0 +1,46 @@
+{
+  "approved_for_training": false,
+  "content_sha256": "fc5d2fa5c93372dec3809ecc5519472e2015c7a47763c5c1aaaa2560f79c482a",
+  "dataset_version": "synthetic-source-normalized-v1",
+  "files": {
+    "audit.json": {
+      "bytes": 20513,
+      "sha256": "cb6f8592ea5f438dc6758f4ec41a6199a75ec46de171816c073a59d029cd060f"
+    },
+    "quarantine.jsonl": {
+      "bytes": 7564,
+      "sha256": "349911e9c7e20d35bd384d44bbbb27f123715f4378779a3e90c38cf855413391"
+    },
+    "tickets.jsonl": {
+      "bytes": 31610,
+      "sha256": "fc5d2fa5c93372dec3809ecc5519472e2015c7a47763c5c1aaaa2560f79c482a"
+    }
+  },
+  "languages": {
+    "RU": 35
+  },
+  "profile_status": "SYNTHETIC_TEST_ONLY",
+  "purpose": "source normalization and privacy validation only; not customer appeal data",
+  "quarantine_count": 35,
+  "raw_fixture_manifest_sha256": "bd863ad9cc15dcc7afa5c119961d09f2c997325163ce070762614e17628c63e3",
+  "record_count": 35,
+  "regions": {
+    "KZ-ASTANA": 35
+  },
+  "schema_version": "unified-ticket.v1",
+  "source_systems": [
+    "aikey",
+    "as_komek109",
+    "e_sep_su",
+    "ekc109",
+    "ikomek109",
+    "open_city",
+    "rdjardem3"
+  ],
+  "synthetic": true,
+  "topics": {
+    "street_lighting": 21,
+    "unknown": 7,
+    "water_supply": 7
+  }
+}

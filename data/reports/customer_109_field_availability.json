@@ -1,0 +1,624 @@
+{
+  "cross_source_value_comparison": {
+    "application_type": "NO_ABSENT_IN_ALMATY",
+    "channel": "NO_CODEBOOK_UNVERIFIED",
+    "closed_at": "DATE_ONLY_TIMEZONE_AND_OUTCOME_UNVERIFIED",
+    "created_at": "DATE_ONLY_TIMEZONE_UNVERIFIED",
+    "district_hint": "NO_ABSENT_IN_ALMATY",
+    "language_label": "UNAVAILABLE_IN_BOTH",
+    "object_id": "UNAVAILABLE_IN_BOTH",
+    "original_appeal_text": "UNAVAILABLE_IN_BOTH",
+    "priority_label": "UNAVAILABLE_IN_BOTH",
+    "raw_category": "NO_UNMAPPED_TAXONOMIES",
+    "raw_contractor": "NO_EXECUTOR_SEMANTICS_UNVERIFIED",
+    "raw_result": "NO_OUTCOME_SEMANTICS_UNVERIFIED",
+    "raw_service": "NO_DIFFERENT_OR_UNVERIFIED_FIELD_ROLE",
+    "raw_status": "NO_STATUS_SEMANTICS_UNVERIFIED",
+    "region_hint": "NO_ABSENT_IN_ALMATY_AND_NONCANONICAL_IN_VKO",
+    "secondary_status": "NO_ABSENT_IN_VKO",
+    "source_record_id": "NO_SOURCE_LOCAL_IDS",
+    "street_hint": "NO_PII_AND_ABSENT_IN_ALMATY",
+    "verified_resolution": "UNAVAILABLE_IN_BOTH"
+  },
+  "excluded_columns": {
+    "applicant_number": "PII_EXCLUDED_WHERE_PRESENT",
+    "com_exp": "CUSTOMER_CONFIRMED_NOT_ORIGINAL_APPEAL_TEXT",
+    "full_name": "PII_EXCLUDED_WHERE_PRESENT",
+    "operator": "OPERATOR_IDENTIFIER_EXCLUDED_WHERE_PRESENT"
+  },
+  "profiles": [
+    {
+      "candidate_roles": {
+        "original_appeal_text": {
+          "columns": [],
+          "excluded_column": "com_exp",
+          "status": "ABSENT_CONFIRMED_BY_CUSTOMER"
+        },
+        "priority_label": {
+          "columns": [],
+          "status": "ABSENT"
+        },
+        "resolution": {
+          "columns": [
+            "closing_date",
+            "result",
+            "status"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "service_or_routing_label": {
+          "columns": [
+            "service",
+            "contractor"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "topic_label": {
+          "columns": [
+            "category"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        }
+      },
+      "columns": [
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "application_number",
+          "nonempty_count": 83385,
+          "pii_risk": "SOURCE_RECORD_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "creation_date",
+          "nonempty_count": 83385,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "closing_date",
+          "nonempty_count": 83362,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "region",
+          "nonempty_count": 83385,
+          "pii_risk": "LOCATION_HINT"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "district",
+          "nonempty_count": 721,
+          "pii_risk": "LOCATION_HINT"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "street",
+          "nonempty_count": 22347,
+          "pii_risk": "PRECISE_LOCATION"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "full_name",
+          "nonempty_count": 6499,
+          "pii_risk": "DIRECT_PERSONAL_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "applicant_number",
+          "nonempty_count": 0,
+          "pii_risk": "DIRECT_PERSONAL_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "application_type",
+          "nonempty_count": 83382,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "submittal_channel",
+          "nonempty_count": 83385,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "category",
+          "nonempty_count": 83384,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "service",
+          "nonempty_count": 83384,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "contractor",
+          "nonempty_count": 77874,
+          "pii_risk": "PERSON_OR_ORGANIZATION_UNVERIFIED"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "com_exp",
+          "nonempty_count": 1690,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "result",
+          "nonempty_count": 83312,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "status",
+          "nonempty_count": 83385,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "operator",
+          "nonempty_count": 3,
+          "pii_risk": "OPERATOR_IDENTIFIER"
+        }
+      ],
+      "delimiter": ",",
+      "duplicate_source_id_count": 0,
+      "encoding": "utf-8-sig",
+      "fields": {
+        "application_type": {
+          "missing_or_invalid_count": 3,
+          "presence_rate": 0.999964,
+          "present_count": 83382,
+          "semantic_status": "UNVERIFIED_APPLICATION_TYPE",
+          "source_column": "application_type",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "channel": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 83385,
+          "semantic_status": "UNVERIFIED_CHANNEL_CODEBOOK",
+          "source_column": "submittal_channel",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "closed_at": {
+          "missing_or_invalid_count": 23,
+          "presence_rate": 0.999724,
+          "present_count": 83362,
+          "semantic_status": "DATE_FIELD_NOT_VERIFIED_RESOLUTION",
+          "source_column": "closing_date",
+          "within_source_comparison": "LOCAL_DATETIME_ORDER_ONLY"
+        },
+        "created_at": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 83385,
+          "semantic_status": "PARSEABLE_LOCAL_DATETIME_TIMEZONE_UNVERIFIED",
+          "source_column": "creation_date",
+          "within_source_comparison": "LOCAL_DATETIME_ORDER_ONLY"
+        },
+        "district_hint": {
+          "missing_or_invalid_count": 82664,
+          "presence_rate": 0.008647,
+          "present_count": 721,
+          "semantic_status": "UNVERIFIED_GEO_UNIT",
+          "source_column": "district",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "language_label": {
+          "missing_or_invalid_count": 83385,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "object_id": {
+          "missing_or_invalid_count": 83385,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "original_appeal_text": {
+          "missing_or_invalid_count": 83385,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT_CONFIRMED_BY_CUSTOMER",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "priority_label": {
+          "missing_or_invalid_count": 83385,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "raw_category": {
+          "missing_or_invalid_count": 1,
+          "presence_rate": 0.999988,
+          "present_count": 83384,
+          "semantic_status": "UNVERIFIED_CANONICAL_TOPIC",
+          "source_column": "category",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_contractor": {
+          "missing_or_invalid_count": 5511,
+          "presence_rate": 0.933909,
+          "present_count": 77874,
+          "semantic_status": "UNVERIFIED_EXECUTOR_ROLE",
+          "source_column": "contractor",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_result": {
+          "missing_or_invalid_count": 73,
+          "presence_rate": 0.999125,
+          "present_count": 83312,
+          "semantic_status": "UNVERIFIED_OUTCOME_MEANING",
+          "source_column": "result",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_service": {
+          "missing_or_invalid_count": 1,
+          "presence_rate": 0.999988,
+          "present_count": 83384,
+          "semantic_status": "UNVERIFIED_SERVICE_ROLE",
+          "source_column": "service",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_status": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 83385,
+          "semantic_status": "UNVERIFIED_STATUS_MEANING",
+          "source_column": "status",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "region_hint": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 83385,
+          "semantic_status": "CITY_OR_DISTRICT_NOT_CANONICAL_REGION",
+          "source_column": "region",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "secondary_status": {
+          "missing_or_invalid_count": 83385,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "source_record_id": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 83385,
+          "semantic_status": "SOURCE_LOCAL_IDENTIFIER",
+          "source_column": "application_number",
+          "within_source_comparison": "ID_EQUALITY_ONLY"
+        },
+        "street_hint": {
+          "missing_or_invalid_count": 61038,
+          "presence_rate": 0.267998,
+          "present_count": 22347,
+          "semantic_status": "ADDRESS_LIKE_PII_PRESENCE_ONLY",
+          "source_column": "street",
+          "within_source_comparison": "PRESENCE_ONLY"
+        },
+        "verified_resolution": {
+          "missing_or_invalid_count": 83385,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        }
+      },
+      "invalid_creation_date_count": 0,
+      "joint_presence": {
+        "category_and_service": 83384,
+        "closed_and_result": 83312,
+        "created_and_category": 83384,
+        "location_hints": 432
+      },
+      "malformed_row_count": 0,
+      "profile_id": "vko_109",
+      "record_count": 83385,
+      "schema_fingerprint_sha256": "sha256:3bdee0aae2fdc33f34c4f263ec9616dd5f4ec5de3e4dbb96a276a63b0df470e2",
+      "source_format": "csv",
+      "source_sha256": "sha256:bfa29295829a3c7830ffa5d0389a2924676f804464e577931d98bf3d8ffa7716",
+      "source_system": null,
+      "source_system_status": "UNVERIFIED"
+    },
+    {
+      "candidate_roles": {
+        "original_appeal_text": {
+          "columns": [],
+          "excluded_column": "com_exp",
+          "status": "ABSENT_CONFIRMED_BY_CUSTOMER"
+        },
+        "priority_label": {
+          "columns": [],
+          "status": "ABSENT"
+        },
+        "resolution": {
+          "columns": [
+            "closing_date",
+            "result",
+            "status",
+            "status_1"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "service_or_routing_label": {
+          "columns": [
+            "service",
+            "contractor"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        },
+        "topic_label": {
+          "columns": [
+            "category"
+          ],
+          "status": "UNVERIFIED_SEMANTICS"
+        }
+      },
+      "columns": [
+        {
+          "inferred_safe_type": "OPAQUE_IDENTIFIER_STRING",
+          "name": "application_number",
+          "nonempty_count": 19912,
+          "pii_risk": "SOURCE_RECORD_IDENTIFIER"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "creation_date",
+          "nonempty_count": 19912,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "LOCAL_DATETIME_STRING",
+          "invalid_nonempty_date_count": 0,
+          "name": "closing_date",
+          "nonempty_count": 18152,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "com_exp",
+          "nonempty_count": 6343,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "result",
+          "nonempty_count": 17881,
+          "pii_risk": "UNSTRUCTURED_TEXT_PII_POSSIBLE"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "contractor",
+          "nonempty_count": 8796,
+          "pii_risk": "PERSON_OR_ORGANIZATION_UNVERIFIED"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "status",
+          "nonempty_count": 19686,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "category",
+          "nonempty_count": 19599,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "service",
+          "nonempty_count": 19841,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "status_1",
+          "nonempty_count": 19857,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        },
+        {
+          "inferred_safe_type": "STRING",
+          "name": "submittal_channel",
+          "nonempty_count": 19890,
+          "pii_risk": "UNVERIFIED_PII_STATUS"
+        }
+      ],
+      "delimiter": ",",
+      "duplicate_source_id_count": 0,
+      "encoding": "utf-8-sig",
+      "fields": {
+        "application_type": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "channel": {
+          "missing_or_invalid_count": 22,
+          "presence_rate": 0.998895,
+          "present_count": 19890,
+          "semantic_status": "UNVERIFIED_CHANNEL_CODEBOOK",
+          "source_column": "submittal_channel",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "closed_at": {
+          "missing_or_invalid_count": 1760,
+          "presence_rate": 0.911611,
+          "present_count": 18152,
+          "semantic_status": "DATE_FIELD_NOT_VERIFIED_RESOLUTION",
+          "source_column": "closing_date",
+          "within_source_comparison": "LOCAL_DATETIME_ORDER_ONLY"
+        },
+        "created_at": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 19912,
+          "semantic_status": "PARSEABLE_LOCAL_DATETIME_TIMEZONE_UNVERIFIED",
+          "source_column": "creation_date",
+          "within_source_comparison": "LOCAL_DATETIME_ORDER_ONLY"
+        },
+        "district_hint": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "language_label": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "object_id": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "original_appeal_text": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT_CONFIRMED_BY_CUSTOMER",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "priority_label": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "raw_category": {
+          "missing_or_invalid_count": 313,
+          "presence_rate": 0.984281,
+          "present_count": 19599,
+          "semantic_status": "UNVERIFIED_CANONICAL_TOPIC",
+          "source_column": "category",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_contractor": {
+          "missing_or_invalid_count": 11116,
+          "presence_rate": 0.441744,
+          "present_count": 8796,
+          "semantic_status": "UNVERIFIED_EXECUTOR_ROLE",
+          "source_column": "contractor",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_result": {
+          "missing_or_invalid_count": 2031,
+          "presence_rate": 0.898001,
+          "present_count": 17881,
+          "semantic_status": "UNVERIFIED_OUTCOME_MEANING",
+          "source_column": "result",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_service": {
+          "missing_or_invalid_count": 71,
+          "presence_rate": 0.996434,
+          "present_count": 19841,
+          "semantic_status": "OBSERVED_ISSUE_TYPE_NOT_VERIFIED_EXECUTOR",
+          "source_column": "service",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "raw_status": {
+          "missing_or_invalid_count": 226,
+          "presence_rate": 0.98865,
+          "present_count": 19686,
+          "semantic_status": "UNVERIFIED_STATUS_MEANING",
+          "source_column": "status",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "region_hint": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "secondary_status": {
+          "missing_or_invalid_count": 55,
+          "presence_rate": 0.997238,
+          "present_count": 19857,
+          "semantic_status": "UNVERIFIED_STATUS_MEANING",
+          "source_column": "status_1",
+          "within_source_comparison": "RAW_VALUE_EQUALITY_ONLY"
+        },
+        "source_record_id": {
+          "missing_or_invalid_count": 0,
+          "presence_rate": 1.0,
+          "present_count": 19912,
+          "semantic_status": "SOURCE_LOCAL_IDENTIFIER",
+          "source_column": "application_number",
+          "within_source_comparison": "ID_EQUALITY_ONLY"
+        },
+        "street_hint": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        },
+        "verified_resolution": {
+          "missing_or_invalid_count": 19912,
+          "presence_rate": 0.0,
+          "present_count": 0,
+          "semantic_status": "ABSENT",
+          "source_column": null,
+          "within_source_comparison": "UNAVAILABLE"
+        }
+      },
+      "invalid_creation_date_count": 0,
+      "joint_presence": {
+        "category_and_service": 19529,
+        "closed_and_result": 17869,
+        "created_and_category": 19599,
+        "location_hints": 0
+      },
+      "malformed_row_count": 0,
+      "profile_id": "almaty_109",
+      "record_count": 19912,
+      "schema_fingerprint_sha256": "sha256:68870675b01cc47d7f6212a58cd3d4b951c84dcac513d32179e717cd869c5ed3",
+      "source_format": "csv",
+      "source_sha256": "sha256:9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f",
+      "source_system": null,
+      "source_system_status": "UNVERIFIED"
+    }
+  ],
+  "recommended_routing_or_priority_rules": [],
+  "report_version": "customer-field-availability.v2",
+  "required_follow_up_questions": [],
+  "scope": "two_customer_109_exports_structural_metadata_only"
+}

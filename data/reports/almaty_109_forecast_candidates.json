@@ -1,0 +1,59 @@
+{
+  "calendar_days": 315,
+  "count_prediction_policy": "clip_negative_to_zero",
+  "first_date": "2025-01-01",
+  "high_load_day_proxy_policy": "strictly_above_pre_origin_observed_history_p90_nearest_rank.v1",
+  "interval_status": "NOT_EVALUATED",
+  "invalid_csv_or_date_row_count": 0,
+  "last_date": "2025-11-11",
+  "longest_observed_run_days": 315,
+  "minimum_train_days": 365,
+  "missing_day_policy": "fixed_calendar_origins_require_365_consecutive_observed_train_days_and_observed_targets",
+  "origin_step_days": 30,
+  "peak_detection_status": "NO_REVIEWED_PEAK_LABELS",
+  "prophet_config": {
+    "changepoint_prior_scale": 0.05,
+    "daily_seasonality": false,
+    "uncertainty_samples": 0,
+    "weekly_seasonality": true,
+    "yearly_seasonality": false
+  },
+  "prophet_version": null,
+  "record_count": 19912,
+  "report_version": "forecast-candidates.v3",
+  "results": [
+    {
+      "available_calendar_days": 315,
+      "horizon_days": 30,
+      "longest_observed_run_days": 315,
+      "reason": "CALENDAR_TOO_SHORT",
+      "required_calendar_days": 395,
+      "status": "INSUFFICIENT_HISTORY",
+      "window_count": 0
+    },
+    {
+      "available_calendar_days": 315,
+      "horizon_days": 60,
+      "longest_observed_run_days": 315,
+      "reason": "CALENDAR_TOO_SHORT",
+      "required_calendar_days": 425,
+      "status": "INSUFFICIENT_HISTORY",
+      "window_count": 0
+    },
+    {
+      "available_calendar_days": 315,
+      "horizon_days": 90,
+      "longest_observed_run_days": 315,
+      "reason": "CALENDAR_TOO_SHORT",
+      "required_calendar_days": 455,
+      "status": "INSUFFICIENT_HISTORY",
+      "window_count": 0
+    }
+  ],
+  "runtime_eligible": false,
+  "scope": "total_daily_appeals_in_one_export",
+  "selection_policy": "lowest_wape_on_same_windows_tie_seasonal_naive.v1",
+  "source_sha256": "9c423e6699010981ab636de15f16bcc41cd104e918c6641409f025079f73fd8f",
+  "status": "INSUFFICIENT_HISTORY",
+  "unobserved_calendar_days": 0
+}

@@ -2,7 +2,8 @@
 
 The worker claims queued rows with FOR UPDATE SKIP LOCKED so multiple
 instances can safely process the same queue. Versioned candidate artifacts
-remain in shadow until an authorized human promotes or rejects them.
+remain in shadow until an authorized human promotes or rejects them. Reviewed
+training and shadow inference use local artifacts when configured.
 """
 
 from __future__ import annotations
@@ -423,6 +424,21 @@ async def fail_candidate_evaluation(
 def safe_job_error(error: Exception) -> str:
     safe_runtime_errors = {
         "TRAINER_NOT_CONFIGURED",
+        "TRAINING_INPUT_MISSING",
+        "INVALID_TRAINING_ROOT",
+        "INVALID_REVIEW_LINKS",
+        "INVALID_JOB_PAYLOAD",
+        "INVALID_CANDIDATE_DATASET",
+        "INVALID_PRODUCTION_ARTIFACT",
+        "CANDIDATE_SANITY_FAILED",
+        "CANDIDATE_VERSION_EXISTS",
+        "DATASET_VERSION_EXISTS",
+        "TRAINING_CYCLE_CHANGED",
+        "INVALID_CRITICAL_POLICY",
+        "INVALID_SHADOW_JOB",
+        "SHADOW_CONTEXT_CHANGED",
+        "SHADOW_ARTIFACT_INVALID",
+        "SHADOW_PREDICTION_INVALID",
         "PRODUCTION_BASELINE_NOT_CONFIGURED",
         "FROZEN_EVALUATION_SET_NOT_CONFIGURED",
         "VALIDATED_FEEDBACK_UNAVAILABLE",
@@ -498,6 +514,58 @@ async def update_learning_cycle(pool: Any, payload: dict[str, Any], result: dict
         str(cycle_id),
         "FAKE_TRAINER_COMPLETED" if fake_trainer_used else "TRAINING_COMPLETED",
     )
+
+
+async def update_offline_learning_cycle(pool: Any, payload: dict[str, Any], result: dict[str, Any]) -> None:
+    cycle_id = payload.get("cycle_id")
+    if not cycle_id:
+        return
+    candidate = result.get("candidate_model_version")
+    manifest = result.get("manifest") or {}
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            if result.get("state") == "INSUFFICIENT_FEEDBACK":
+                updated = await connection.fetchval(
+                    "UPDATE learning_cycles SET state = 'INSUFFICIENT_FEEDBACK', updated_at = now(), decision_note = 'INSUFFICIENT_FEEDBACK' WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
+                    str(cycle_id),
+                )
+                if updated is None:
+                    raise RuntimeError("TRAINING_CYCLE_CHANGED")
+                return
+            if candidate:
+                dataset_uri = result.get("dataset_manifest_uri")
+                if dataset_uri:
+                    updated = await connection.fetchval(
+                        "UPDATE dataset_versions SET schema_version = 'feedback-candidate.v1', manifest_uri = $2, manifest_sha256 = $3, content_sha256 = $4, record_count = $5 WHERE dataset_version = $1 AND manifest_sha256 = 'pending' RETURNING dataset_version",
+                        result["dataset_version"], dataset_uri, result["dataset_manifest_sha256"],
+                        result["dataset_content_sha256"], result["sample_count"],
+                    )
+                    if updated is None:
+                        raise RuntimeError("DATASET_VERSION_EXISTS")
+                inserted = await connection.fetchval(
+                    "INSERT INTO model_versions (model_version, model_family, dataset_version, status, manifest_uri, artifact_checksum) VALUES ($1, $2, $3, 'CANDIDATE', $4, $5) ON CONFLICT (model_version) DO NOTHING RETURNING model_version",
+                    str(candidate), manifest.get("model_family") or "classifier-feedback-candidate",
+                    str(result.get("dataset_version") or payload.get("dataset_version")),
+                    manifest.get("artifact_uri"), manifest.get("artifact_checksum"),
+                )
+                if inserted is None:
+                    raise RuntimeError("CANDIDATE_VERSION_EXISTS")
+                offline = result.get("offline_metrics")
+                if offline:
+                    await connection.execute(
+                        "INSERT INTO model_evaluations (evaluation_id, model_version, evaluation_version, split_version, metrics_json, shadow_metrics_json, critical_regressions, sample_size, decision, evaluator) VALUES ($1, $2, $3, $4, $5::jsonb, '{}'::jsonb, $6::jsonb, 0, 'NOT_READY', 'offline-worker')",
+                        f"offline-{candidate}", str(candidate), offline["frozen_evaluation_version"],
+                        offline["dataset_version"], json.dumps(offline, ensure_ascii=False),
+                        json.dumps(offline["regressed_critical_topics"], ensure_ascii=False),
+                    )
+            updated = await connection.fetchval(
+                "UPDATE learning_cycles SET state = 'EVALUATE', evaluation_started_at = COALESCE(evaluation_started_at, now()), updated_at = now(), decision_note = $2 WHERE (cycle_id = $1 OR id::text = $1) AND state = 'TRAINING' RETURNING id",
+                str(cycle_id),
+                "FAKE_TRAINER_COMPLETED" if os.environ.get("PULSE_TEST_FAKE_TRAINER", "false").lower() in {"1", "true", "yes"}
+                else "CANDIDATE_TRAINED" if candidate else "TRAINER_NOT_CONFIGURED",
+            )
+            if updated is None:
+                raise RuntimeError("TRAINING_CYCLE_CHANGED")
 
 
 def candidate_output_artifact_uri(cycle_id: str, model_version: str) -> str:
@@ -1192,7 +1260,22 @@ async def process_job(pool: Any, job: Any) -> None:
             result = await evaluate_candidate_cycle(pool, payload, evaluator)
             await complete_job(pool, job_id, result)
             return
+        if kind == "shadow_classifier":
+            from training.shadow_job import score_shadow_ticket
+
+            result = await score_shadow_ticket(pool, payload)
+            await complete_job(pool, job_id, result)
+            return
         if kind == "train_classifier":
+            if payload.get("schema_version") != "candidate-training-job.v1" and not test_fake_trainer_requested():
+                if not os.environ.get("PULSE_TRAINING_ROOT"):
+                    raise RuntimeError("TRAINER_NOT_CONFIGURED")
+                from training.feedback_job import train_classifier_job
+
+                result = await train_classifier_job(pool, payload)
+                await complete_job(pool, job_id, result)
+                await update_offline_learning_cycle(pool, payload, result)
+                return
             if test_fake_trainer_requested():
                 if not test_fake_trainer_enabled():
                     raise RuntimeError("TEST_FAKE_TRAINER_NOT_ALLOWED")
@@ -1245,6 +1328,7 @@ async def process_job(pool: Any, job: Any) -> None:
             await fail_candidate_evaluation(pool, job_id, payload, error_code)
         else:
             await fail_job(pool, job_id, error_code)
+        if kind != "shadow_classifier" and kind not in {"build_candidate_dataset", "candidate_evaluation"}:
             await update_learning_cycle(pool, payload, error=error_code)
 
 

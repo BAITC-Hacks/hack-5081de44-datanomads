@@ -1,0 +1,20 @@
+services:
+  ml-worker:
+    build:
+      context: .
+      dockerfile: ml-service/Dockerfile.training
+    image: pulse109/ml-worker:training-local
+    environment:
+      PULSE_TRAINING_ROOT: /app/offline-training/private
+      PULSE_TRAINING_REVIEW_LINKS: /app/training-input/review-links.jsonl
+      PULSE_TRAINING_FROZEN_DATASET: /app/training-input/frozen
+      PULSE_TRAINING_PRODUCTION_MODEL: /app/training-input/production
+      PULSE_TRAINING_CRITICAL_POLICY: /app/training-input/critical-policy.json
+      PULSE_TEST_FAKE_TRAINER: "false"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - ${PULSE_TRAINING_INPUT_DIR:?Set PULSE_TRAINING_INPUT_DIR to the reviewed input directory}:/app/training-input:ro
+      - ml-training:/app/offline-training
+
+volumes:
+  ml-training:

@@ -1,0 +1,57 @@
+{
+  "approved_for_training": false,
+  "challenge_bank_sha256": "239d7b19a86040c17a55e620dab04330b59c562a32e1e3a0810d19e498aa8c36",
+  "challenge_count": 21,
+  "challenge_file": {
+    "name": "challenges.jsonl",
+    "sha256": "4c3e7f9cc9508e2f2ad11e8c27f084ef26892fa1dfb3f8099b3fff10a9e23568"
+  },
+  "challenge_proposed_decision_counts": {
+    "NEEDS_REVIEW": 15,
+    "OTHER": 3,
+    "UNKNOWN": 3
+  },
+  "challenge_scenario_count": 7,
+  "dataset_version": "synthetic-classifier-v3",
+  "files": {
+    "test": {
+      "name": "test.jsonl",
+      "sha256": "94cae90ea946e9b562dfb3f02c070a84ca525798e7bbe2d7c74086a97d40ae51"
+    },
+    "train": {
+      "name": "train.jsonl",
+      "sha256": "175d920b177a85ce14f25df718a6ae7262bdd1a081240a885ae4f7499ed46d6f"
+    },
+    "validation": {
+      "name": "validation.jsonl",
+      "sha256": "4afd4b2b10fcfc14987747bf908b09ccd8313892d78f8a788e80a7fffd6d38e1"
+    }
+  },
+  "generation_method": "deterministic_scenario_composition",
+  "language_counts": {
+    "KZ": 3200,
+    "MIXED": 48,
+    "RU": 3200
+  },
+  "mixed_bank_sha256": "89f2b3631a8f2ea2c03f6ab92797aa7dde9f6858116b73a59bf6ff8ca776ca98",
+  "mixed_scenario_count": 48,
+  "profile_status": "SYNTHETIC_TEST_ONLY",
+  "purpose": "synthetic pipeline and language-slice testing; not evidence of quality on real 109 appeals",
+  "record_count": 6448,
+  "review_status": "PENDING",
+  "scenario_bank_sha256": "d99aa5dfb5eeb619c8581af857e9c7cea3a67ff53b9a905fa098812ac996ac5e",
+  "scenario_count": 160,
+  "scenario_counts_by_split": {
+    "test": 32,
+    "train": 112,
+    "validation": 16
+  },
+  "seed": 109,
+  "split_counts": {
+    "test": 1296,
+    "train": 4496,
+    "validation": 656
+  },
+  "synthetic": true,
+  "topic_count": 16
+}

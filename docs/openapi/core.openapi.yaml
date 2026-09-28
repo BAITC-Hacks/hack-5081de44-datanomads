@@ -1230,7 +1230,7 @@ paths:
   /api/v1/learning/{cycle_id}/feedback:
     post:
       tags: [learning]
-      summary: Add validated feedback to a learning cycle
+      summary: Record unverified feedback metadata in a COLLECT cycle
       parameters:
         - name: cycle_id
           in: path
