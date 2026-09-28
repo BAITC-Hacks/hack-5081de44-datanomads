@@ -1971,6 +1971,10 @@ pub fn app(state: AppState) -> Router {
             post(add_learning_feedback),
         )
         .route(
+            "/api/v1/learning/{cycle_id}/candidates",
+            post(add_learning_candidate),
+        )
+        .route(
             "/api/v1/learning/{cycle_id}/promote",
             post(promote_learning_cycle),
         )
@@ -7733,6 +7737,59 @@ pub struct CreateLearningCycleRequest {
     pub evaluation_dataset_version: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RegisterLearningCandidateRequest {
+    pub candidate_model_version: String,
+}
+
+async fn add_learning_candidate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(cycle_id): Path<String>,
+    Json(request): Json<RegisterLearningCandidateRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let candidate_model_version = request.candidate_model_version.trim();
+    if candidate_model_version.is_empty() || candidate_model_version.len() > 200 {
+        return Err(ApiError::BadRequest(
+            "candidate_model_version must contain 1 to 200 characters".to_owned(),
+        ));
+    }
+    let Some(repository) = state.repository() else {
+        return Err(ApiError::Unavailable(
+            "candidate registry requires PostgreSQL storage".to_owned(),
+        ));
+    };
+    let candidate = repository
+        .register_learning_candidate(
+            &cycle_id,
+            candidate_model_version,
+            &actor.user_id,
+            &request_id_from_headers(&headers),
+        )
+        .await
+        .map_err(|error| {
+            if error.contains("not found") {
+                ApiError::NotFound(error)
+            } else if error.contains("requires")
+                || error.contains("already registered")
+                || error.contains("limit")
+                || error.contains("not in")
+                || error.contains("has ended")
+                || error.contains("cannot be registered")
+                || error.contains("no verified artifact")
+                || error.contains("no dataset lineage")
+                || error.contains("no frozen evaluation dataset")
+                || error.contains("registration is closed")
+            {
+                ApiError::Conflict(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })?;
+    Ok((StatusCode::CREATED, Json(candidate)))
+}
+
 async fn create_learning_cycle(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -8424,6 +8481,23 @@ async fn relation_feedback(
 #[derive(Debug, Deserialize, Default)]
 pub struct CycleDecisionRequest {
     pub note: Option<String>,
+    pub candidate_model_version: Option<String>,
+}
+
+fn validated_candidate_model_version(value: Option<&str>) -> Result<Option<&str>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 200 {
+        return Err(ApiError::BadRequest(
+            "candidate_model_version must contain at most 200 characters".to_owned(),
+        ));
+    }
+    Ok(Some(value))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -8615,7 +8689,7 @@ async fn candidate_evaluation(
             "synthetic": true
         })
     };
-    Ok(Json(json!({
+    let mut response = json!({
         "schema_version": "candidate-evaluation.v1",
         "status": evaluation_status,
         "cycle_id": cycle.id,
@@ -8669,7 +8743,31 @@ async fn candidate_evaluation(
         "decision": "INSUFFICIENT_EVIDENCE",
         "evaluated_at": cycle.updated_at,
         "synthetic": true
-    })))
+    });
+    let response_object = response.as_object_mut().ok_or_else(|| {
+        ApiError::Internal("candidate evaluation response must be an object".to_owned())
+    })?;
+    response_object.insert(
+        "candidate_comparisons".to_owned(),
+        json!([{
+            "candidate_model_version": cycle.candidate_model_version,
+            "status": "REGISTERED",
+            "candidate_dataset_version": cycle.dataset_version,
+            "job_state": Value::Null,
+            "evaluation": Value::Null,
+        }]),
+    );
+    response_object.insert(
+        "evaluation_set".to_owned(),
+        json!({
+            "cycle_id": cycle.cycle_id,
+            "dataset_version": cycle.frozen_evaluation_dataset_version,
+            "sample_count": 0,
+            "window_started_at": cycle.evaluation_started_at,
+            "window_ended_at": cycle.evaluation_ends_at,
+        }),
+    );
+    Ok(Json(response))
 }
 
 fn active_cycle_id(store: &Store) -> Option<String> {
@@ -8686,6 +8784,8 @@ async fn promote_active_learning_cycle(
     Json(request): Json<CycleDecisionRequest>,
 ) -> Result<Json<LearningCycle>, ApiError> {
     let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let candidate_model_version =
+        validated_candidate_model_version(request.candidate_model_version.as_deref())?;
     if let Some(repository) = state.repository() {
         let cycle_id = repository
             .learning_overview()
@@ -8695,7 +8795,12 @@ async fn promote_active_learning_cycle(
             .ok_or_else(|| ApiError::NotFound("no active learning cycle".to_owned()))?
             .id;
         let cycle = repository
-            .promote_learning_cycle(&cycle_id, request.note.as_deref(), &actor.user_id)
+            .promote_learning_cycle(
+                &cycle_id,
+                candidate_model_version,
+                request.note.as_deref(),
+                &actor.user_id,
+            )
             .await
             .map_err(ApiError::Conflict)?;
         return Ok(Json(cycle));
@@ -8743,9 +8848,16 @@ async fn promote_learning_cycle(
     Json(request): Json<CycleDecisionRequest>,
 ) -> Result<Json<LearningCycle>, ApiError> {
     let actor = require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
+    let candidate_model_version =
+        validated_candidate_model_version(request.candidate_model_version.as_deref())?;
     if let Some(repository) = state.repository() {
         let cycle = repository
-            .promote_learning_cycle(&cycle_id, request.note.as_deref(), &actor.user_id)
+            .promote_learning_cycle(
+                &cycle_id,
+                candidate_model_version,
+                request.note.as_deref(),
+                &actor.user_id,
+            )
             .await
             .map_err(ApiError::Conflict)?;
         return Ok(Json(cycle));
@@ -9020,6 +9132,7 @@ async fn openapi() -> Json<Value> {
             "/api/v1/learning/drift-triggers/{evidence_id}/review": { "post": { "summary": "Dismiss a drift trigger or open a candidate cycle after review" } },
             "/api/v1/learning/{cycle_id}": { "get": { "summary": "Get learning cycle" } },
             "/api/v1/learning/{cycle_id}/feedback": { "post": { "summary": "Add validated learning feedback" } },
+            "/api/v1/learning/{cycle_id}/candidates": { "post": { "summary": "Register a candidate for the cycle frozen evaluation set" } },
             "/api/v1/learning/{cycle_id}/promote": { "post": { "summary": "Promote candidate after human review" } },
             "/api/v1/learning/{cycle_id}/reject": { "post": { "summary": "Reject candidate after human review" } },
             "/api/v1/learning/cycle": { "get": { "summary": "Collect learning feedback" } },
@@ -9629,10 +9742,27 @@ mod tests {
         assert!(value["paths"]["/api/v1/audit"].is_object());
         assert!(value["paths"]["/api/v1/assist/preview"].is_object());
         assert!(value["paths"]["/api/v1/learning/{cycle_id}/feedback"].is_object());
+        assert!(value["paths"]["/api/v1/learning/{cycle_id}/candidates"]["post"].is_object());
         assert!(value["paths"]["/api/v1/forecast/reforecast"]["post"].is_object());
         assert!(value["paths"]["/api/v1/models/{model_id}/promote"].is_object());
         assert!(value["paths"]["/readyz"]["get"]["responses"]["503"].is_object());
         assert!(value["paths"]["/internal/v1/classify"].is_null());
+    }
+
+    #[tokio::test]
+    async fn learning_candidate_registration_is_reviewer_only() {
+        let app = app(AppState::demo());
+        let response = app
+            .oneshot(
+                Request::post("/api/v1/learning/cycle-1/candidates")
+                    .header("content-type", "application/json")
+                    .header("x-pulse-role", "MANAGER")
+                    .body(Body::from(r#"{"candidate_model_version":"candidate-2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

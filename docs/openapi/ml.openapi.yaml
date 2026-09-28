@@ -1315,7 +1315,9 @@ components:
     CandidateEvaluation:
       description: >-
         Shared Data/ML worker result persisted by Core; this is an internal
-        evidence contract and is not exposed as an ML HTTP endpoint.
+        evidence contract and is not exposed as an ML HTTP endpoint. Core adds
+        the frozen evaluation-set and per-candidate comparison envelope when
+        serving this evidence from its reviewer API.
       type: object
       additionalProperties: false
       required:

@@ -181,6 +181,13 @@ async def start_next_recurring_learning_cycle(
                 config.evaluation_dataset_version,
             )
             await connection.execute(
+                "INSERT INTO learning_cycle_candidates "
+                "(learning_cycle_id, model_version, status, registered_by) "
+                "VALUES ($1, $2, 'REGISTERED', 'learning-scheduler')",
+                cycle_database_id,
+                candidate_model_version,
+            )
+            await connection.execute(
                 "INSERT INTO learning_cycle_evaluation_tickets "
                 "(learning_cycle_id, dataset_version, ticket_id) "
                 "SELECT $1, $2, ticket_id FROM dataset_ticket_links "
@@ -390,6 +397,29 @@ async def fail_job(pool: Any, job_id: int, error: str) -> None:
         )
 
 
+async def fail_candidate_evaluation(
+    pool: Any,
+    job_id: int,
+    payload: dict[str, Any],
+    error: str,
+) -> None:
+    cycle_id = str(payload.get("cycle_id") or "")
+    candidate_model_version = str(payload.get("candidate_model_version") or "")
+    if cycle_id:
+        await pool.execute(
+            "UPDATE learning_cycle_candidates AS candidate "
+            "SET status = 'EVALUATION_FAILED', evaluated_at = now() "
+            "FROM learning_cycles AS cycle "
+            "WHERE candidate.learning_cycle_id = cycle.id "
+            "AND (cycle.cycle_id = $1 OR cycle.id::text = $1) "
+            "AND candidate.model_version = COALESCE(NULLIF($2, ''), cycle.candidate_model_version) "
+            "AND candidate.status <> 'PROMOTED'",
+            cycle_id,
+            candidate_model_version,
+        )
+    await fail_job(pool, job_id, error)
+
+
 def safe_job_error(error: Exception) -> str:
     safe_runtime_errors = {
         "TRAINER_NOT_CONFIGURED",
@@ -495,34 +525,41 @@ async def evaluate_candidate_cycle(pool: Any, payload: dict[str, Any], evaluator
     cycle_key = str(payload.get("cycle_id") or "")
     if not cycle_key:
         raise RuntimeError("LEARNING_CYCLE_NOT_FOUND")
+    requested_candidate = str(payload.get("candidate_model_version") or "")
 
     async with pool.acquire() as connection:
         cycle = await connection.fetchrow(
             """
-            SELECT lc.id, lc.cycle_id, lc.state, lc.candidate_model_version,
+            SELECT lc.id, lc.cycle_id, lc.state, candidate_link.model_version AS candidate_model_version,
                    lc.production_model_version, lc.candidate_dataset_version,
                    lc.frozen_evaluation_dataset_version, lc.promotion_policy_version,
                    lc.blind_ab_enabled,
                    candidate.artifact_checksum AS candidate_artifact_checksum,
+                   candidate.dataset_version AS model_dataset_version,
                    production.artifact_checksum AS production_artifact_checksum,
                    COALESCE(production_dataset.is_synthetic, FALSE) AS production_is_synthetic,
-                   COALESCE(candidate_dataset.is_synthetic, FALSE) AS candidate_is_synthetic,
+                   COALESCE(candidate_model_dataset.is_synthetic, FALSE) AS candidate_is_synthetic,
                    COALESCE(evaluation_dataset.is_synthetic, FALSE) AS evaluation_is_synthetic
             FROM learning_cycles lc
+            JOIN learning_cycle_candidates candidate_link
+              ON candidate_link.learning_cycle_id = lc.id
+             AND candidate_link.model_version = COALESCE(NULLIF($2, ''), lc.candidate_model_version)
             LEFT JOIN model_versions candidate
-                   ON candidate.model_version = lc.candidate_model_version
+                   ON candidate.model_version = candidate_link.model_version
             LEFT JOIN model_versions production
                    ON production.model_version = lc.production_model_version
             LEFT JOIN dataset_versions production_dataset
                    ON production_dataset.dataset_version = production.dataset_version
-            LEFT JOIN dataset_versions candidate_dataset
-                   ON candidate_dataset.dataset_version = lc.candidate_dataset_version
+            LEFT JOIN dataset_versions candidate_model_dataset
+                   ON candidate_model_dataset.dataset_version = candidate.dataset_version
             LEFT JOIN dataset_versions evaluation_dataset
                    ON evaluation_dataset.dataset_version = lc.frozen_evaluation_dataset_version
-            WHERE lc.cycle_id = $1 OR lc.id::text = $1
+            WHERE (lc.cycle_id = $1 OR lc.id::text = $1)
+              AND candidate_link.status NOT IN ('REJECTED', 'PROMOTED')
             LIMIT 1
             """,
             cycle_key,
+            requested_candidate,
         )
         if cycle is None:
             raise RuntimeError("LEARNING_CYCLE_NOT_FOUND")
@@ -558,13 +595,16 @@ async def evaluate_candidate_cycle(pool: Any, payload: dict[str, Any], evaluator
             FROM learning_cycle_shadow_predictions sp
             JOIN operator_decisions od ON od.id = sp.operator_decision_id
             WHERE sp.learning_cycle_id = $1
+              AND sp.candidate_model_version = $2
             ORDER BY sp.predicted_at, sp.ticket_id
             """,
             cycle_db_id,
+            str(cycle["candidate_model_version"]),
         )
         shadow_failures = await connection.fetchval(
-            "SELECT COUNT(*)::int FROM learning_cycle_shadow_predictions WHERE learning_cycle_id = $1 AND candidate_inference_status = 'FAILED'",
+            "SELECT COUNT(*)::int FROM learning_cycle_shadow_predictions WHERE learning_cycle_id = $1 AND candidate_model_version = $2 AND candidate_inference_status = 'FAILED'",
             cycle_db_id,
+            str(cycle["candidate_model_version"]),
         )
 
         offline_samples = [
@@ -614,7 +654,9 @@ async def evaluate_candidate_cycle(pool: Any, payload: dict[str, Any], evaluator
                 cycle["production_artifact_checksum"]
             ),
             candidate_dataset_version=str(
-                cycle["candidate_dataset_version"] or "unavailable-dataset"
+                cycle["model_dataset_version"]
+                or cycle["candidate_dataset_version"]
+                or "unavailable-dataset"
             ),
             frozen_evaluation_dataset_version=str(
                 frozen_dataset_version or "unavailable-evaluation-dataset"
@@ -644,18 +686,28 @@ async def evaluate_candidate_cycle(pool: Any, payload: dict[str, Any], evaluator
         set(offline_evaluation["critical_regressions"])
         | set(shadow_evaluation["critical_regressions"])
     )
-    evaluation_digest = hashlib.sha256(request.cycle_id.encode("utf-8")).hexdigest()[:24]
+    evaluation_digest = hashlib.sha256(
+        f"{request.cycle_id}\0{request.candidate_model_version}".encode("utf-8")
+    ).hexdigest()[:24]
     evaluation_id = f"candidate-evaluation-{evaluation_digest}"
 
     async with pool.acquire() as connection:
         async with connection.transaction():
             locked_cycle = await connection.fetchrow(
-                "SELECT id, state, candidate_model_version FROM learning_cycles WHERE id = $1 FOR UPDATE",
+                "SELECT id, state FROM learning_cycles WHERE id = $1 FOR UPDATE",
                 cycle_db_id,
             )
             if locked_cycle is None or str(locked_cycle["state"]) != "DECISION":
                 raise RuntimeError("LEARNING_CYCLE_CHANGED_DURING_EVALUATION")
-            if str(locked_cycle["candidate_model_version"]) != request.candidate_model_version:
+            registered_candidate = await connection.fetchrow(
+                "SELECT status FROM learning_cycle_candidates WHERE learning_cycle_id = $1 AND model_version = $2 FOR UPDATE",
+                cycle_db_id,
+                request.candidate_model_version,
+            )
+            if registered_candidate is None or str(registered_candidate["status"]) in {
+                "REJECTED",
+                "PROMOTED",
+            }:
                 raise RuntimeError("CANDIDATE_MODEL_LINEAGE_MISMATCH")
             await connection.execute(
                 """
@@ -667,7 +719,7 @@ async def evaluate_candidate_cycle(pool: Any, payload: dict[str, Any], evaluator
                 )
                 VALUES ($1, $2, 'candidate-evaluation.v1', 'frozen-evaluation.v1',
                         $3::jsonb, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10::jsonb)
-                ON CONFLICT (learning_cycle_id) WHERE learning_cycle_id IS NOT NULL
+                ON CONFLICT (learning_cycle_id, model_version) WHERE learning_cycle_id IS NOT NULL
                 DO NOTHING
                 """,
                 evaluation_id,
@@ -680,6 +732,11 @@ async def evaluate_candidate_cycle(pool: Any, payload: dict[str, Any], evaluator
                 str(offline_evaluation.get("evaluator") or "pulse109.ml.candidate-evaluator.v1"),
                 cycle_db_id,
                 json.dumps(result),
+            )
+            await connection.execute(
+                "UPDATE learning_cycle_candidates SET status = 'EVALUATED', evaluated_at = now() WHERE learning_cycle_id = $1 AND model_version = $2",
+                cycle_db_id,
+                request.candidate_model_version,
             )
     return result
 
@@ -1185,7 +1242,7 @@ async def process_job(pool: Any, job: Any) -> None:
         if kind == "build_candidate_dataset":
             await fail_candidate_dataset_build(pool, job_id, payload, error_code)
         elif kind == "candidate_evaluation":
-            await fail_job(pool, job_id, error_code)
+            await fail_candidate_evaluation(pool, job_id, payload, error_code)
         else:
             await fail_job(pool, job_id, error_code)
             await update_learning_cycle(pool, payload, error=error_code)

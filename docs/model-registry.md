@@ -84,10 +84,14 @@ sample_size, created_at, evaluator
 ```
 
 Production pointer и audit trail обновляются одной транзакцией. При promotion
-предыдущая production-версия сохраняется со статусом `ARCHIVED`. Reject одной
-транзакцией переводит candidate и learning cycle в `REJECTED`, сохраняет note и
-audit event и не меняет production pointer: это не rollback. Rejected candidate
-остаётся доступным для аудита, но никогда не используется serving.
+предыдущая production-версия сохраняется со статусом `ARCHIVED`. Версии,
+связанные через `learning_cycle_candidates`, можно продвинуть только через
+решение cycle; общий endpoint модели отклоняет их, чтобы не обходить per-version
+evaluation gates. Reviewer передаёт выбранную версию, если в cycle больше одного
+кандидата. Reject одной транзакцией переводит зарегистрированные candidate
+версии и learning cycle в `REJECTED`, сохраняет note и audit event и не меняет
+production pointer: это не rollback. Rejected candidate остаётся доступным для
+аудита, но никогда не используется serving.
 
 ## Жизненный цикл
 
@@ -105,9 +109,11 @@ Promotion требует:
 4. критические regressions просмотрены;
 5. human reviewer с `ML_REVIEWER` или `ADMIN` подтвердил решение.
 
-Candidate не заменяет production автоматически по факту окончания training.
-Если evidence недостаточно, результат — `REJECTED` или `INSUFFICIENT_EVIDENCE`,
-а текущая production-модель остаётся активной.
+Несколько candidate versions могут проходить shadow и evaluation в рамках одного
+learning cycle. Они сравниваются на общем frozen holdout, при этом каждая имеет
+собственные offline/shadow metrics и gates. Candidate не заменяет production
+автоматически по факту окончания training. Если evidence недостаточно, версия
+не выбирается для promotion, а текущая production-модель остаётся активной.
 
 ## Оценка
 

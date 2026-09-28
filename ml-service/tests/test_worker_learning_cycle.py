@@ -169,21 +169,25 @@ class _PersistencePool:
 
 
 class _CandidateEvaluationConnection:
-    def __init__(self) -> None:
+    def __init__(self, candidate_model_version: str = "candidate-12") -> None:
+        self.candidate_model_version = candidate_model_version
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
 
     def transaction(self) -> _AsyncContext:
         return _AsyncContext()
 
-    async def fetchrow(self, query: str, *_: Any) -> dict[str, Any] | None:
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         if "LEFT JOIN model_versions" in query:
+            candidate_model_version = args[1] or self.candidate_model_version
             return {
                 "id": 12,
                 "cycle_id": "cycle-12",
                 "state": "DECISION",
-                "candidate_model_version": "candidate-12",
+                "candidate_model_version": candidate_model_version,
                 "production_model_version": "production-12",
                 "candidate_dataset_version": "candidate-dataset-12",
+                "model_dataset_version": "candidate-dataset-12",
                 "frozen_evaluation_dataset_version": "evaluation-12",
                 "promotion_policy_version": "policy-v1",
                 "blind_ab_enabled": False,
@@ -193,11 +197,14 @@ class _CandidateEvaluationConnection:
                 "candidate_is_synthetic": False,
                 "evaluation_is_synthetic": False,
             }
+        if "FROM learning_cycle_candidates" in query:
+            return {"status": "REGISTERED"}
         if "FOR UPDATE" in query:
             return {"id": 12, "state": "DECISION", "candidate_model_version": "candidate-12"}
         raise AssertionError("unexpected candidate evaluation fetchrow")
 
-    async def fetch(self, query: str, *_: Any) -> list[dict[str, Any]]:
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.fetch_calls.append((query, args))
         if "FROM learning_cycle_evaluation_tickets" in query:
             return [
                 {
@@ -230,8 +237,8 @@ class _CandidateEvaluationConnection:
 
 
 class _CandidateEvaluationPool:
-    def __init__(self) -> None:
-        self.connection = _CandidateEvaluationConnection()
+    def __init__(self, candidate_model_version: str = "candidate-12") -> None:
+        self.connection = _CandidateEvaluationConnection(candidate_model_version)
 
     def acquire(self) -> _AcquireContext:
         return _AcquireContext(self.connection)
@@ -305,10 +312,13 @@ class LearningCycleWorkerTests(unittest.TestCase):
         self.assertTrue(cycle_args[3].startswith("classifier-candidate-"))
         self.assertEqual(cycle_args[4:], (3, "policy-v1", "evaluation-v3"))
 
-        freeze_query, freeze_args = connection.executed[1]
+        candidate_query, candidate_args = connection.executed[1]
+        self.assertIn("INSERT INTO learning_cycle_candidates", candidate_query)
+        self.assertEqual(candidate_args, (99, cycle_args[3]))
+        freeze_query, freeze_args = connection.executed[2]
         self.assertIn("INSERT INTO learning_cycle_evaluation_tickets", freeze_query)
         self.assertEqual(freeze_args, (99, "evaluation-v3"))
-        audit_query, audit_args = connection.executed[2]
+        audit_query, audit_args = connection.executed[3]
         self.assertIn("CREATE_LEARNING_CYCLE", audit_query)
         self.assertEqual(audit_args[0], "learning-scheduler")
         audit_metadata = json.loads(audit_args[3])
@@ -577,7 +587,9 @@ class LearningCycleWorkerTests(unittest.TestCase):
         self.assertEqual(result["offline_evaluation"]["dataset_version"], "evaluation-12")
         self.assertEqual(result["offline_evaluation"]["sample_count"], 30)
         self.assertEqual(result["shadow_evaluation"]["sample_count"], 20)
-        insert_query, args = pool.connection.executed[-1]
+        insert_query, args = next(
+            call for call in pool.connection.executed if "INSERT INTO model_evaluations" in call[0]
+        )
         self.assertIn("learning_cycle_id", insert_query)
         self.assertIn("evaluation_payload", insert_query)
         self.assertEqual(args[8], 12)
@@ -585,3 +597,46 @@ class LearningCycleWorkerTests(unittest.TestCase):
         self.assertEqual(persisted["cycle_id"], "cycle-12")
         self.assertEqual(persisted["policy_version"], "policy-v1")
         self.assertNotIn("label:water", args[9])
+        self.assertTrue(
+            any("UPDATE learning_cycle_candidates SET status = 'EVALUATED'" in query for query, _ in pool.connection.executed)
+        )
+
+    def test_each_registered_candidate_uses_the_same_frozen_offline_and_shadow_sets(self) -> None:
+        *_, evaluator = make_services()
+
+        def classify_version(text: str, model_version: str, artifact_checksum: str | None) -> str:
+            return text.removeprefix("label:")
+
+        evaluator._classify_version = classify_version
+        results = []
+        for model_version in ("candidate-12", "candidate-13"):
+            pool = _CandidateEvaluationPool(model_version)
+            result = asyncio.run(
+                evaluate_candidate_cycle(
+                    pool,
+                    {
+                        "cycle_id": "cycle-12",
+                        "candidate_model_version": model_version,
+                    },
+                    evaluator,
+                )
+            )
+            self.assertEqual(result["candidate_model_version"], model_version)
+            self.assertEqual(result["offline_evaluation"]["dataset_version"], "evaluation-12")
+            self.assertEqual(result["offline_evaluation"]["sample_count"], 30)
+            self.assertEqual(result["shadow_evaluation"]["sample_count"], 20)
+            shadow_query, shadow_args = next(
+                call for call in pool.connection.fetch_calls if "FROM learning_cycle_shadow_predictions" in call[0]
+            )
+            self.assertIn("sp.candidate_model_version = $2", shadow_query)
+            self.assertEqual(shadow_args[1], model_version)
+            results.append(result)
+
+        self.assertEqual(
+            [result["offline_evaluation"]["sample_count"] for result in results],
+            [30, 30],
+        )
+        self.assertEqual(
+            [result["shadow_evaluation"]["sample_count"] for result in results],
+            [20, 20],
+        )

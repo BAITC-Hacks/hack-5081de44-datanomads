@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react'
-import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
-import type { AnalyticsDrilldownTicket, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
+import { acknowledgeAlert, closeAlert, closeLearningCycle, createLearningCycle, loadAnalyticsDrilldown, loadCandidateEvaluation, loadContextHandoffPackage, loadDashboard, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, promoteCandidate, registerLearningCandidate, rejectCandidate, reportUrl, reviewDriftTrigger, runQueryIntent, startAlertMonitoring, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback, subscribeToAlertChanges } from './api/client'
+import type { AnalyticsDrilldownTicket, CandidateEvaluation, DashboardFilters, DrilldownDimension, QueryIntentResult } from './api/client'
 import type { Alert, ApiSource, ContextHandoffPackage, DashboardData, DatasetProvenance, ForecastCapacityAssessment, ForecastCapacityInput, ForecastManagerSignal, ForecastPoint, ForecastReforecast, LearningCycle, ModelStatus, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RegionMetric, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket, TopicMetric } from './types'
 import { AuditLogPage } from './components/AuditLogPage'
 import { DataChart } from './components/DataChart'
@@ -1887,11 +1887,21 @@ function promotionThresholdLabel(key: string): string {
   return labels[key] ?? key
 }
 
+function candidateEvaluationReady(evaluation: CandidateEvaluation | null | undefined): boolean {
+  return evaluation?.status === 'COMPLETED'
+    && evaluation.decision === 'PENDING_HUMAN_DECISION'
+    && !evaluation.synthetic
+    && evaluation.gates.length > 0
+    && evaluation.gates.every((gate) => gate.status === 'PASSED')
+}
+
 function CleanLearningPage({ learning, onRefresh, onToast }: { learning: LearningCycle; onRefresh: () => Promise<void>; onToast: (message: string) => void }) {
   const [evaluation, setEvaluation] = useState<Awaited<ReturnType<typeof loadCandidateEvaluation>> | null>(null)
   const [evaluationError, setEvaluationError] = useState<string | null>(null)
-  const [busy, setBusy] = useState<'create' | 'close' | 'evaluation' | 'promote' | 'reject' | null>(null)
+  const [busy, setBusy] = useState<'create' | 'close' | 'evaluation' | 'candidate-add' | 'promote' | 'reject' | null>(null)
   const [note, setNote] = useState('')
+  const [candidateVersionInput, setCandidateVersionInput] = useState('')
+  const [selectedCandidateVersion, setSelectedCandidateVersion] = useState('')
 
   useEffect(() => {
     let active = true
@@ -1904,7 +1914,11 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         const result = await loadCandidateEvaluation()
         if (!active) return
         setEvaluation(result)
-        if (learning.stage === 'DECISION' && result.status === 'PENDING') {
+        setSelectedCandidateVersion((current) => result.candidate_comparisons?.some((candidate) => candidate.candidate_model_version === current) ? current : '')
+        const candidateJobsPending = result.candidate_comparisons?.some((candidate) =>
+          candidate.status === 'EVALUATING' || candidate.job_state === 'QUEUED' || candidate.job_state === 'RUNNING',
+        )
+        if (learning.stage === 'DECISION' && (result.status === 'PENDING' || candidateJobsPending)) {
           timer = window.setTimeout(() => void load(), 4000)
         }
       } catch (error: unknown) {
@@ -1918,7 +1932,7 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
     }
   }, [learning.id, learning.stage, learning.updatedAt])
 
-  const runAction = async (action: 'create' | 'close' | 'evaluation' | 'promote' | 'reject') => {
+  const runAction = async (action: 'create' | 'close' | 'evaluation' | 'candidate-add' | 'promote' | 'reject') => {
     setBusy(action)
     try {
       if (action === 'create') {
@@ -1934,9 +1948,16 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
       } else if (action === 'evaluation') {
         setEvaluation(await loadCandidateEvaluation())
         onToast('Оценка candidate перечитана из backend')
+      } else if (action === 'candidate-add') {
+        const candidateVersion = candidateVersionInput.trim()
+        const result = await registerLearningCandidate(learning.id, candidateVersion)
+        setCandidateVersionInput('')
+        onToast(`Кандидат ${result.candidate_model_version} зарегистрирован до начала общего shadow-окна`)
       } else if (action === 'promote' || action === 'reject') {
         if (!window.confirm(action === 'promote' ? 'Продвинуть candidate в production?' : 'Отклонить candidate?')) return
-        const result = action === 'promote' ? await promoteCandidate(note) : await rejectCandidate(note)
+        const result = action === 'promote'
+          ? await promoteCandidate(note, selectedCandidateVersion)
+          : await rejectCandidate(note)
         onToast(result.state === 'PROMOTED' ? 'Candidate продвинут в production' : 'Candidate отклонён; production не изменён')
         setNote('')
       }
@@ -1950,30 +1971,36 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
 
   if (learning.id === 'нет данных') return <div className="analytics-page"><section className="panel"><NoData message="Активного цикла обучения нет." /><button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button></section></div>
 
-  const offlineStatus = evaluation?.offline_evaluation.status
+  const candidateComparisons = evaluation?.candidate_comparisons ?? []
+  const evaluationForCandidate = (candidateVersion: string): CandidateEvaluation | null => {
+    const comparison = candidateComparisons.find((candidate) => candidate.candidate_model_version === candidateVersion)
+    if (comparison?.evaluation) return comparison.evaluation
+    return evaluation?.candidate_model_version === candidateVersion ? evaluation : null
+  }
+  const detailedEvaluation = selectedCandidateVersion
+    ? evaluationForCandidate(selectedCandidateVersion) ?? evaluation
+    : evaluation
+  const offlineStatus = detailedEvaluation?.offline_evaluation.status
   const readyToReview = learning.stage === 'DECISION'
-    && evaluation?.status === 'COMPLETED'
-    && evaluation.decision === 'PENDING_HUMAN_DECISION'
-    && !evaluation.synthetic
-    && evaluation.gates.length > 0
-    && evaluation.gates.every((gate) => gate.status === 'PASSED')
-  const candidateF1 = evaluation?.offline_evaluation.metrics.macro_f1
-  const productionF1 = evaluation?.baseline_evaluation.metrics.macro_f1
-  const classMetrics = evaluation?.offline_evaluation.metrics.per_class_f1 ?? {}
-  const productionClassMetrics = evaluation?.offline_evaluation.metrics.production_per_class_f1
-    ?? evaluation?.baseline_evaluation.metrics.per_class_f1
+    && Boolean(selectedCandidateVersion)
+    && candidateEvaluationReady(evaluationForCandidate(selectedCandidateVersion))
+  const candidateF1 = detailedEvaluation?.offline_evaluation.metrics.macro_f1
+  const productionF1 = detailedEvaluation?.baseline_evaluation.metrics.macro_f1
+  const classMetrics = detailedEvaluation?.offline_evaluation.metrics.per_class_f1 ?? {}
+  const productionClassMetrics = detailedEvaluation?.offline_evaluation.metrics.production_per_class_f1
+    ?? detailedEvaluation?.baseline_evaluation.metrics.per_class_f1
     ?? {}
-  const classChanges = evaluation?.offline_evaluation.metrics.per_class_changes ?? {}
-  const classSupport = evaluation?.offline_evaluation.metrics.per_class_support ?? {}
+  const classChanges = detailedEvaluation?.offline_evaluation.metrics.per_class_changes ?? {}
+  const classSupport = detailedEvaluation?.offline_evaluation.metrics.per_class_support ?? {}
   const classLabels = [...new Set([
     ...Object.keys(classMetrics),
     ...Object.keys(productionClassMetrics),
     ...Object.keys(classChanges),
   ])].sort()
-  const criticalRegressions = evaluation
+  const criticalRegressions = detailedEvaluation
     ? [...new Set([
-      ...evaluation.offline_evaluation.critical_regressions,
-      ...evaluation.shadow_evaluation.critical_regressions,
+      ...detailedEvaluation.offline_evaluation.critical_regressions,
+      ...detailedEvaluation.shadow_evaluation.critical_regressions,
     ])]
     : []
   const collectEndTimestamp = Date.parse(learning.collectEndsAt)
@@ -2016,9 +2043,14 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
         {!learning.blindAbEnabled && <p className="panel-note">Слепое сравнение A/B отключено; предпочтения не собираются.</p>}
         {['PROMOTED', 'REJECTED', 'INSUFFICIENT_FEEDBACK', 'DATASET_BUILD_FAILED', 'TRAINING_FAILED'].includes(learning.stage) && <button className="button button-primary" disabled={busy !== null} onClick={() => void runAction('create')}>{busy === 'create' ? 'Создаём…' : 'Открыть цикл COLLECT'}</button>}
         {['EVALUATE', 'DECISION'].includes(learning.stage) && <button className="button button-secondary" disabled={busy !== null} onClick={() => void runAction('evaluation')}>{busy === 'evaluation' ? 'Читаем…' : 'Показать evaluation'}</button>}
+        {['COLLECT', 'TRAINING'].includes(learning.stage) && <div className="learning-candidate-register">
+          <label htmlFor="learning-candidate-version">Добавить версию из Model Registry</label>
+          <input id="learning-candidate-version" className="learning-note" value={candidateVersionInput} maxLength={200} onChange={(event) => setCandidateVersionInput(event.target.value)} placeholder="candidate model version" disabled={busy !== null} />
+          <button className="button button-secondary" disabled={busy !== null || candidateVersionInput.trim().length === 0} onClick={() => void runAction('candidate-add')}>{busy === 'candidate-add' ? 'Добавляем…' : 'Добавить candidate'}</button>
+        </div>}
         {learning.stage === 'DECISION' && <>
           <input className="learning-note" aria-label="Комментарий reviewer" placeholder="Комментарий к решению (необязательно)" value={note} onChange={(event) => setNote(event.target.value)} disabled={busy !== null} />
-          <button className="button button-primary" disabled={busy !== null || !readyToReview} onClick={() => void runAction('promote')}>{busy === 'promote' ? 'Продвигаем…' : 'Promote'}</button>
+          <button className="button button-primary" disabled={busy !== null || !readyToReview} onClick={() => void runAction('promote')}>{busy === 'promote' ? 'Продвигаем…' : 'Promote выбранную версию'}</button>
           <button className="button button-quiet" disabled={busy !== null} onClick={() => void runAction('reject')}>{busy === 'reject' ? 'Отклоняем…' : 'Reject'}</button>
         </>}
       </div>
@@ -2028,45 +2060,78 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
       {evaluationError && <p className="panel-note">Оценка пока недоступна: {evaluationError}. Повторите запрос после восстановления backend.</p>}
       {!evaluation && !evaluationError && <p className="panel-note">Загружаем evaluation из backend…</p>}
       {evaluation && <>
-        <div className="dataset-stat"><span>Статус оценки</span><strong>{evaluation.status === 'PENDING' ? 'В очереди или выполняется' : evaluation.status === 'FAILED' ? 'Фоновая оценка завершилась ошибкой' : 'Оценка завершена'}</strong></div>
-        <div className="dataset-stat"><span>Решение policy</span><strong>{evaluation.decision === 'PENDING_HUMAN_DECISION' ? 'Все gates пройдены; ожидает решения reviewer' : evaluation.decision === 'FAIL' ? 'Есть проваленные gates' : evaluation.decision === 'PASS' ? 'Policy пройдена; ожидает действия reviewer' : 'Недостаточно evidence'}</strong></div>
+        <div className="learning-candidate-comparison">
+          <h3>Сравнение кандидатов на одном evidence set</h3>
+          <p className="panel-note">Frozen dataset: {evaluation.evaluation_set?.dataset_version ?? evaluation.offline_evaluation.dataset_version}; {evaluation.evaluation_set?.sample_count ?? evaluation.offline_evaluation.sample_count} общих записей. Каждый кандидат оценивается отдельно.</p>
+          {candidateComparisons.length > 0
+            ? <div className="learning-class-table-wrap"><table className="learning-class-table learning-candidate-table">
+              <thead><tr><th>Выбор</th><th>Версия</th><th>Candidate dataset</th><th>Статус</th><th>Macro-F1</th><th>Offline n</th><th>Shadow correction Δ</th><th>Policy gates</th></tr></thead>
+              <tbody>{candidateComparisons.map((candidate) => {
+                const candidateEvaluation = evaluationForCandidate(candidate.candidate_model_version)
+                const candidateReady = candidateEvaluationReady(candidateEvaluation)
+                return <tr key={candidate.candidate_model_version}>
+                  <td><input
+                    type="radio"
+                    name="promotion-candidate"
+                    aria-label={`Выбрать ${candidate.candidate_model_version} для promotion`}
+                    checked={selectedCandidateVersion === candidate.candidate_model_version}
+                    disabled={learning.stage !== 'DECISION' || !candidateReady || busy !== null}
+                    onChange={() => setSelectedCandidateVersion(candidate.candidate_model_version)}
+                  /></td>
+                  <th scope="row">{candidate.candidate_model_version}</th>
+                  <td>{candidate.candidate_dataset_version ?? candidateEvaluation?.candidate_dataset_version ?? '—'}</td>
+                  <td>{candidateEvaluation?.decision ?? candidate.job_state ?? candidate.status}</td>
+                  <td>{evaluationMetric(candidateEvaluation?.offline_evaluation.metrics.macro_f1)}</td>
+                  <td>{candidateEvaluation?.offline_evaluation.sample_count ?? '—'}</td>
+                  <td>{evaluationMetric(candidateEvaluation?.shadow_evaluation.correction_rate_delta, true)}</td>
+                  <td>{candidateReady ? 'Пройдены' : 'Не готовы'}</td>
+                </tr>
+              })}</tbody>
+            </table></div>
+            : <p className="panel-note">Список кандидатов появится после загрузки сравнения из backend.</p>}
+          {learning.stage === 'DECISION' && !selectedCandidateVersion && <p className="panel-note">Выберите версию с пройденными gates, чтобы активировать promotion.</p>}
+        </div>
+        {detailedEvaluation && <>
+        <div className="dataset-stat"><span>Подробные результаты</span><strong>{detailedEvaluation.candidate_model_version}</strong></div>
+        <div className="dataset-stat"><span>Статус оценки</span><strong>{detailedEvaluation.status === 'PENDING' ? 'В очереди или выполняется' : detailedEvaluation.status === 'FAILED' ? 'Фоновая оценка завершилась ошибкой' : 'Оценка завершена'}</strong></div>
+        <div className="dataset-stat"><span>Решение policy</span><strong>{detailedEvaluation.decision === 'PENDING_HUMAN_DECISION' ? 'Все gates пройдены; ожидает решения reviewer' : detailedEvaluation.decision === 'FAIL' ? 'Есть проваленные gates' : detailedEvaluation.decision === 'PASS' ? 'Policy пройдена; ожидает действия reviewer' : 'Недостаточно evidence'}</strong></div>
         <div className="dataset-stat"><span>Статус evidence</span><strong>{String(offlineStatus ?? 'нет данных')}</strong></div>
         <div className="learning-evaluation-grid">
           <article className="learning-evaluation-metric">
             <span>Candidate macro-F1</span>
             <strong>{evaluationMetric(candidateF1)}</strong>
-            <small>{evaluation.offline_evaluation.sample_count} frozen offline записей</small>
+            <small>{detailedEvaluation.offline_evaluation.sample_count} frozen offline записей</small>
           </article>
           <article className="learning-evaluation-metric">
             <span>Production macro-F1</span>
             <strong>{evaluationMetric(productionF1)}</strong>
-            <small>{evaluation.baseline_evaluation.sample_count} offline записей</small>
+            <small>{detailedEvaluation.baseline_evaluation.sample_count} offline записей</small>
           </article>
           <article className="learning-evaluation-metric">
             <span>Shadow agreement</span>
-            <strong>{evaluationMetric(evaluation.shadow_evaluation.agreement_with_confirmed, true)}</strong>
-            <small>{evaluation.shadow_evaluation.sample_count} подтверждённых решений</small>
+            <strong>{evaluationMetric(detailedEvaluation.shadow_evaluation.agreement_with_confirmed, true)}</strong>
+            <small>{detailedEvaluation.shadow_evaluation.sample_count} подтверждённых решений</small>
           </article>
           <article className="learning-evaluation-metric">
             <span>Изменение correction rate</span>
-            <strong>{evaluationMetric(evaluation.shadow_evaluation.correction_rate_delta, true)}</strong>
+            <strong>{evaluationMetric(detailedEvaluation.shadow_evaluation.correction_rate_delta, true)}</strong>
             <small>candidate минус production</small>
           </article>
         </div>
-        <div className="dataset-stat"><span>Candidate</span><strong>{evaluation.candidate_model_version}</strong></div>
-        <div className="dataset-stat"><span>Baseline production</span><strong>{evaluation.production_model_version}</strong></div>
-        <div className="dataset-stat"><span>Frozen evaluation dataset</span><strong>{evaluation.offline_evaluation.dataset_version}</strong></div>
-        <div className="dataset-stat"><span>Promotion policy</span><strong>{evaluation.policy_version}</strong></div>
-        {Object.entries(evaluation.promotion_policy.thresholds).length > 0 && <div className="learning-policy-thresholds">
+        <div className="dataset-stat"><span>Candidate</span><strong>{detailedEvaluation.candidate_model_version}</strong></div>
+        <div className="dataset-stat"><span>Baseline production</span><strong>{detailedEvaluation.production_model_version}</strong></div>
+        <div className="dataset-stat"><span>Frozen evaluation dataset</span><strong>{detailedEvaluation.offline_evaluation.dataset_version}</strong></div>
+        <div className="dataset-stat"><span>Promotion policy</span><strong>{detailedEvaluation.policy_version}</strong></div>
+        {Object.entries(detailedEvaluation.promotion_policy.thresholds).length > 0 && <div className="learning-policy-thresholds">
           <h3>Пороги до оценки candidate</h3>
-          <ul>{Object.entries(evaluation.promotion_policy.thresholds).map(([key, value]) => <li key={key}>
+          <ul>{Object.entries(detailedEvaluation.promotion_policy.thresholds).map(([key, value]) => <li key={key}>
             <span>{promotionThresholdLabel(key)}</span>
             <strong>{key.includes('regression') || key.includes('delta') ? evaluationMetric(value, true) : value}</strong>
           </li>)}</ul>
         </div>}
         <div className="learning-gates">
           <h3>Promotion gates</h3>
-          <ul>{evaluation.gates.map((item) => <li className={`learning-gate learning-gate-${item.status.toLowerCase()}`} key={item.key}>
+          <ul>{detailedEvaluation.gates.map((item) => <li className={`learning-gate learning-gate-${item.status.toLowerCase()}`} key={item.key}>
             <span><strong>{evaluationGateLabel(item.key)}</strong>{item.reason && <small>{item.reason}</small>}</span>
             <span className="learning-gate-result">
               <strong>{evaluationGateStatus(item.status)}</strong>
@@ -2078,7 +2143,7 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
           <h3>Critical regressions</h3>
           {criticalRegressions.length > 0
             ? <ul>{criticalRegressions.map((name) => <li className="learning-regression" key={name}><strong>{name}</strong></li>)}</ul>
-            : offlineStatus === 'COMPLETED' && evaluation.offline_evaluation.sample_count > 0
+            : offlineStatus === 'COMPLETED' && detailedEvaluation.offline_evaluation.sample_count > 0
               ? <p className="panel-note">Критические регрессии не обнаружены.</p>
               : <p className="panel-note">Не оценивались: offline evidence недостаточно.</p>}
         </div>
@@ -2097,8 +2162,9 @@ function CleanLearningPage({ learning, onRefresh, onToast }: { learning: Learnin
             </table></div>
             : <p className="panel-note">Per-class metrics появятся после получения достаточного offline evidence.</p>}
         </div>
-        <div className="dataset-stat"><span>Blind A/B</span><strong>{evaluation.shadow_evaluation.blind_ab === 'ENABLED' ? 'включён' : 'отключён'}</strong></div>
-        {evaluation.synthetic && <p className="panel-note">Evidence синтетический и не допускается для production promotion.</p>}
+        <div className="dataset-stat"><span>Blind A/B</span><strong>{detailedEvaluation.shadow_evaluation.blind_ab === 'ENABLED' ? 'включён' : 'отключён'}</strong></div>
+        {detailedEvaluation.synthetic && <p className="panel-note">Evidence синтетический и не допускается для production promotion.</p>}
+        </>}
       </>}
     </section>}
   </div>

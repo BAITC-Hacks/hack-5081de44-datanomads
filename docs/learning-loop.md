@@ -16,15 +16,18 @@ COLLECT → TRAINING → EVALUATE → DECISION
 - `TRAINING`: validated feedback проходит через Data/ML candidate dataset
   builder, затем checksum-verified dataset обучается отдельным candidate
   trainer; production остаётся serving.
-- `EVALUATE`: candidate работает shadow рядом с production на свежих данных;
-  production остаётся serving. Временные границы окна сохраняются в
-  `evaluation_started_at` и `evaluation_ends_at`; новый ticket получает
-  независимые production/candidate predictions с версиями и timestamp в
-  `learning_cycle_shadow_predictions`. Ошибка candidate inference фиксируется
+- `EVALUATE`: до пяти зарегистрированных candidate versions работают в shadow
+  рядом с единственной production-моделью на свежих данных; только production
+  влияет на ответ. Временные границы окна сохраняются в `evaluation_started_at`
+  и `evaluation_ends_at`; новый ticket получает отдельную production prediction
+  и по одной версии candidate prediction с timestamp в
+  `learning_cycle_shadow_predictions`. Ошибка inference кандидата фиксируется
   безопасным кодом и не меняет production рекомендацию. Длительность evaluation
   окна равна фактической длительности COLLECT.
-- `DECISION`: reviewer видит persisted offline/shadow evidence, sample sizes,
-  policy thresholds и результат каждого gate.
+- `DECISION`: worker оценивает каждого зарегистрированного candidate на одном
+  frozen наборе и его собственных shadow predictions. Reviewer сравнивает версии,
+  видит sample sizes, policy thresholds и gates каждой версии, затем указывает
+  конкретную версию при promotion.
 - `PROMOTED`: human reviewer утвердил candidate; указатель production обновлён
   атомарно.
 - `REJECTED`: candidate отклонён или не набрал evidence; production не меняется.
@@ -45,6 +48,17 @@ min_feedback_count
 promotion_policy_version
 ```
 
+Связь цикла с версиями хранится в `learning_cycle_candidates` (`cycle_id`,
+`model_version`, status и actor регистрации). Она не меняет единственный
+`model_versions.status = 'PRODUCTION'`. В EVALUATE новая версия должна уже
+находиться в registry как `CANDIDATE` или `SHADOW`, иметь checksum артефакта и
+registered dataset lineage; reviewer может добавить её к cycle до закрытия
+evaluation window только на стадиях COLLECT или TRAINING. Регистрация закрывается
+при переходе в EVALUATE, чтобы все candidates получили одинаковые shadow
+наблюдения. При закрытии окна Core ставит отдельную job оценки каждой версии. В
+одном cycle допускается максимум пять версий, чтобы ограничить inference и
+evaluation fan-out.
+
 `learning_feedback`:
 
 ```text
@@ -63,8 +77,8 @@ learning_cycle_id, evaluation_payload, offline_metrics, shadow_metrics,
 critical_regressions, sample_size, decision, created_at
 ```
 
-`learning_cycle_shadow_predictions` хранит evidence по cycle/ticket, обе версии
-моделей, обе classification структуры, время inference и ссылку на
+`learning_cycle_shadow_predictions` хранит evidence по cycle/ticket/candidate
+version, production и candidate classification структуры, время inference и ссылку на
 `operator_decisions.id`, если решение появилось позже. Запись не дублирует
 ticket text и свободную заметку оператора. Получение evaluation не закрывает
 окно: переход в `DECISION` происходит по истечении `evaluation_ends_at` или
@@ -95,9 +109,12 @@ ticket text и свободную заметку оператора. Получ�
    F1 любого класса не больше 0.05, минимум 30 offline samples, минимум 20
    подтверждённых shadow decisions, рост correction rate не больше +0.05 и
    ноль candidate inference failures. Изменение чисел требует новой версии.
-7. **Human decision**: только когда все gates пройдены API разрешает
-   `ML_REVIEWER`/`ADMIN` вручную перевести candidate в `PROMOTED`; иначе reviewer
-   видит `INSUFFICIENT_EVIDENCE`/`FAIL` и может отклонить candidate.
+7. **Human decision**: только версия, чьи собственные gates пройдены на том же
+   frozen evidence set, может быть выбрана `ML_REVIEWER`/`ADMIN` для promotion.
+   При нескольких eligible версиях API требует передать выбранный
+   `candidate_model_version`. Цикл связывается с выбранной версией, она получает
+   `PRODUCTION`, а прежний champion архивируется в одной транзакции. Reject
+   завершает все candidate links этого цикла и не меняет production pointer.
 
 Постоянный `TRAIN_CLASSIFIER` job обучает отдельный candidate из immutable
 dataset artifact. Inline-sample training endpoint остаётся

@@ -680,7 +680,7 @@ paths:
           description: Candidate and production metrics, frozen policy gates, and evidence sufficiency
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/CandidateEvaluation' }
+              schema: { $ref: '#/components/schemas/CandidateEvaluationResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/learning/candidate/promote:
     post:
@@ -691,7 +691,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/ModelDecisionRequest' }
+            schema: { $ref: '#/components/schemas/CycleDecisionRequest' }
       responses:
         '200':
           description: Candidate promoted
@@ -709,7 +709,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/ModelDecisionRequest' }
+            schema: { $ref: '#/components/schemas/CycleDecisionRequest' }
       responses:
         '200':
           description: Candidate rejected; production is unchanged
@@ -1182,6 +1182,34 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/learning/{cycle_id}/candidates:
+    post:
+      tags: [learning]
+      summary: Register a candidate for the cycle frozen evaluation set
+      description: ML_REVIEWER or ADMIN only. Register during COLLECT or TRAINING before the shared shadow window begins. Candidates must already exist in the model registry with candidate or shadow status and verified artifact and dataset lineage.
+      parameters:
+        - name: cycle_id
+          in: path
+          required: true
+          schema: { type: string }
+      security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterLearningCandidateRequest' }
+      responses:
+        '201':
+          description: Candidate registered for the cycle shared shadow and frozen evaluation evidence
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterLearningCandidateResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /api/v1/learning/{cycle_id}/promote:
     post:
       tags: [learning]
@@ -1192,10 +1220,16 @@ paths:
           required: true
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CycleDecisionRequest' }
       responses:
-        '200': { description: Request completed }
+        '200': { description: Selected registered candidate promoted after its own evaluation gates pass }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/learning/{cycle_id}/reject:
     post:
       tags: [learning]
@@ -1206,6 +1240,11 @@ paths:
           required: true
           schema: { type: string }
       security: [{ pulseRole: [] }, {}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CycleDecisionRequest' }
       responses:
         '200': { description: Request completed }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -2301,6 +2340,28 @@ components:
         decision: { type: string }
         source: { type: string }
         comment: { type: string }
+    RegisterLearningCandidateRequest:
+      type: object
+      additionalProperties: false
+      required: [candidate_model_version]
+      properties:
+        candidate_model_version: { type: string, minLength: 1, maxLength: 200 }
+    RegisterLearningCandidateResponse:
+      type: object
+      required: [cycle_id, candidate_model_version, candidate_dataset_version, frozen_evaluation_dataset_version, status, production_model_unchanged]
+      properties:
+        cycle_id: { type: string }
+        candidate_model_version: { type: string }
+        candidate_dataset_version: { type: string }
+        frozen_evaluation_dataset_version: { type: string }
+        status: { type: string, enum: [REGISTERED] }
+        production_model_unchanged: { type: boolean, const: true }
+    CycleDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        candidate_model_version: { type: string, minLength: 1, maxLength: 200, description: Required when more than one candidate is eligible; otherwise defaults to the cycle's primary candidate. }
+        note: { type: string, maxLength: 2000 }
     LearningFeedback:
       type: object
       required: [id, ticket_id, feedback_type, user_id, created_at]
@@ -2325,7 +2386,71 @@ components:
         state: { type: string, enum: [TRAINING, DECISION, INSUFFICIENT_FEEDBACK] }
         cycle: { $ref: '#/components/schemas/LearningCycle' }
         production_model_unchanged: { type: boolean }
+    CandidateEvaluationResponse:
+      type: object
+      additionalProperties: false
+      required: [schema_version, status, cycle_id, candidate_model_version, production_model_version, candidate_dataset_version, evaluation_version, policy_version, promotion_policy, offline_evaluation, baseline_evaluation, shadow_evaluation, gates, decision, evaluated_at, synthetic, candidate_comparisons, evaluation_set]
+      properties:
+        schema_version: { type: string, const: candidate-evaluation.v1 }
+        status: { type: string, enum: [PENDING, COMPLETED, FAILED] }
+        cycle_id: { type: string }
+        candidate_model_version: { type: string }
+        production_model_version: { type: string }
+        candidate_dataset_version: { type: string }
+        evaluation_version: { type: string }
+        policy_version: { type: string }
+        promotion_policy:
+          type: object
+          additionalProperties: false
+          required: [version, thresholds]
+          properties:
+            version: { type: string }
+            thresholds: { type: object, additionalProperties: { type: number } }
+        offline_evaluation: { $ref: '#/components/schemas/CandidateModelEvaluation' }
+        baseline_evaluation: { $ref: '#/components/schemas/CandidateModelEvaluation' }
+        shadow_evaluation:
+          type: object
+          additionalProperties: false
+          required: [sample_count, agreement_with_confirmed, correction_rate_delta, critical_regressions]
+          properties:
+            sample_count: { type: integer, minimum: 0 }
+            agreement_with_confirmed: { type: number, nullable: true, minimum: 0, maximum: 1 }
+            correction_rate_delta: { type: number, nullable: true }
+            critical_regressions: { type: array, items: { type: string } }
+            metrics: { type: object, additionalProperties: true }
+            blind_ab: { type: string, enum: [DISABLED, ENABLED] }
+        gates:
+          type: array
+          items: { $ref: '#/components/schemas/CandidateEvaluationGate' }
+        decision: { type: string, enum: [PENDING_HUMAN_DECISION, PASS, FAIL, INSUFFICIENT_EVIDENCE] }
+        evaluated_at: { type: string, format: date-time }
+        synthetic: { type: boolean }
+        candidate_comparisons:
+          type: array
+          items: { $ref: '#/components/schemas/CandidateEvaluationComparison' }
+        evaluation_set: { $ref: '#/components/schemas/CandidateEvaluationSet' }
+    CandidateEvaluationComparison:
+      type: object
+      additionalProperties: false
+      required: [candidate_model_version, status, candidate_dataset_version, job_state, evaluation]
+      properties:
+        candidate_model_version: { type: string }
+        status: { type: string, enum: [REGISTERED, EVALUATING, EVALUATED, EVALUATION_FAILED, PROMOTED, REJECTED] }
+        candidate_dataset_version: { type: string, nullable: true }
+        job_state: { type: string, nullable: true, enum: [QUEUED, RUNNING, COMPLETED, FAILED] }
+        evaluation: { allOf: [{ $ref: '#/components/schemas/CandidateEvaluation' }], nullable: true }
+    CandidateEvaluationSet:
+      type: object
+      additionalProperties: false
+      required: [cycle_id, dataset_version, sample_count, window_started_at, window_ended_at]
+      properties:
+        cycle_id: { type: string }
+        dataset_version: { type: string, nullable: true }
+        sample_count: { type: integer, minimum: 0 }
+        window_started_at: { type: string, format: date-time, nullable: true }
+        window_ended_at: { type: string, format: date-time, nullable: true }
     CandidateEvaluation:
+      description: Candidate evaluation evidence persisted by the Data/ML worker for one candidate.
       type: object
       additionalProperties: false
       required: [schema_version, status, cycle_id, candidate_model_version, production_model_version, candidate_dataset_version, evaluation_version, policy_version, promotion_policy, offline_evaluation, baseline_evaluation, shadow_evaluation, gates, decision, evaluated_at, synthetic]
@@ -2394,13 +2519,6 @@ components:
         observed: { type: number, nullable: true }
         threshold: { type: number, nullable: true }
         reason: { type: string }
-    ModelDecisionRequest:
-      type: object
-      required: [cycle_id, candidate_model_version, reason]
-      properties:
-        cycle_id: { type: string }
-        candidate_model_version: { type: string }
-        reason: { type: string, minLength: 1, maxLength: 2000 }
     ModelVersion:
       type: object
       required: [model_version, model_family, status]

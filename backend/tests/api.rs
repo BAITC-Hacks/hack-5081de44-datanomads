@@ -562,6 +562,18 @@ async fn viewing_candidate_evaluation_does_not_close_its_window() {
     assert_eq!(evaluation["decision"], "INSUFFICIENT_EVIDENCE");
     assert_eq!(evaluation["synthetic"], true);
     assert_eq!(evaluation["shadow_evaluation"]["blind_ab"], "DISABLED");
+    assert_eq!(
+        evaluation["candidate_comparisons"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        evaluation["candidate_comparisons"][0]["candidate_model_version"],
+        evaluation["candidate_model_version"]
+    );
+    assert_eq!(evaluation["evaluation_set"]["cycle_id"], "cycle-001");
 
     let generic_promotion = application
         .clone()

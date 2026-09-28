@@ -390,6 +390,12 @@ h1 { margin-top: 12px; color: #f1f8f3; font-size: clamp(26px, 3vw, 37px); font-w
 .runtime-metrics-panel { margin-bottom: 18px; }
 .runtime-metrics-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .learning-evaluation-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 15px 0; }
+.learning-candidate-register { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; }
+.learning-candidate-register label { flex: 1 1 100%; color: #8da397; font-size: 10px; }
+.learning-candidate-comparison { margin: 14px 0 20px; }
+.learning-candidate-comparison h3 { margin: 0 0 8px; color: #c6d9ce; font-size: 12px; }
+.learning-candidate-table { min-width: 900px; }
+.learning-candidate-table input[type="radio"] { accent-color: var(--mint); }
 .learning-evaluation-metric { display: grid; align-content: start; gap: 7px; min-width: 0; padding: 13px; border: 1px solid rgba(140,240,200,.12); border-radius: 8px; background: rgba(140,240,200,.035); }
 .learning-evaluation-metric span, .learning-evaluation-metric small { color: #71877c; font-size: 9px; line-height: 1.35; }
 .learning-evaluation-metric strong { overflow-wrap: anywhere; color: #d8eee2; font-size: 18px; letter-spacing: -.03em; }

@@ -422,6 +422,30 @@ export interface CandidateEvaluation {
   decision: 'PENDING_HUMAN_DECISION' | 'PASS' | 'FAIL' | 'INSUFFICIENT_EVIDENCE'
   evaluated_at: string
   synthetic: boolean
+  candidate_comparisons?: CandidateEvaluationComparison[]
+  evaluation_set?: CandidateEvaluationSet
+}
+export interface CandidateEvaluationComparison {
+  candidate_model_version: string
+  status: 'REGISTERED' | 'EVALUATING' | 'EVALUATED' | 'EVALUATION_FAILED' | 'PROMOTED' | 'REJECTED'
+  candidate_dataset_version: string | null
+  job_state: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | null
+  evaluation: CandidateEvaluation | null
+}
+export interface CandidateEvaluationSet {
+  cycle_id: string
+  dataset_version: string | null
+  sample_count: number
+  window_started_at: string | null
+  window_ended_at: string | null
+}
+export interface RegisterLearningCandidateResponse {
+  cycle_id: string
+  candidate_model_version: string
+  candidate_dataset_version: string
+  frozen_evaluation_dataset_version: string
+  status: 'REGISTERED'
+  production_model_unchanged: true
 }
 export interface CandidateModelEvaluation {
   evaluation_id: string
@@ -1162,11 +1186,22 @@ export async function loadCandidateEvaluation() {
   return request<CandidateEvaluation>('/learning/candidate/evaluation')
 }
 
-export async function promoteCandidate(note?: string) {
+export async function registerLearningCandidate(cycleId: string, candidateModelVersion: string) {
+  return request<RegisterLearningCandidateResponse>(`/learning/${encodeURIComponent(cycleId)}/candidates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ candidate_model_version: candidateModelVersion.trim() }),
+  })
+}
+
+export async function promoteCandidate(note?: string, candidateModelVersion?: string) {
   return request<BackendLearningCycle>('/learning/candidate/promote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ note: note?.trim() || undefined }),
+    body: JSON.stringify({
+      note: note?.trim() || undefined,
+      candidate_model_version: candidateModelVersion?.trim() || undefined,
+    }),
   })
 }
 
