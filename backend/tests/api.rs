@@ -1682,6 +1682,103 @@ async fn operator_cannot_read_manager_analytics() {
 }
 
 #[tokio::test]
+async fn manager_cannot_access_operator_ticket_or_model_workflows() {
+    let application = app(AppState::demo());
+    let requests = [
+        Request::get("/api/v1/tickets")
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/api/v1/tickets")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"text":"synthetic manager role probe"}"#))
+            .unwrap(),
+        Request::get("/api/v1/tickets/demo-0001")
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/v1/tickets/demo-0001/handoff-package")
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/v1/tickets/demo-0001/prediction")
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/api/v1/assist/preview")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"text":"synthetic role probe"}"#))
+            .unwrap(),
+        Request::post("/api/v1/assist/demo-0001/confirm")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+        Request::post("/api/v1/assist/demo-0001/correct")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+        Request::post("/api/v1/tickets/demo-0001/relation-feedback")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"relation":"SIMILAR","decision":"REJECTED"}"#,
+            ))
+            .unwrap(),
+        Request::post("/api/v1/tickets/demo-0001/routing-feedback")
+            .header("x-pulse-role", "MANAGER")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"service_feedback":"ACCEPTED"}"#))
+            .unwrap(),
+        Request::get("/api/v1/models")
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/v1/models/classifier-deterministic-baseline-2026-09-21")
+            .header("x-pulse-role", "MANAGER")
+            .body(Body::empty())
+            .unwrap(),
+    ];
+
+    for request in requests {
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 403);
+    }
+}
+
+#[tokio::test]
+async fn admin_retains_full_demo_access_to_operator_and_model_views() {
+    let application = app(AppState::demo());
+    let requests = [
+        Request::get("/api/v1/tickets")
+            .header("x-pulse-role", "ADMIN")
+            .body(Body::empty())
+            .unwrap(),
+        Request::get("/api/v1/tickets/ticket-001")
+            .header("x-pulse-role", "ADMIN")
+            .body(Body::empty())
+            .unwrap(),
+        Request::post("/api/v1/assist/preview")
+            .header("x-pulse-role", "ADMIN")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"text":"synthetic admin role probe"}"#))
+            .unwrap(),
+        Request::get("/api/v1/models")
+            .header("x-pulse-role", "ADMIN")
+            .body(Body::empty())
+            .unwrap(),
+    ];
+
+    for request in requests {
+        let response = application.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+}
+
+#[tokio::test]
 async fn audit_log_is_manager_admin_only_and_requires_postgres_storage() {
     let application = app(AppState::demo());
 

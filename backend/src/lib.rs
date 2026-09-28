@@ -2167,11 +2167,7 @@ async fn list_tickets(
     headers: HeaderMap,
     Query(query): Query<TicketQuery>,
 ) -> Result<Json<TicketListResponse>, ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let response = repository
             .list_tickets(&query)
@@ -2530,11 +2526,7 @@ async fn create_ticket(
     headers: HeaderMap,
     Json(request): Json<CreateTicketRequest>,
 ) -> Result<(StatusCode, Json<TicketDetailResponse>), ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     let text = request.text.trim();
     if text.is_empty() {
         return Err(ApiError::BadRequest("text must not be empty".to_owned()));
@@ -2824,11 +2816,7 @@ async fn get_ticket(
     headers: HeaderMap,
     Path(ticket_id): Path<String>,
 ) -> Result<Json<TicketDetailResponse>, ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let response = repository.get_ticket(&ticket_id).await.map_err(|error| {
             if error.contains("not found") {
@@ -2880,11 +2868,7 @@ async fn get_context_handoff_package(
     headers: HeaderMap,
     Path(ticket_id): Path<String>,
 ) -> Result<Json<ContextHandoffPackage>, ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let package = repository
             .context_handoff_package(&ticket_id)
@@ -2945,11 +2929,7 @@ async fn get_prediction(
     headers: HeaderMap,
     Path(ticket_id): Path<String>,
 ) -> Result<Json<Prediction>, ApiError> {
-    require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let response = repository
             .get_prediction(&ticket_id)
@@ -3718,11 +3698,7 @@ async fn assist_preview(
     Json(request): Json<PreviewRequest>,
 ) -> Result<Json<AssistPreviewResponse>, ApiError> {
     let started = Instant::now();
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     let request_id = request_id_from_headers(&headers);
     let trace_id = trace_id_from_headers(&headers);
     if request.ticket_id.is_none()
@@ -4167,11 +4143,7 @@ async fn apply_decision(
     action: &str,
     request: DecisionRequest,
 ) -> Result<Json<DecisionResponse>, ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let response = repository
             .apply_decision(&ticket_id, action, &request, &actor.user_id)
@@ -8067,11 +8039,7 @@ async fn create_routing_feedback(
     Path(ticket_id): Path<String>,
     Json(request): Json<CreateRoutingFeedbackRequest>,
 ) -> Result<(StatusCode, Json<RoutingFeedbackRecord>), ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     let (service_feedback, corrected_target_service) = normalize_routing_feedback_request(request)?;
 
     if let Some(repository) = state.repository() {
@@ -8351,11 +8319,7 @@ async fn relation_feedback(
     Path(ticket_id): Path<String>,
     Json(request): Json<RelationFeedbackRequest>,
 ) -> Result<(StatusCode, Json<LearningFeedback>), ApiError> {
-    let actor = require_role(
-        &headers,
-        &state.config,
-        &[Role::Operator, Role::Manager, Role::Admin],
-    )?;
+    let actor = require_role(&headers, &state.config, &[Role::Operator, Role::Admin])?;
     let relation = request.relation.trim().to_ascii_uppercase();
     if !matches!(
         relation.as_str(),
@@ -8868,11 +8832,7 @@ async fn list_models(
     headers: HeaderMap,
     Query(query): Query<ModelQuery>,
 ) -> Result<Json<ModelListResponse>, ApiError> {
-    require_role(
-        &headers,
-        &state.config,
-        &[Role::Manager, Role::MlReviewer, Role::Admin],
-    )?;
+    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
     if let Some(repository) = state.repository() {
         let items = repository
             .list_models(&query)
@@ -8902,11 +8862,7 @@ async fn get_model(
     headers: HeaderMap,
     Path(model_id): Path<String>,
 ) -> Result<Json<ModelVersion>, ApiError> {
-    require_role(
-        &headers,
-        &state.config,
-        &[Role::Manager, Role::MlReviewer, Role::Admin],
-    )?;
+    require_role(&headers, &state.config, &[Role::MlReviewer, Role::Admin])?;
     if let Some(repository) = state.repository() {
         return repository
             .get_model(&model_id)

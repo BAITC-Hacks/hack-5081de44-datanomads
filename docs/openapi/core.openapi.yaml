@@ -112,6 +112,7 @@ paths:
     post:
       tags: [assist]
       summary: Build an operator assist preview
+      description: OPERATOR or ADMIN only. Manager analytics access does not grant access to original ticket text or assist results.
       security: [{ pulseRole: [] }, {}]
       parameters:
         - name: x-request-id
@@ -136,6 +137,7 @@ paths:
               schema: { $ref: '#/components/schemas/AssistPreviewResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '503': { $ref: '#/components/responses/DependencyUnavailable' }
   /api/v1/response-templates:
     get:
@@ -283,6 +285,7 @@ paths:
     post:
       tags: [tickets]
       summary: Confirm or reject duplicate/repeat relation candidates
+      description: OPERATOR or ADMIN only.
       security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/TicketId'
@@ -304,7 +307,7 @@ paths:
     get:
       tags: [tickets]
       summary: List route feedback for a ticket
-      description: Includes demo service feedback explicitly marked as a simulation and pending controlled offline review.
+      description: OPERATOR, MANAGER or ADMIN. Manager responses contain only the feedback snapshot and omit original ticket text. Demo service feedback is marked as a simulation and pending controlled offline review.
       security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/TicketId'
@@ -320,7 +323,7 @@ paths:
     post:
       tags: [tickets]
       summary: Record simulated service routing feedback
-      description: Creates a DEMO_SIMULATION record linked to the latest operator decision. It does not update production routing rules or start training.
+      description: OPERATOR or ADMIN only. Creates a DEMO_SIMULATION record linked to the latest operator decision. It does not update production routing rules or start training.
       security: [{ pulseRole: [] }, {}]
       parameters:
         - $ref: '#/components/parameters/TicketId'
@@ -718,6 +721,7 @@ paths:
     get:
       tags: [models]
       summary: List model versions and statuses
+      description: ML_REVIEWER or ADMIN only.
       security: [{ pulseRole: [] }, {}]
       responses:
         '200':
@@ -728,6 +732,7 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/ModelVersion' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
   /api/v1/openapi.json:
     get:
       tags: [system]
@@ -744,6 +749,7 @@ paths:
     get:
       tags: [tickets]
       summary: List permitted tickets
+      description: OPERATOR or ADMIN only. Manager access is limited to analytics and privacy-safe audit records.
       security: [{ pulseRole: [] }, {}]
       responses:
         '200': { description: Request completed }
@@ -752,6 +758,7 @@ paths:
     post:
       tags: [tickets]
       summary: Create a normalized ticket with a separate prediction
+      description: OPERATOR or ADMIN only.
       security: [{ pulseRole: [] }, {}]
       responses:
         '201': { description: Request completed }
@@ -761,6 +768,7 @@ paths:
     get:
       tags: [tickets]
       summary: Get a ticket with prediction and latest operator decision
+      description: OPERATOR or ADMIN only; this response contains the original ticket text.
       parameters:
         - name: ticket_id
           in: path
@@ -779,7 +787,7 @@ paths:
     get:
       tags: [tickets]
       summary: Prepare a deterministic context handoff package
-      description: Returns source-backed handoff context for an operator-confirmed route. It does not send a response, alter the ticket, or replace its separately available original text. Address and object fields are included only when present in the ticket record.
+      description: OPERATOR or ADMIN only. Returns source-backed handoff context for an operator-confirmed route. It does not send a response, alter the ticket, or replace its separately available original text. Address and object fields are included only when present in the ticket record.
       parameters:
         - name: ticket_id
           in: path
@@ -800,6 +808,7 @@ paths:
     get:
       tags: [tickets]
       summary: Get the latest AI prediction
+      description: OPERATOR or ADMIN only.
       parameters:
         - name: ticket_id
           in: path
@@ -832,6 +841,7 @@ paths:
     post:
       tags: [assist]
       summary: Confirm the prediction for a ticket
+      description: OPERATOR or ADMIN only.
       parameters:
         - name: ticket_id
           in: path
@@ -855,6 +865,7 @@ paths:
     post:
       tags: [assist]
       summary: Correct the prediction for a ticket
+      description: OPERATOR or ADMIN only.
       parameters:
         - name: ticket_id
           in: path
@@ -878,6 +889,7 @@ paths:
     post:
       tags: [assist]
       summary: Confirm a ticket prediction using ticket_id in the body
+      description: OPERATOR or ADMIN only.
       security: [{ pulseRole: [] }, {}]
       responses:
         '200': { description: Request completed }
@@ -887,6 +899,7 @@ paths:
     post:
       tags: [assist]
       summary: Correct a ticket prediction using ticket_id in the body
+      description: OPERATOR or ADMIN only.
       security: [{ pulseRole: [] }, {}]
       responses:
         '200': { description: Request completed }
@@ -896,6 +909,7 @@ paths:
     post:
       tags: [assist]
       summary: Alias for confirming a ticket prediction
+      description: OPERATOR or ADMIN only.
       parameters:
         - name: ticket_id
           in: path
@@ -910,6 +924,7 @@ paths:
     post:
       tags: [assist]
       summary: Alias for correcting a ticket prediction
+      description: OPERATOR or ADMIN only.
       parameters:
         - name: ticket_id
           in: path
@@ -1199,6 +1214,7 @@ paths:
     get:
       tags: [models]
       summary: Get a model version
+      description: ML_REVIEWER or ADMIN only.
       parameters:
         - name: model_id
           in: path

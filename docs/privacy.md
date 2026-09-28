@@ -34,8 +34,8 @@ latency_ms, model_version, status, error_code, ticket_id, user_id
 
 | Роль | Минимальные права |
 | --- | --- |
-| `OPERATOR` | разрешённые обращения, assist, confirm/correct, relation feedback |
-| `MANAGER` | analytics, alerts, forecast, reports |
+| `OPERATOR` | разрешённые обращения и исходный текст, assist, confirm/correct, relation feedback |
+| `MANAGER` | analytics, alerts, forecast, reports и privacy-safe audit log; без доступа к исходному тексту, assist и model registry |
 | `ML_REVIEWER` | candidate evaluation, learning cycles, promote/reject, model metadata |
 | `ADMIN` | полный доступ к demo-контуру, импорт и model management; управление пользователями требует внешнего identity contract |
 

@@ -72,7 +72,7 @@
     "OPERATOR": ["tickets", "assist", "confirm", "correct", "relation_feedback"],
     "MANAGER": ["analytics", "alerts", "forecast", "reports"],
     "ML_REVIEWER": ["candidate_evaluation", "learning_cycles", "promote", "reject", "model_management"],
-    "ADMIN": ["candidate_evaluation", "learning_cycles", "promote", "reject", "model_management"]
+    "ADMIN": ["tickets", "assist", "confirm", "correct", "relation_feedback", "analytics", "alerts", "forecast", "reports", "candidate_evaluation", "learning_cycles", "promote", "reject", "model_management"]
   },
   "observability": {
     "required_log_fields": [
