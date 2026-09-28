@@ -1738,7 +1738,22 @@ async fn topic_correction_recomputes_confirmed_routing_without_mutating_source_t
 
 #[tokio::test]
 async fn learning_cycle_counts_operator_decisions_but_not_freeform_feedback() {
+    // The in-memory demo starts with an active EVALUATE cycle. Reject that
+    // fixture cycle through the reviewer API before opening the test's own
+    // COLLECT cycles, so the single-active-cycle guard remains exercised.
     let application = app(AppState::demo());
+    let seeded_cycle = application
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/learning/cycle-001/reject")
+                .header("x-pulse-role", "ML_REVIEWER")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"note":"test fixture reset"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seeded_cycle.status(), 200);
     let created = application
         .clone()
         .oneshot(

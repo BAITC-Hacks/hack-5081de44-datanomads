@@ -135,6 +135,27 @@ fn artifact_checksum_is_verified(value: &str) -> bool {
     })
 }
 
+// Only the two migration-owned built-in classifier pointers may skip an artifact
+// checksum. The legacy pointer names the same runtime under an older version;
+// every other production model must still have a verified artifact checksum.
+fn is_builtin_classifier_pointer(
+    model_version: &str,
+    artifact_checksum: Option<&str>,
+    manifest_uri: Option<&str>,
+) -> bool {
+    artifact_checksum == Some("builtin-baseline-no-artifact")
+        && matches!(
+            (model_version, manifest_uri),
+            (
+                "classifier-deterministic-baseline-2026-09-21",
+                Some("builtin://deterministic-classifier")
+            ) | (
+                "classifier-demo-2026-09-21-001",
+                Some("builtin://deterministic-keyword-demo")
+            )
+        )
+}
+
 fn is_canary_assignment(rollout_id: &str, ticket_ref: &str, traffic_percent: i16) -> bool {
     if !(1..=100).contains(&traffic_percent) {
         return false;
@@ -433,10 +454,36 @@ fn candidate_evaluation_is_promotable(
 #[cfg(test)]
 mod promotion_safety_tests {
     use super::{
-        artifact_checksum_is_verified, candidate_evaluation_is_promotable, is_canary_assignment,
-        synthetic_candidate_can_be_promoted,
+        artifact_checksum_is_verified, candidate_evaluation_is_promotable,
+        is_builtin_classifier_pointer, is_canary_assignment, synthetic_candidate_can_be_promoted,
     };
     use serde_json::{json, Value};
+
+    // Cover both migration-owned runtime pointers and reject any attempt to
+    // use their placeholder checksum for an unregistered production model.
+    #[test]
+    fn built_in_classifier_pointers_match_the_database_migrations() {
+        assert!(is_builtin_classifier_pointer(
+            "classifier-deterministic-baseline-2026-09-21",
+            Some("builtin-baseline-no-artifact"),
+            Some("builtin://deterministic-classifier"),
+        ));
+        assert!(is_builtin_classifier_pointer(
+            "classifier-demo-2026-09-21-001",
+            Some("builtin-baseline-no-artifact"),
+            Some("builtin://deterministic-keyword-demo"),
+        ));
+        assert!(!is_builtin_classifier_pointer(
+            "unverified-production-model",
+            Some("builtin-baseline-no-artifact"),
+            Some("builtin://deterministic-keyword-demo"),
+        ));
+        assert!(!is_builtin_classifier_pointer(
+            "classifier-demo-2026-09-21-001",
+            None,
+            Some("builtin://deterministic-keyword-demo"),
+        ));
+    }
 
     fn passing_evaluation() -> Value {
         json!({
@@ -1912,14 +1959,21 @@ impl PgRepository {
             return Ok(result);
         }
 
-        if artifact_checksum.as_deref() != Some("builtin-baseline-no-artifact")
-            || manifest_uri.as_deref() != Some("builtin://deterministic-classifier")
-        {
+        if !is_builtin_classifier_pointer(
+            &model_version,
+            artifact_checksum.as_deref(),
+            manifest_uri.as_deref(),
+        ) {
             return Err("production classifier artifact is not verifiable".to_owned());
         }
         let mut result = self.classify(text, language, request_id, trace_id).await?;
-        // The database row names the built-in deterministic baseline. The ML
-        // manifest has a demo identifier for the same runtime implementation.
+        // The legacy database pointer predates the ML runtime's version name.
+        // The current demo pointer must agree with the version ML actually served.
+        if model_version == "classifier-demo-2026-09-21-001"
+            && result.model_version != model_version
+        {
+            return Err("production classifier returned a different model version".to_owned());
+        }
         result.model_version = model_version;
         Ok(result)
     }
@@ -7200,8 +7254,11 @@ impl PgRepository {
             return Err("previous production model artifact is not verifiable".to_owned());
         };
         if !artifact_checksum_is_verified(previous_checksum)
-            && !(previous_checksum == "builtin-baseline-no-artifact"
-                && previous_manifest_uri.as_deref() == Some("builtin://deterministic-classifier"))
+            && !is_builtin_classifier_pointer(
+                &previous_production_model_version,
+                Some(previous_checksum),
+                previous_manifest_uri.as_deref(),
+            )
         {
             return Err("previous production model artifact is not verifiable".to_owned());
         }

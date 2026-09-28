@@ -10,7 +10,7 @@
     "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
-    "echarts": "^6.0.0",
+    "echarts": "^6.1.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },

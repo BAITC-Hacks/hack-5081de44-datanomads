@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import sys
+from types import ModuleType
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from worker import process_job, safe_job_error, update_learning_cycle
+from worker import process_job, safe_job_error, update_offline_learning_cycle
 
 
 class TrainingConnection:
@@ -37,6 +39,7 @@ class TrainingPool:
 
 
 def test_success_registers_dataset_and_new_candidate_without_overwriting(monkeypatch) -> None:
+    """The offline trainer records dataset lineage and candidate evidence atomically."""
     monkeypatch.delenv("PULSE_TEST_FAKE_TRAINER", raising=False)
     pool = TrainingPool(["dataset_v1", "candidate_v1", 1])
     result = {
@@ -50,7 +53,7 @@ def test_success_registers_dataset_and_new_candidate_without_overwriting(monkeyp
                             "frozen_evaluation_version": "eval_v1", "dataset_version": "reviewed_v1",
                             "regressed_critical_topics": [], "decision": "PENDING_HUMAN_REVIEW"},
     }
-    asyncio.run(update_learning_cycle(pool, {"cycle_id": "1"}, result=result))
+    asyncio.run(update_offline_learning_cycle(pool, {"cycle_id": "1"}, result=result))
     queries = pool.connection.queries
     assert len(queries) == 4
     assert "manifest_sha256 = 'pending'" in queries[0][0]
@@ -65,6 +68,7 @@ def test_success_registers_dataset_and_new_candidate_without_overwriting(monkeyp
 
 
 def test_version_collision_fails_without_changing_cycle() -> None:
+    """A reused candidate version leaves the training cycle unadvanced."""
     pool = TrainingPool(["dataset_v1", None])
     result = {
         "state": "COMPLETED", "candidate_model_version": "candidate_v1",
@@ -74,23 +78,28 @@ def test_version_collision_fails_without_changing_cycle() -> None:
         "sample_count": 2, "manifest": {"artifact_uri": "/private/model/manifest.json"},
     }
     with pytest.raises(RuntimeError, match="CANDIDATE_VERSION_EXISTS") as caught:
-        asyncio.run(update_learning_cycle(pool, {"cycle_id": "1"}, result=result))
+        asyncio.run(update_offline_learning_cycle(pool, {"cycle_id": "1"}, result=result))
     assert safe_job_error(caught.value) == "CANDIDATE_VERSION_EXISTS"
     assert len(pool.connection.queries) == 2
 
 
 def test_insufficient_feedback_closes_cycle_without_candidate() -> None:
+    """Insufficient feedback ends training without registering a candidate."""
     pool = TrainingPool([1])
-    asyncio.run(update_learning_cycle(pool, {"cycle_id": "1"},
-                                      result={"state": "INSUFFICIENT_FEEDBACK", "sample_count": 0}))
+    asyncio.run(update_offline_learning_cycle(pool, {"cycle_id": "1"},
+                                              result={"state": "INSUFFICIENT_FEEDBACK", "sample_count": 0}))
     assert len(pool.connection.queries) == 1
     assert "state = 'INSUFFICIENT_FEEDBACK'" in pool.connection.queries[0][0]
 
 
 def test_failed_shadow_job_does_not_reopen_learning_cycle() -> None:
+    """A failed shadow inference marks only its job as failed."""
+    # The production worker imports this optional training module only for a
+    # shadow job; inject a stub so the runtime test needs no Torch installation.
+    fake_shadow_job = ModuleType("training.shadow_job")
+    fake_shadow_job.score_shadow_ticket = AsyncMock(side_effect=RuntimeError("SHADOW_CONTEXT_CHANGED"))
     with (patch("worker.make_services", return_value=(None,) * 7),
-          patch("training.shadow_job.score_shadow_ticket",
-                new=AsyncMock(side_effect=RuntimeError("SHADOW_CONTEXT_CHANGED"))),
+          patch.dict(sys.modules, {"training.shadow_job": fake_shadow_job}),
           patch("worker.fail_job", new_callable=AsyncMock) as fail,
           patch("worker.update_learning_cycle", new_callable=AsyncMock) as update):
         asyncio.run(process_job(None, {"id": 3, "job_type": "SHADOW_CLASSIFIER",
