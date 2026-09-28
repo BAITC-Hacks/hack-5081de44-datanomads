@@ -137,6 +137,7 @@ def test_unknown_job_identifier_is_omitted_from_response_and_logs() -> None:
 
 
 def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:
+    """Route explicit water and lighting complaints without using street location as a topic."""
     ru_payload = {"text": "В нашем доме нет горячей воды", "top_k": 3}
     first = client.post("/internal/v1/classify", json=ru_payload)
     second = client.post("/internal/v1/classify", json=ru_payload)
@@ -150,6 +151,17 @@ def test_ru_kz_classifier_is_deterministic_and_has_topics() -> None:
     assert kz.status_code == 200
     assert kz.json()["language"] == "KZ"
     assert kz.json()["topic_id"] == "street_lighting"
+
+    # These water requests previously lost to a generic street-location keyword
+    # or missed the spaced Kazakh form for drinking water.
+    for text in (
+        "Көшеде су жоқ, су беруді қалпына келтіруді сұраймын.",
+        "Ауыз су берілмей жатыр",
+    ):
+        water = client.post("/internal/v1/classify", json={"text": text})
+        assert water.status_code == 200
+        assert water.json()["language"] == "KZ"
+        assert water.json()["topic_id"] == "water_supply"
 
     waste = client.post("/internal/v1/classify", json={"text": "Не вывозят мусор из контейнера"})
     environment = client.post("/internal/v1/classify", json={"text": "Загрязнение воздуха и выбросы"})

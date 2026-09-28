@@ -705,6 +705,21 @@ fn readiness_check(status: &str, error_code: Option<&str>) -> Value {
     check
 }
 
+// Use the same artifact gate as production inference before reporting Core as
+// ready. An invalid registry pointer must not be masked by a healthy ML service.
+fn production_classifier_readiness(
+    model_version: &str,
+    artifact_checksum: Option<&str>,
+    manifest_uri: Option<&str>,
+) -> Value {
+    let verified = artifact_checksum.is_some_and(artifact_checksum_is_verified)
+        || is_builtin_classifier_pointer(model_version, artifact_checksum, manifest_uri);
+    readiness_check(
+        if verified { "ready" } else { "not_ready" },
+        (!verified).then_some("PRODUCTION_CLASSIFIER_ARTIFACT_UNVERIFIABLE"),
+    )
+}
+
 fn migration_readiness(rows: &[(i64, bool)], expected_versions: &[i64]) -> Value {
     let expected = expected_versions
         .iter()
@@ -790,7 +805,8 @@ fn remote_model_check(body: &Value) -> Value {
 #[cfg(test)]
 mod observability_readiness_tests {
     use super::{
-        migration_readiness, qdrant_collection_error_code, remote_model_check, safe_trace_id,
+        migration_readiness, production_classifier_readiness, qdrant_collection_error_code,
+        remote_model_check, safe_trace_id,
     };
     use serde_json::json;
 
@@ -859,6 +875,38 @@ mod observability_readiness_tests {
         assert_eq!(
             remote_model_check(&json!({"detail": "do not expose this"}))["error_code"],
             "ML_READINESS_CHECK_MISSING"
+        );
+    }
+
+    // The registry row is the source of truth for production inference. A
+    // malformed pointer must fail readiness even when dependencies are healthy.
+    #[test]
+    fn production_classifier_readiness_rejects_unverifiable_registry_rows() {
+        assert_eq!(
+            production_classifier_readiness(
+                "classifier-demo-2026-09-21-001",
+                Some("builtin-baseline-no-artifact"),
+                Some("builtin://deterministic-keyword-demo"),
+            )["status"],
+            "ready"
+        );
+        assert_eq!(
+            production_classifier_readiness(
+                "candidate-verified",
+                Some(&format!("sha256:{}", "a".repeat(64))),
+                Some("file:///models/candidate/manifest.json"),
+            )["status"],
+            "ready"
+        );
+        let invalid = production_classifier_readiness(
+            "classifier-candidate-clean-fake-001",
+            Some(&"a".repeat(64)),
+            None,
+        );
+        assert_eq!(invalid["status"], "not_ready");
+        assert_eq!(
+            invalid["error_code"],
+            "PRODUCTION_CLASSIFIER_ARTIFACT_UNVERIFIABLE"
         );
     }
 }
@@ -1498,6 +1546,38 @@ impl PgRepository {
                 readiness_check("not_evaluated", Some("POSTGRES_UNAVAILABLE")),
             );
         }
+
+        // Check the selected production row without exposing its version or
+        // manifest in the public readiness response.
+        let production_classifier = if postgres_ready {
+            match tokio::time::timeout(
+                READINESS_DEPENDENCY_TIMEOUT,
+                sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                    "SELECT model_version, artifact_checksum, manifest_uri FROM model_versions WHERE status = 'PRODUCTION' ORDER BY promoted_at DESC NULLS LAST, id DESC LIMIT 1",
+                )
+                .fetch_optional(&self.pool),
+            )
+            .await
+            {
+                Ok(Ok(Some((model_version, checksum, manifest_uri)))) =>
+                    production_classifier_readiness(
+                        &model_version,
+                        checksum.as_deref(),
+                        manifest_uri.as_deref(),
+                    ),
+                Ok(Ok(None)) => readiness_check(
+                    "not_ready",
+                    Some("PRODUCTION_CLASSIFIER_NOT_CONFIGURED"),
+                ),
+                _ => readiness_check(
+                    "not_ready",
+                    Some("PRODUCTION_CLASSIFIER_STATUS_UNAVAILABLE"),
+                ),
+            }
+        } else {
+            readiness_check("not_evaluated", Some("POSTGRES_UNAVAILABLE"))
+        };
+        checks.insert("production_classifier".to_owned(), production_classifier);
 
         let active_index = if postgres_ready {
             match tokio::time::timeout(

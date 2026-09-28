@@ -2219,6 +2219,7 @@ async fn readyz(State(state): State<AppState>) -> Response {
                     "qdrant_collection": { "status": "not_applicable" },
                     "ml_service": { "status": "not_applicable" },
                     "model_artifact": { "status": "not_applicable" },
+                    "production_classifier": { "status": "not_applicable" },
                     "ml_embedder": { "status": "not_applicable" }
                 },
                 "demo_ticket_count": store.tickets.len(),
