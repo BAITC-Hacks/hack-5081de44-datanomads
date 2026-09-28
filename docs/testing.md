@@ -140,6 +140,7 @@ model version и ручной переход в `DECISION` без promotion.
 - normal `TRAIN_CLASSIFIER` job builds a checksummed candidate artifact and never changes the production pointer;
 - shadow classification requires the registered artifact checksum and never falls back to production;
 - evaluation reads do not close the window, while expiry/manual close advance it to `DECISION`;
+- recurring-cycle tests verify the shared creation lock, wait for `DECISION`, and block missing/synthetic production evaluation data;
 - synthetic candidate artifacts are rejected by production shadow serving;
 - fake trainer is rejected when `PULSE_ENV=production`, and synthetic candidates cannot be promoted there;
 - candidate builder failure виден как `DATASET_BUILD_FAILED` и `background_jobs.FAILED`;

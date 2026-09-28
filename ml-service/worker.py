@@ -11,8 +11,11 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import sys
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,177 @@ from contracts import ContractValidationError, validate_document
 
 _CANDIDATE_DATASET_SCHEMA_VERSION = "candidate-training-dataset.v1"
 _CLASSIFIER_TRAINING_CONFIG_VERSION = "classifier-training.v1"
+_LEARNING_CYCLE_LOCK = "pulse109:classifier-learning-cycle"
+_LEARNING_CYCLE_SCHEDULE_VERSION = "global-classifier-cycle-v1"
+_LEARNING_SCHEDULER_CHECK_SECONDS = 60.0
+_DEFAULT_LEARNING_CYCLE_DURATION_HOURS = 168
+_DEFAULT_LEARNING_MIN_FEEDBACK_COUNT = 1
+_DEFAULT_LEARNING_PROMOTION_POLICY_VERSION = "policy-v1"
+_MAX_LEARNING_CYCLE_DURATION_HOURS = 87_600
+_LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class LearningCycleScheduleConfig:
+    enabled: bool
+    environment: str
+    collect_duration_hours: int
+    minimum_feedback_count: int
+    promotion_policy_version: str
+    evaluation_dataset_version: str | None
+
+
+def learning_cycle_schedule_config_from_env() -> LearningCycleScheduleConfig:
+    enabled_value = os.environ.get("PULSE_LEARNING_AUTO_CYCLES_ENABLED", "false")
+    enabled_normalized = enabled_value.strip().lower()
+    if enabled_normalized not in {"1", "true", "yes", "0", "false", "no"}:
+        raise RuntimeError("PULSE_LEARNING_AUTO_CYCLES_ENABLED must be true or false")
+    enabled = enabled_normalized in {"1", "true", "yes"}
+    environment = os.environ.get("PULSE_ENV", "demo").strip().lower()
+
+    if not enabled:
+        return LearningCycleScheduleConfig(
+            enabled=False,
+            environment=environment,
+            collect_duration_hours=_DEFAULT_LEARNING_CYCLE_DURATION_HOURS,
+            minimum_feedback_count=_DEFAULT_LEARNING_MIN_FEEDBACK_COUNT,
+            promotion_policy_version=_DEFAULT_LEARNING_PROMOTION_POLICY_VERSION,
+            evaluation_dataset_version=None,
+        )
+
+    collect_duration_hours = int(
+        os.environ.get(
+            "PULSE_LEARNING_CYCLE_DURATION_HOURS",
+            str(_DEFAULT_LEARNING_CYCLE_DURATION_HOURS),
+        )
+    )
+    if not 1 <= collect_duration_hours <= _MAX_LEARNING_CYCLE_DURATION_HOURS:
+        raise RuntimeError("PULSE_LEARNING_CYCLE_DURATION_HOURS is out of range")
+
+    minimum_feedback_count = int(
+        os.environ.get(
+            "PULSE_LEARNING_MIN_FEEDBACK_COUNT",
+            str(_DEFAULT_LEARNING_MIN_FEEDBACK_COUNT),
+        )
+    )
+    if minimum_feedback_count < 1:
+        raise RuntimeError("PULSE_LEARNING_MIN_FEEDBACK_COUNT must be positive")
+
+    promotion_policy_version = os.environ.get(
+        "PULSE_LEARNING_PROMOTION_POLICY_VERSION",
+        _DEFAULT_LEARNING_PROMOTION_POLICY_VERSION,
+    ).strip()
+    if not promotion_policy_version:
+        raise RuntimeError("PULSE_LEARNING_PROMOTION_POLICY_VERSION must not be empty")
+
+    evaluation_dataset_version = os.environ.get(
+        "PULSE_LEARNING_EVALUATION_DATASET_VERSION", ""
+    ).strip() or None
+    return LearningCycleScheduleConfig(
+        enabled=enabled,
+        environment=environment,
+        collect_duration_hours=collect_duration_hours,
+        minimum_feedback_count=minimum_feedback_count,
+        promotion_policy_version=promotion_policy_version,
+        evaluation_dataset_version=evaluation_dataset_version,
+    )
+
+
+async def start_next_recurring_learning_cycle(
+    pool: Any,
+    config: LearningCycleScheduleConfig,
+) -> str:
+    """Share Core's creation lock and wait for human terminal states before recurring."""
+
+    if not config.enabled:
+        return "DISABLED"
+    if config.environment not in {"demo", "development", "test", "unit", "production"}:
+        return "BLOCKED_UNSUPPORTED_ENVIRONMENT"
+    if test_fake_trainer_requested():
+        return "BLOCKED_TEST_FAKE_TRAINER_ENABLED"
+    if config.evaluation_dataset_version is None:
+        return "BLOCKED_EVALUATION_DATASET_NOT_CONFIGURED"
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1))",
+                _LEARNING_CYCLE_LOCK,
+            )
+            latest_cycle = await connection.fetchrow(
+                "SELECT state FROM learning_cycles ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE"
+            )
+            if latest_cycle is not None:
+                latest_state = str(latest_cycle["state"])
+                if latest_state in {"COLLECT", "TRAINING", "EVALUATE", "DECISION"}:
+                    return "ACTIVE_CYCLE"
+                if latest_state not in {"PROMOTED", "REJECTED", "INSUFFICIENT_FEEDBACK"}:
+                    return "BLOCKED_PREVIOUS_CYCLE_FAILED"
+
+            dataset = await connection.fetchrow(
+                "SELECT dv.is_synthetic, COUNT(dtl.ticket_id)::int AS linked_ticket_count "
+                "FROM dataset_versions dv LEFT JOIN dataset_ticket_links dtl "
+                "USING (dataset_version) WHERE dv.dataset_version = $1 "
+                "GROUP BY dv.is_synthetic",
+                config.evaluation_dataset_version,
+            )
+            if dataset is None:
+                return "BLOCKED_EVALUATION_DATASET_NOT_REGISTERED"
+            if int(dataset["linked_ticket_count"]) < 1:
+                return "BLOCKED_EVALUATION_DATASET_EMPTY"
+            if config.environment == "production" and bool(dataset["is_synthetic"]):
+                return "BLOCKED_SYNTHETIC_EVALUATION_DATASET"
+
+            production_model_version = await connection.fetchval(
+                "SELECT model_version FROM model_versions WHERE status = 'PRODUCTION' "
+                "ORDER BY created_at DESC LIMIT 1"
+            )
+            if not production_model_version:
+                return "BLOCKED_PRODUCTION_MODEL_UNAVAILABLE"
+
+            cycle_id = f"cycle-{uuid.uuid4().hex}"
+            candidate_model_version = f"classifier-candidate-{uuid.uuid4().hex}"
+            request_id = f"auto-cycle-{uuid.uuid4().hex}"
+            cycle_database_id = await connection.fetchval(
+                "INSERT INTO learning_cycles (cycle_id, state, collect_started_at, "
+                "collect_ends_at, production_model_version, candidate_model_version, "
+                "min_feedback_count, promotion_policy_version, manual_close_enabled, "
+                "frozen_evaluation_dataset_version) "
+                "VALUES ($1, 'COLLECT', now(), now() + make_interval(hours => $2), "
+                "$3, $4, $5, $6, FALSE, $7) RETURNING id",
+                cycle_id,
+                config.collect_duration_hours,
+                production_model_version,
+                candidate_model_version,
+                config.minimum_feedback_count,
+                config.promotion_policy_version,
+                config.evaluation_dataset_version,
+            )
+            await connection.execute(
+                "INSERT INTO learning_cycle_evaluation_tickets "
+                "(learning_cycle_id, dataset_version, ticket_id) "
+                "SELECT $1, $2, ticket_id FROM dataset_ticket_links "
+                "WHERE dataset_version = $2 ON CONFLICT DO NOTHING",
+                cycle_database_id,
+                config.evaluation_dataset_version,
+            )
+            await connection.execute(
+                "INSERT INTO audit_log (actor_id, action, entity_type, entity_id, "
+                "request_id, reason, metadata) VALUES ($1, 'CREATE_LEARNING_CYCLE', "
+                "'learning_cycle', $2, $3, 'automatic recurring schedule', $4)",
+                "learning-scheduler",
+                cycle_id,
+                request_id,
+                json.dumps(
+                    {
+                        "schedule_version": _LEARNING_CYCLE_SCHEDULE_VERSION,
+                        "scope": "global_classifier",
+                        "candidate_model_version": candidate_model_version,
+                        "evaluation_dataset_version": config.evaluation_dataset_version,
+                    }
+                ),
+            )
+            return "STARTED"
 
 
 def run_stdin_job(kind: str | None, payload: dict[str, Any]) -> int:
@@ -1024,10 +1198,27 @@ async def run_worker() -> None:
     if not database_url:
         raise RuntimeError("DATABASE_URL is required for the PostgreSQL worker")
     poll_interval = float(os.environ.get("WORKER_POLL_INTERVAL", "1.0"))
+    schedule_config = learning_cycle_schedule_config_from_env()
     pool = await asyncpg.create_pool(database_url, min_size=1, max_size=4)
+    loop = asyncio.get_running_loop()
+    next_schedule_check = 0.0
     try:
         while True:
             await advance_expired_learning_cycle(pool)
+            current_time = loop.time()
+            if schedule_config.enabled and current_time >= next_schedule_check:
+                schedule_status = await start_next_recurring_learning_cycle(
+                    pool,
+                    schedule_config,
+                )
+                if schedule_status == "STARTED":
+                    _LOGGER.info("automatic recurring learning cycle started")
+                elif schedule_status.startswith("BLOCKED_"):
+                    _LOGGER.warning(
+                        "automatic recurring learning cycle not started: %s",
+                        schedule_status,
+                    )
+                next_schedule_check = loop.time() + _LEARNING_SCHEDULER_CHECK_SECONDS
             job = await claim_job(pool)
             if job is None:
                 await asyncio.sleep(poll_interval)

@@ -4,13 +4,17 @@ import asyncio
 import json
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from app.services import make_services
 from worker import (
+    LearningCycleScheduleConfig,
     advance_expired_learning_cycle,
     evaluate_candidate_cycle,
     fail_candidate_dataset_build,
+    learning_cycle_schedule_config_from_env,
     persist_candidate_dataset_and_queue_training,
+    start_next_recurring_learning_cycle,
 )
 
 
@@ -67,6 +71,54 @@ class _Pool:
         evaluation_cycle: dict[str, Any] | None = None,
     ) -> None:
         self.connection = _Connection(cycle, evaluation_cycle)
+
+    def acquire(self) -> _AcquireContext:
+        return _AcquireContext(self.connection)
+
+
+class _SchedulerConnection:
+    def __init__(
+        self,
+        latest_state: str | None = None,
+        dataset: dict[str, Any] | None = None,
+        dataset_lookup_missing: bool = False,
+        production_model_version: str | None = "production-v1",
+    ) -> None:
+        self.latest_state = latest_state
+        self.dataset = dataset or {"is_synthetic": False, "linked_ticket_count": 4}
+        self.dataset_lookup_missing = dataset_lookup_missing
+        self.production_model_version = production_model_version
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetchval_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    def transaction(self) -> _AsyncContext:
+        return _AsyncContext()
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        self.fetchrow_calls.append((query, args))
+        if "ORDER BY created_at DESC, id DESC" in query:
+            return {"state": self.latest_state} if self.latest_state else None
+        if "FROM dataset_versions" in query:
+            return None if self.dataset_lookup_missing else self.dataset
+        raise AssertionError("unexpected scheduler fetchrow query")
+
+    async def fetchval(self, query: str, *args: Any) -> Any:
+        self.fetchval_calls.append((query, args))
+        if "SELECT model_version FROM model_versions" in query:
+            return self.production_model_version
+        if "INSERT INTO learning_cycles" in query:
+            return 99
+        raise AssertionError("unexpected scheduler fetchval query")
+
+    async def execute(self, query: str, *args: Any) -> str:
+        self.executed.append((query, args))
+        return "OK"
+
+
+class _SchedulerPool:
+    def __init__(self, connection: _SchedulerConnection) -> None:
+        self.connection = connection
 
     def acquire(self) -> _AcquireContext:
         return _AcquireContext(self.connection)
@@ -200,6 +252,187 @@ def _cycle(feedback_count: int) -> dict[str, Any]:
 
 
 class LearningCycleWorkerTests(unittest.TestCase):
+    @staticmethod
+    def _schedule_config(**overrides: Any) -> LearningCycleScheduleConfig:
+        settings: dict[str, Any] = {
+            "enabled": True,
+            "environment": "production",
+            "collect_duration_hours": 24,
+            "minimum_feedback_count": 3,
+            "promotion_policy_version": "policy-v1",
+            "evaluation_dataset_version": "evaluation-v3",
+        }
+        settings.update(overrides)
+        return LearningCycleScheduleConfig(**settings)
+
+    def test_schedule_config_is_opt_in_and_rejects_invalid_values(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"PULSE_LEARNING_CYCLE_DURATION_HOURS": "invalid-while-disabled"},
+            clear=True,
+        ):
+            config = learning_cycle_schedule_config_from_env()
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.collect_duration_hours, 168)
+        self.assertIsNone(config.evaluation_dataset_version)
+
+        with patch.dict(
+            "os.environ",
+            {"PULSE_LEARNING_AUTO_CYCLES_ENABLED": "sometimes"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must be true or false"):
+                learning_cycle_schedule_config_from_env()
+
+    def test_schedule_starts_one_audited_global_cycle_with_frozen_evaluation_set(self) -> None:
+        connection = _SchedulerConnection()
+        pool = _SchedulerPool(connection)
+
+        with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "false"}):
+            status = asyncio.run(
+                start_next_recurring_learning_cycle(pool, self._schedule_config())
+            )
+
+        self.assertEqual(status, "STARTED")
+        self.assertIn("pg_advisory_xact_lock", connection.executed[0][0])
+        self.assertEqual(connection.executed[0][1], ("pulse109:classifier-learning-cycle",))
+        cycle_query, cycle_args = next(
+            call for call in connection.fetchval_calls if "INSERT INTO learning_cycles" in call[0]
+        )
+        self.assertIn("manual_close_enabled", cycle_query)
+        self.assertTrue(cycle_args[0].startswith("cycle-"))
+        self.assertEqual(cycle_args[1:3], (24, "production-v1"))
+        self.assertTrue(cycle_args[3].startswith("classifier-candidate-"))
+        self.assertEqual(cycle_args[4:], (3, "policy-v1", "evaluation-v3"))
+
+        freeze_query, freeze_args = connection.executed[1]
+        self.assertIn("INSERT INTO learning_cycle_evaluation_tickets", freeze_query)
+        self.assertEqual(freeze_args, (99, "evaluation-v3"))
+        audit_query, audit_args = connection.executed[2]
+        self.assertIn("CREATE_LEARNING_CYCLE", audit_query)
+        self.assertEqual(audit_args[0], "learning-scheduler")
+        audit_metadata = json.loads(audit_args[3])
+        self.assertEqual(audit_metadata["scope"], "global_classifier")
+        self.assertEqual(audit_metadata["schedule_version"], "global-classifier-cycle-v1")
+        self.assertEqual(audit_metadata["evaluation_dataset_version"], "evaluation-v3")
+        self.assertFalse(any("UPDATE model_versions" in query for query, _ in connection.executed))
+
+    def test_schedule_waits_for_human_decision_and_stops_after_cycle_failures(self) -> None:
+        for state, expected in (
+            ("DECISION", "ACTIVE_CYCLE"),
+            ("TRAINING_FAILED", "BLOCKED_PREVIOUS_CYCLE_FAILED"),
+            ("DATASET_BUILD_FAILED", "BLOCKED_PREVIOUS_CYCLE_FAILED"),
+        ):
+            with self.subTest(state=state):
+                connection = _SchedulerConnection(latest_state=state)
+                with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "false"}):
+                    status = asyncio.run(
+                        start_next_recurring_learning_cycle(
+                            _SchedulerPool(connection),
+                            self._schedule_config(),
+                        )
+                    )
+                self.assertEqual(status, expected)
+                self.assertEqual(len(connection.executed), 1)
+                self.assertIn("pg_advisory_xact_lock", connection.executed[0][0])
+                self.assertFalse(
+                    any("INSERT INTO learning_cycles" in query for query, _ in connection.fetchval_calls)
+                )
+
+    def test_schedule_only_repeats_from_approved_terminal_cycle_states(self) -> None:
+        for state in ("PROMOTED", "REJECTED", "INSUFFICIENT_FEEDBACK"):
+            with self.subTest(state=state):
+                connection = _SchedulerConnection(latest_state=state)
+                with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "false"}):
+                    status = asyncio.run(
+                        start_next_recurring_learning_cycle(
+                            _SchedulerPool(connection),
+                            self._schedule_config(),
+                        )
+                    )
+                self.assertEqual(status, "STARTED")
+
+    def test_schedule_blocks_synthetic_or_unregistered_production_evaluation_data(self) -> None:
+        synthetic_connection = _SchedulerConnection(
+            dataset={"is_synthetic": True, "linked_ticket_count": 4}
+        )
+        empty_connection = _SchedulerConnection(
+            dataset={"is_synthetic": False, "linked_ticket_count": 0}
+        )
+        unregistered_connection = _SchedulerConnection(dataset_lookup_missing=True)
+
+        with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "false"}):
+            synthetic_status = asyncio.run(
+                start_next_recurring_learning_cycle(
+                    _SchedulerPool(synthetic_connection),
+                    self._schedule_config(),
+                )
+            )
+            empty_status = asyncio.run(
+                start_next_recurring_learning_cycle(
+                    _SchedulerPool(empty_connection),
+                    self._schedule_config(),
+                )
+            )
+            unregistered_status = asyncio.run(
+                start_next_recurring_learning_cycle(
+                    _SchedulerPool(unregistered_connection),
+                    self._schedule_config(),
+                )
+            )
+        self.assertEqual(synthetic_status, "BLOCKED_SYNTHETIC_EVALUATION_DATASET")
+        self.assertEqual(empty_status, "BLOCKED_EVALUATION_DATASET_EMPTY")
+        self.assertEqual(unregistered_status, "BLOCKED_EVALUATION_DATASET_NOT_REGISTERED")
+        for connection in (synthetic_connection, empty_connection, unregistered_connection):
+            self.assertFalse(
+                any("INSERT INTO learning_cycles" in query for query, _ in connection.fetchval_calls)
+            )
+
+        no_production_model = _SchedulerConnection(production_model_version=None)
+        with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "false"}):
+            no_production_status = asyncio.run(
+                start_next_recurring_learning_cycle(
+                    _SchedulerPool(no_production_model),
+                    self._schedule_config(),
+                )
+            )
+        self.assertEqual(no_production_status, "BLOCKED_PRODUCTION_MODEL_UNAVAILABLE")
+        self.assertFalse(
+            any("INSERT INTO learning_cycles" in query for query, _ in no_production_model.fetchval_calls)
+        )
+
+        no_dataset = _SchedulerConnection()
+        with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "false"}):
+            no_dataset_status = asyncio.run(
+                start_next_recurring_learning_cycle(
+                    _SchedulerPool(no_dataset),
+                    self._schedule_config(evaluation_dataset_version=None),
+                )
+            )
+        self.assertEqual(no_dataset_status, "BLOCKED_EVALUATION_DATASET_NOT_CONFIGURED")
+        self.assertEqual(no_dataset.fetchrow_calls, [])
+
+    def test_disabled_or_fake_trainer_schedule_does_not_create_a_cycle(self) -> None:
+        connection = _SchedulerConnection()
+        disabled_status = asyncio.run(
+            start_next_recurring_learning_cycle(
+                _SchedulerPool(connection),
+                self._schedule_config(enabled=False),
+            )
+        )
+        self.assertEqual(disabled_status, "DISABLED")
+        self.assertEqual(connection.fetchrow_calls, [])
+
+        with patch.dict("os.environ", {"PULSE_TEST_FAKE_TRAINER": "true"}):
+            fake_status = asyncio.run(
+                start_next_recurring_learning_cycle(
+                    _SchedulerPool(connection),
+                    self._schedule_config(),
+                )
+            )
+        self.assertEqual(fake_status, "BLOCKED_TEST_FAKE_TRAINER_ENABLED")
+        self.assertEqual(connection.fetchrow_calls, [])
+
     def test_expired_evaluation_window_advances_to_decision_before_collect(self) -> None:
         pool = _Pool(
             _cycle(feedback_count=3),

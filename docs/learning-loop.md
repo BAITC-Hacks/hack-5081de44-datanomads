@@ -147,6 +147,29 @@ The configured evaluation dataset version must already be registered in
 to `learning_cycle_evaluation_tickets` when the cycle is created. A reviewer
 may override the version in the cycle creation request.
 
+## Automatic recurring schedule
+
+The ML worker can start one global classifier cycle automatically when
+`PULSE_LEARNING_AUTO_CYCLES_ENABLED=true`. It defaults to disabled. The worker
+uses the same COLLECT duration, minimum feedback count, promotion policy version
+and frozen evaluation dataset settings as Core; every scheduled start snapshots
+the current production model and frozen evaluation ticket IDs and writes an
+audit event as `learning-scheduler`.
+
+The schedule starts the first cycle only when a production model and a registered
+evaluation dataset with linked tickets are available. Production refuses a
+synthetic evaluation dataset. It starts the next cycle only after
+`PROMOTED`, `REJECTED` or `INSUFFICIENT_FEEDBACK`; it waits while a cycle is
+active or in `DECISION`, and it stops after dataset/training failures for an
+operator to review. The scheduler and manual Core endpoint share the same
+PostgreSQL advisory lock, so two workers or a manager request cannot create
+overlapping cycles. Evaluation remains a separate persisted `EVALUATE` window
+that begins after candidate training and ends before reviewer decision.
+
+The schedule is global because this classifier currently has one serving
+production version. No region/topic cycle configuration is exposed until there
+is an operational reason to train independent models for those slices.
+
 The PostgreSQL worker checks expired COLLECT cycles on each poll. Below the
 feedback threshold it records `INSUFFICIENT_FEEDBACK` without creating a
 candidate or job. Otherwise it queues `BUILD_CANDIDATE_DATASET` with validated

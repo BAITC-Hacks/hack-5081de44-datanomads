@@ -26,6 +26,10 @@
   version manifest. Shadow candidates are loaded on demand only when classify
   receives an explicit model version and expected artifact checksum; there is
   no fallback to the configured production classifier.
+- The PostgreSQL worker can opt into one global recurring classifier cycle with
+  `PULSE_LEARNING_AUTO_CYCLES_ENABLED=true`. It waits for an eligible terminal
+  state, a registered frozen evaluation dataset and a production model; it does
+  not enable the test fake trainer or bypass human promotion.
 
 Это честный deterministic demo baseline, а не утверждение о качестве на
 реальном dataset 109. `artifacts/manifest.json` явно содержит
