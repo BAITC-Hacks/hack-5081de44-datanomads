@@ -604,16 +604,9 @@ button:disabled {
 .ticket-detail.detail.panel {
   position: sticky;
   top: calc(var(--topbar) + 16px);
-  max-height: calc(100dvh - var(--topbar) - 32px);
+  max-height: var(--operator-detail-height, calc(100dvh - var(--topbar) - 32px));
   min-width: 0;
   overflow: hidden;
-}
-
-/* The detail card starts below the banner, heading and summary on wide screens. */
-@media (min-width: 1181px) {
-  .ticket-detail.detail.panel {
-    max-height: calc(100dvh - 360px);
-  }
 }
 
 .detail-header.detail-head {

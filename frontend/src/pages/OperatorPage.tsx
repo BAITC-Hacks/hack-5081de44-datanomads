@@ -1,5 +1,5 @@
 import { formatUiDateTime, localeTag, translateUi } from '../uiSettings'
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { loadContextHandoffPackage, loadOutcomeVerification, loadRelatedTicketDetail, loadRoutingFeedback, previewTicketWithContext, submitDecision, submitOutcomeVerification, submitRelationFeedback, submitRoutingFeedback } from '../api/client'
 import type { DashboardData, ContextHandoffPackage, OutcomeVerificationSnapshot, OutcomeVerificationState, Priority, RelatedTicketDetail, RelationSuggestionSnapshot, RoutingFeedbackRecord, RuleProvenance, Ticket } from '../types'
 import { Icon } from '../components/Icon'
@@ -144,6 +144,7 @@ export function OperatorPage({ tickets, overview, taxonomy, onDataChange, onToas
 
 function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationFeedback, onOpenRelated }: { ticket: Ticket; taxonomy: DashboardData['filterOptions']; open: boolean; onClose: () => void; onDecision: (ticketId: string, decision: { status: 'confirmed' | 'corrected'; topic?: string; service?: string; priority?: string }) => Promise<void>; onRelationFeedback: (ticketId: string, relatedTicketId: string, relation: 'DUPLICATE' | 'REPEAT' | 'SIMILAR' | 'UNRELATED', decision: 'CONFIRMED' | 'REJECTED', suggestion?: RelationSuggestionSnapshot) => Promise<void>; onOpenRelated: (ticketId: string, matchedFactors: string[], currentTicket: Ticket) => void }) {
   const contextRequestId = useRef(0)
+  const detailRef = useRef<HTMLElement>(null)
   const [correctionOpen, setCorrectionOpen] = useState(false)
   const [contextAnswer, setContextAnswer] = useState('')
   const [contextResult, setContextResult] = useState<Ticket | null>(null)
@@ -193,6 +194,33 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     ]
     return Array.from(new Map(options.map((option) => [option[1], option])).values())
   }, [taxonomy.services, ticket.service])
+  useLayoutEffect(() => {
+    const detail = detailRef.current
+    if (!detail) return
+
+    let frame: number | undefined
+    const updateHeight = () => {
+      // The card starts below the summary and later sticks under the topbar.
+      const availableHeight = window.innerHeight - detail.getBoundingClientRect().top - 16
+      detail.style.setProperty('--operator-detail-height', `${Math.max(160, availableHeight)}px`)
+    }
+    const scheduleUpdate = () => {
+      if (frame !== undefined) return
+      frame = window.requestAnimationFrame(() => {
+        frame = undefined
+        updateHeight()
+      })
+    }
+
+    updateHeight()
+    window.addEventListener('scroll', scheduleUpdate, { passive: true })
+    window.addEventListener('resize', scheduleUpdate)
+    return () => {
+      window.removeEventListener('scroll', scheduleUpdate)
+      window.removeEventListener('resize', scheduleUpdate)
+      if (frame !== undefined) window.cancelAnimationFrame(frame)
+    }
+  }, [])
   useEffect(() => {
     contextRequestId.current += 1
     setTopic(ticket.topic)
@@ -223,7 +251,7 @@ function TicketDetail({ ticket, taxonomy, open, onClose, onDecision, onRelationF
     }
   }
 
-  return <aside className={`ticket-detail detail panel ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
+  return <aside ref={detailRef} className={`ticket-detail detail panel ${open ? 'ticket-detail-open' : ''}`} aria-label={`Детали обращения ${ticket.id}`}>
     <div className="detail-header detail-head"><div><div className="detail-overline"><span className={`status-indicator ${ticket.status}`} />{translateUi(ticket.status === 'new' ? 'Требует решения' : ticket.status === 'confirmed' ? 'Подтверждено' : 'Исправлено')}</div><h2>{ticket.id}</h2></div><button className="icon-button icon-btn detail-close" aria-label={translateUi("Закрыть детали")} onClick={onClose}><Icon name="close" size={18} /></button></div>
     <div className="detail-scroll">
       <div className="original-text-block detail-section"><div className="field-label">{translateUi("Оригинальный текст")} <span className="language-chip">{translateUi(languageLabel(ticket.language))}</span></div><p>«{ticket.originalText}»</p><div className="source-line">{translateUi(ticket.channel)} · {formatUiDateTime(ticket.createdAt)} · {translateUi(ticket.region)}{ticket.externalRef && ` · № ${ticket.externalRef}`}</div></div>
