@@ -489,7 +489,7 @@ export function CleanForecastPage({ forecast, history, previousForecast, reforec
     ? 'Seasonal Naive · сезонная базовая линия'
     : model ?? 'не указана'
   const sourceLabel = source === 'postgres+ml' || source === 'postgres'
-    ? 'Операционные данные'
+    ? 'Загруженные обращения'
     : source === 'deterministic-demo'
       ? 'Демо-данные'
       : source ?? 'не указан'
