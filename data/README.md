@@ -71,7 +71,7 @@ minimization, and precise coordinates are omitted from the safe layer.
 The committed fixture is synthetic and must not be presented as operational
 metrics. It contains 160 normalized rows, both `RU` and `KZ`, all 20 regions,
 all 16 topics and all seven source IDs. Its immutable manifest is
-`manifests/demo-2026-09-21.json`.
+`manifests/demo-2026-09-29.json`.
 
 Regenerate and verify it:
 

@@ -376,7 +376,7 @@ class ImportCliTests(unittest.TestCase):
 
 class DemoFixtureTests(unittest.TestCase):
     def test_manifest_and_fixture_coverage(self) -> None:
-        manifest_path = ROOT / "data" / "manifests" / "demo-2026-09-21.json"
+        manifest_path = ROOT / "data" / "manifests" / "demo-2026-09-29.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertTrue(manifest["synthetic"])
         self.assertGreaterEqual(manifest["coverage"]["region_count"], 20)

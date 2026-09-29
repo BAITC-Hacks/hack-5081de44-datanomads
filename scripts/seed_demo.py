@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 
 DATA_ROOT = Path("/data")
-MANIFEST_PATH = DATA_ROOT / "manifests/demo-2026-09-21.json"
+MANIFEST_PATH = DATA_ROOT / "manifests/demo-2026-09-29.json"
 CORE_URL = os.environ.get("CORE_URL", "http://core-api:8080").rstrip("/")
 
 
@@ -50,7 +50,7 @@ def main() -> None:
         "source_system": "pulse109_demo",
         "source_uri": "synthetic://pulse109/demo",
         "dataset_version": manifest["dataset_version"],
-        "manifest_uri": "data/manifests/demo-2026-09-21.json",
+        "manifest_uri": "data/manifests/demo-2026-09-29.json",
         "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "is_synthetic": True,
         "tickets": tickets,

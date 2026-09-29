@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -25,8 +25,9 @@ from data.schemas.taxonomy import (
 )
 
 
-DATASET_VERSION = "demo-2026-09-21.v1"
-GENERATED_AT = "2026-09-21T00:00:00Z"
+DATASET_VERSION = "demo-2026-09-29.v1"
+GENERATED_AT = "2026-09-29T00:00:00Z"
+LAST_TICKET_DATE = datetime(2026, 9, 28, tzinfo=timezone.utc)
 SEED = 109
 SOURCE_SYSTEMS = tuple(SOURCE_DISPLAY_NAMES)
 
@@ -40,6 +41,8 @@ def _topic_text(topic: Mapping[str, str], language: str, index: int) -> str:
 def _raw_rows() -> List[Mapping[str, Any]]:
     rows: List[Mapping[str, Any]] = []
     for index in range(1, 161):
+        created_at = LAST_TICKET_DATE - timedelta(days=160 - index)
+        created_at = created_at.replace(hour=index % 24)
         region = REGION_DEFINITIONS[(index - 1) % len(REGION_DEFINITIONS)]
         topic = TOPIC_DEFINITIONS[((index - 1) * 5) % len(TOPIC_DEFINITIONS)]
         language = "RU" if index % 2 else "KZ"
@@ -55,7 +58,7 @@ def _raw_rows() -> List[Mapping[str, Any]]:
                 "external_ticket_id": f"demo-{index:04d}",
                 "source_system": source_system,
                 "region_id": region_label,
-                "created_at": f"2026-{((index - 1) % 12) + 1:02d}-{((index - 1) % 27) + 1:02d}T{index % 24:02d}:00:00Z",
+                "created_at": created_at.isoformat().replace("+00:00", "Z"),
                 "original_text": _topic_text(topic, language, index),
                 "language": language,
                 "topic_raw": topic["name_kk"] if language == "KZ" else topic["name_ru"],
@@ -182,7 +185,7 @@ def generate(output_dir: Path) -> Mapping[str, Any]:
         },
         "files": files,
     }
-    manifest_path = manifest_dir / "demo-2026-09-21.json"
+    manifest_path = manifest_dir / "demo-2026-09-29.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
 

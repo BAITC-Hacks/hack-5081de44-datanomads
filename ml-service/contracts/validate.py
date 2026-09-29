@@ -36,7 +36,7 @@ def validate_demo_artifacts() -> list[str]:
     if data_schema != shared_schema:
         raise ValueError("Data UnifiedTicket schema differs from the shared v1 contract")
 
-    dataset_manifest = REPOSITORY_ROOT / "data/manifests/demo-2026-09-21.json"
+    dataset_manifest = REPOSITORY_ROOT / "data/manifests/demo-2026-09-29.json"
     _validate_file(dataset_manifest, "DatasetManifest")
     checked.append("DatasetManifest")
 

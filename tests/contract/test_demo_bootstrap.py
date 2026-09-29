@@ -30,7 +30,7 @@ def load_seed_module():
 class DemoBootstrapTests(unittest.TestCase):
     def test_seed_payload_is_deterministic_and_repeat_import_is_accepted(self) -> None:
         seed_demo = load_seed_module()
-        manifest_path = ROOT / "data" / "manifests" / "demo-2026-09-21.json"
+        manifest_path = ROOT / "data" / "manifests" / "demo-2026-09-29.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         record_count = manifest["record_count"]
         responses = iter(

@@ -72,7 +72,7 @@ Run the independent artifact check from the repository root:
 ```bash
 cd ml-service
 python -m contracts.validate --check-demo
-python -m contracts.validate --schema DatasetManifest --input ../data/manifests/demo-2026-09-21.json
+python -m contracts.validate --schema DatasetManifest --input ../data/manifests/demo-2026-09-29.json
 ```
 
 Validation failures report the schema, field path and failed rule without
