@@ -1,138 +1,132 @@
 # Pulse 109
 
-Pulse 109 — AI-слой над существующей системой 109 для маршрутизации обращений,
-ассистирования оператору и Situation Center. Официальные статус обращения,
-исполнитель, история действий и отправка ответа остаются во внешней системе
-109; Pulse хранит локальное зеркало разрешённых данных, ML predictions,
-operator feedback, аналитику, alerts, forecasts и версии моделей.
+## 1. Кратко о проекте
 
-## P0 status
+Pulse 109 — демонстрационный AI-слой для системы приёма обращений 109. Он
+помогает оператору проверить тему, приоритет и адресата обращения, а
+руководителю — увидеть поток, сигналы и прогноз. Официальный статус,
+исполнитель и отправка ответа остаются во внешней системе 109.
 
-| Контур | Статус в репозитории |
-| --- | --- |
-| Compose topology, Nginx gateway и env contract | demo-контур реализован |
-| Operator Workspace / Situation Center | demo-контур, графики и рабочие действия реализованы в `frontend/` |
-| Rust Core API | demo-контур реализован в `backend/` |
-| Python ML runtime/worker | deterministic classifier/embedder, StatsForecast baseline и PostgreSQL worker; реальный trainer пока отключён |
-| Data importers и demo fixtures | import/quarantine и fixtures реализованы в `data/` |
-| OpenAPI и инженерные контракты | Core path/method coverage проверяется контрактным тестом; ML схема экспортирована из FastAPI |
+Инженерная задача — связать подсказку модели с проверяемым решением человека
+и аналитикой, сохраняя границу доступа к данным. Pulse хранит собственное
+состояние в PostgreSQL, использует Qdrant как индекс векторов и обращается к
+ML только через Core API. Показ основан на 160 синтетических обращениях;
+качество на реальных данных 109 этим demo не доказано.
 
-Compose-контракт запускает сервисы на frontend `0.0.0.0:5174`, Core API
-`0.0.0.0:8080` и ML service `0.0.0.0:8000` внутри Compose. Локальный доступ
-идёт через Nginx на `127.0.0.1:PULSE_HTTP_PORT`.
+## 2. Технологии
 
-## Быстрый запуск demo
+| Контур | Что используется | Роль |
+| --- | --- | --- |
+| Core | Rust, Axum, SQLx, Tokio | HTTP API, auth/RBAC, транзакции, аудит и бизнес-правила |
+| Frontend | React 19, TypeScript, Vite, ECharts | Рабочее место и обзор через Core API |
+| Data | PostgreSQL 16, Qdrant | Состояние Pulse и отдельный vector index |
+| AI/ML | Python 3.12, FastAPI, StatsForecast | Внутренние inference, embeddings, forecast и evaluation |
+| Infra | Docker Compose, Nginx | Воспроизводимый demo stack и единый HTTP gateway |
 
-Требуется Docker Engine с Compose v2.
+По умолчанию классификация RU/KZ и embeddings детерминированные. Прогноз
+использует baseline `SeasonalNaive`; optional LLM отключён. Репозиторий
+содержит контракты и процесс обучения candidate, но не заявляет обученную
+production модель или подтверждённые метрики качества на обращениях заказчика.
+
+## 3. Архитектура
+
+```mermaid
+flowchart LR
+    Browser[Браузер] --> Gateway[Nginx gateway]
+    Gateway --> Frontend[React frontend]
+    Gateway --> Core[Rust Core API]
+    Core -->|источник истины| Postgres[(PostgreSQL)]
+    Core -->|поиск похожих| Qdrant[(Qdrant)]
+    Core -->|внутренний inference| ML[FastAPI ML service]
+    Worker[ML worker] -->|jobs и результаты| Postgres
+    Worker --> ML
+```
+
+Nginx направляет `/api/*` в Core и не публикует `/internal/*`. Frontend не
+обращается к ML service напрямую. В Compose сервис базы данных называется
+`postgres`; внутренний адрес Core — `postgres:5432`, а не адрес хоста. Qdrant
+хранит векторы и минимальный allow-listed payload, поэтому индекс можно
+восстановить из PostgreSQL.
+
+```mermaid
+sequenceDiagram
+    participant O as Оператор
+    participant C as Core API
+    participant M as ML service
+    participant P as PostgreSQL
+    C->>M: Текст и разрешённый контекст для inference
+    M-->>C: Тема, confidence, alternatives
+    C->>P: Сохранить AI prediction
+    C-->>O: Подсказка и необходимость проверки
+    O->>C: Подтвердить или исправить
+    C->>P: Сохранить отдельное operator decision и feedback
+    Note over C,P: Feedback не запускает online retraining
+```
+
+### Архитектурные решения
+
+1. **Core — единственная граница доступа.** Здесь проверяются роли, входные
+   данные и бизнес-операции; ML service остаётся внутренним вычислительным
+   компонентом. Это не позволяет frontend обходить auth/RBAC.
+2. **PostgreSQL и Qdrant решают разные задачи.** Решения, версии моделей,
+   feedback и audit живут в PostgreSQL; Qdrant ускоряет поиск похожих
+   обращений и не дублирует полный текст или PII.
+3. **Выпуск модели контролирует человек.** Feedback проходит `COLLECT →
+   TRAINING → EVALUATE → human PROMOTE/REJECT`. Candidate не заменяет
+   production автоматически; версии и evidence сохраняются отдельно.
+
+Подробности: [архитектура](docs/architecture.md),
+[контракты данных](docs/data-contract.md),
+[learning loop](docs/learning-loop.md) и [границы PII](docs/privacy.md).
+
+## 4. Запуск и деплой
+
+### Локальный demo
+
+Нужны Docker Engine и Compose v2. Из корня репозитория:
 
 ```bash
 cp .env.example .env
 docker compose --profile demo config
-docker compose --profile demo up --build
-```
-
-`demo-seed` автоматически сверяет checked-in synthetic fixture с manifest и
-идемпотентно импортирует её в PostgreSQL/Qdrant при запуске demo profile.
-Nginx и ML worker ждут успешного seed, поэтому UI не открывается до появления
-начальных данных.
-
-В другом терминале:
-
-```bash
+docker compose --profile demo up --build -d
+docker compose --profile demo ps
 scripts/smoke
 ```
 
-Открыть `http://localhost:8080`. Health endpoints: `/healthz` и `/readyz`.
-OpenAPI-контракты находятся в `docs/openapi/`; Swagger/OpenAPI UI не
-проксируется наружу public contour. В Compose ML Swagger доступен локально на
-`http://127.0.0.1:8000/docs`, OpenAPI JSON — на
-`http://127.0.0.1:8000/openapi.json`; Core route index — на
-`http://127.0.0.1:8081/api/v1/docs`. Эти порты привязаны только к loopback, а
-публичный Nginx возвращает 404 для документационных путей.
+Откройте `http://localhost:8080`. `demo-seed` проверяет manifest и загружает
+синтетические обращения; успешный контейнер завершится с кодом `0`.
+`/healthz` сообщает о живом процессе, `/readyz` — о готовности зависимостей,
+миграций и модели. Повторный запуск seed идемпотентен.
 
-Для полного локального reset PostgreSQL, Qdrant и ML artifact volume нужен
-явный флаг:
+Ключевые значения из [`.env.example`](.env.example):
+
+| Переменная | Demo default | Значение |
+| --- | --- | --- |
+| `PULSE_HTTP_PORT` | `8080` | Nginx на `127.0.0.1` хоста |
+| `POSTGRES_DB` | `pulse` | База PostgreSQL |
+| `POSTGRES_USER` | `pulse` | Demo пользователь |
+| `POSTGRES_PASSWORD` | `pulse_demo_only` | Только локальный demo пароль |
+| `POSTGRES_PORT` | `5432` | Loopback порт хоста; внутри Compose всегда `postgres:5432` |
+| `QDRANT_HTTP_PORT` | `6333` | Loopback порт vector index |
+| `PULSE_DEV_AUTH` | `true` | Выбор роли для demo, без внешней идентификации |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Разрешённый browser origin |
+
+`.env` не коммитится. Для остановки без удаления данных:
 
 ```bash
-PULSE_CONFIRM_RESET=1 scripts/demo-reset
+docker compose --profile demo down
 ```
 
-Команда удаляет локальные volumes и заново собирает demo stack.
+### Выделенный сервер
 
-## Архитектура
+Compose привязывает host ports к `127.0.0.1`. Для показа по сети запустите
+этот же demo stack на сервере и поставьте перед ним HTTPS ingress с
+ограничением доступа для приглашённых зрителей. Не публикуйте напрямую Core,
+ML, PostgreSQL или Qdrant; `PULSE_DEV_AUTH=true` не заменяет идентификацию.
+Пошаговый порядок, пример reverse proxy, обновление и проверки приведены в
+[deployment guide](docs/deployment.md).
 
-```text
-Browser → Nginx → React frontend
-                 → Rust Core API → PostgreSQL (source of truth)
-                                  → Qdrant (vector index)
-                                  → Python ML service
-ML worker → PostgreSQL-backed jobs (profile demo)
-```
-
-Frontend никогда не вызывает ML service напрямую. Core API выполняет
-валидацию, auth/RBAC, транзакции, analytics, alert/learning lifecycle и
-экспорт. ML service отвечает только за inference, embeddings, anomaly,
-forecast, training/evaluation и model metadata.
-
-Основной реализованный demo vertical slice:
-
-```text
-demo ticket → assist preview → AI prediction → operator confirm/correct
-→ persisted feedback → analytics/alerts → controlled learning cycle → export
-```
-
-Controlled Learning Loop не является online self-learning:
-`COLLECT → versioned dataset → offline TRAIN → shadow EVALUATE → human
-PROMOTE/REJECT`. Candidate не заменяет production автоматически.
-До подключения реального trainer цикл завершается явным
-`TRAINER_NOT_CONFIGURED`; тестовый candidate не используется в обычном Compose.
-
-## Документация
-
-- [`docs/architecture.md`](docs/architecture.md) — сервисные границы и потоки;
-- [`docs/data-contract.md`](docs/data-contract.md) — UnifiedTicket, import и
-  quality gate;
-- [`docs/contracts.md`](docs/contracts.md) — versioned Data/ML artifact contracts
-  and standalone validation;
-- [`docs/vko-109-data-audit.md`](docs/vko-109-data-audit.md) — границы
-  предоставленной реальной выгрузки Восточно-Казахстанской области;
-- [`docs/privacy.md`](docs/privacy.md) — PII, RBAC, logs и LLM boundary;
-- [`docs/model-registry.md`](docs/model-registry.md) — immutable artifacts;
-- [`docs/learning-loop.md`](docs/learning-loop.md) — lifecycle candidate model;
-- [`docs/testing.md`](docs/testing.md) — проверки и acceptance evidence;
-- [`docs/deployment.md`](docs/deployment.md) — demo/production checklist;
-- [`docs/openapi/core.openapi.yaml`](docs/openapi/core.openapi.yaml) и
-  [`docs/openapi/ml.openapi.yaml`](docs/openapi/ml.openapi.yaml) — API contracts.
-
-## Ограничения и честный scope
-
-- Demo fixture — synthetic/deterministic, не реальная статистика и не замена
-  полного набора данных 20 регионов.
-- Предоставленная выгрузка Восточно-Казахстанской области пригодна для проверки
-  агрегатной динамики, но не содержит отдельного текста обращения или языка;
-  подробности в `docs/vko-109-data-audit.md`.
-- Без полного dataset нельзя честно утверждать held-out качество classifier,
-  embeddings, spike detector или forecast; такие метрики должны иметь
-  dataset/model/evaluation versions.
-- Подключение pretrained `multilingual-e5-base` и дообучение classifier/embedder
-  отложены по решению проекта. Demo retrieval использует deterministic
-  embeddings; качество поиска на реальных обращениях пока не подтверждено.
-- Seeded routing/priority mappings are `MANUAL` demo defaults, not official
-  109 rules. Seeded response templates have `approved=false`; operators see
-  `MANUAL_REQUIRED` until a reviewed template is explicitly approved.
-- Production identity gateway/JWT и контракт синхронизации изменённых
-  обращений внешней системы 109 не предоставлены. Demo RBAC использует
-  `PULSE_DEV_AUTH`; внешняя публикация Compose без trusted identity запрещена.
-- Forecast responses carry their own `forecast_model_version`; the embedding
-  version is never used as forecast metadata.
-- Optional LLM отключён по умолчанию; аналитика обязана работать через
-  allow-listed `QueryIntent` и parameterized SQL.
-- Compose demo — single-host среда с локальными volumes и placeholder
-  credentials, не production hardening.
-- Raw source files, secrets, PII и неманифестированные model artifacts не
-  коммитятся.
-
-## Проверки
+### Проверки и границы результата
 
 ```bash
 docker compose --profile demo config
@@ -141,8 +135,13 @@ npm run build --prefix frontend
 scripts/smoke
 ```
 
-Полный `docker compose ... up --build` зависит от доступного Docker Engine и
-локального image cache. В текущем Compose Core использует PostgreSQL как source
-of truth и Qdrant как vector index; deterministic in-memory store остаётся
-только явно выбранным режимом `PULSE_STORAGE=memory` для unit/API тестов.
-Synthetic demo не выдаётся за реальные данные или model quality.
+Для host-запуска Rust теста PDF-экспорта нужен `weasyprint`; runtime Docker
+image уже содержит его. Дополнительные уровни проверки описаны в
+[testing guide](docs/testing.md). OpenAPI: [Core](docs/openapi/core.openapi.yaml)
+и [ML](docs/openapi/ml.openapi.yaml). Карта остальных документов —
+[docs/README.md](docs/README.md).
+
+В demo есть 20 регионов, 16 тем и 160 синтетических RU/KZ обращений.
+Production identity, синхронизация с рабочей 109, официальный routing и
+проверенные метрики на данных заказчика пока требуют отдельных входных данных
+и интеграции. Нельзя использовать demo показатели как оценку реального качества.

@@ -1,4 +1,4 @@
-# Deployment
+# Развёртывание Pulse 109
 
 ## Demo/local
 
@@ -42,6 +42,97 @@ PULSE_CONFIRM_RESET=1 scripts/demo-reset
 Не запускайте reset в окружении с нужными данными. Raw dataset не монтируется
 в compose автоматически; demo fixture должен быть deterministic и
 обезличенным.
+
+## Demo на выделенном сервере через Docker
+
+Это способ показать **синтетический** проект на хакатоне. Для него нужны Linux
+сервер с Docker Engine и Compose v2, доменное имя, HTTPS сертификат и внешний
+reverse proxy с доступом только для приглашённых зрителей. Пример ниже
+использует Nginx на хосте; он направляет трафик в Compose Nginx на
+`127.0.0.1:8080`. У Compose все опубликованные порты уже привязаны к
+loopback. В firewall откройте только SSH и порты 80/443 для ingress.
+
+1. Получите репозиторий на сервере, перейдите в его корень и создайте
+   локальный `.env`:
+
+   ```bash
+   cp .env.example .env
+   chmod 600 .env
+   ```
+
+2. В `.env` замените `POSTGRES_PASSWORD=pulse_demo_only` на отдельный пароль
+   этого сервера и укажите точный browser origin, например
+   `CORS_ALLOWED_ORIGINS=https://demo.example.org`. Оставьте
+   `PULSE_ENV=demo`, `PULSE_DEV_AUTH=true` и
+   `OPTIONAL_LLM_PROVIDER=disabled`. Пароль, сертификат и `.env` не добавляйте
+   в Git. Если PostgreSQL volume уже инициализирован, смена переменной
+   `POSTGRES_PASSWORD` не меняет пароль внутри существующей БД: потребуется
+   отдельная управляемая ротация.
+
+3. Проверьте конфигурацию, запустите stack и дождитесь seed:
+
+   ```bash
+   docker compose --profile demo config --quiet
+   docker compose --profile demo up --build -d
+   docker compose --profile demo ps
+   scripts/smoke
+   ```
+
+   `demo-seed` должен завершиться с кодом `0`, а `scripts/smoke` — строкой
+   `Pulse 109 smoke checks passed.`. Проверка использует loopback на самом
+   сервере и не требует публичного URL.
+
+4. Настройте HTTPS ingress. Ниже фрагмент конфигурации **хостового** Nginx;
+   замените домен и пути к уже полученному сертификату. Создайте отдельный
+   файл Basic Auth (`htpasswd -cB /etc/nginx/pulse109.htpasswd demo` запускают
+   с правами администратора), проверьте `nginx -t` и перезагрузите Nginx.
+
+   ```nginx
+   server {
+       listen 80;
+       server_name demo.example.org;
+       return 301 https://$host$request_uri;
+   }
+
+   server {
+       listen 443 ssl;
+       server_name demo.example.org;
+       ssl_certificate /etc/letsencrypt/live/demo.example.org/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/demo.example.org/privkey.pem;
+
+       auth_basic "Pulse 109 demo";
+       auth_basic_user_file /etc/nginx/pulse109.htpasswd;
+
+       location / {
+           proxy_pass http://127.0.0.1:8080;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_http_version 1.1;
+           proxy_buffering off;
+           proxy_read_timeout 1h;
+       }
+   }
+   ```
+
+5. Проверьте, что HTTPS требует пароль, после входа открывается приложение, а
+   `/readyz` возвращает `ready`. Публичные `/internal/*`, `/docs` и
+   `/api/v1/docs` должны возвращать 404 через application gateway. Проверьте
+   сценарий [Demo Day](demo-brief-2026-09-29.md) до передачи ссылки жюри.
+
+Basic Auth ограничивает доступ ко **всему demo**, но роли внутри приложения
+по-прежнему выбираются посетителем: `PULSE_DEV_AUTH=true` не является
+production identity. На сервер загружается только synthetic fixture. Для
+работы с настоящими обращениями нужны внешний identity contract и отдельный
+защищённый контур.
+
+При обновлении сначала сохраните данные, если в demo появились нужные
+решения, затем выполните `git pull --ff-only`,
+`docker compose --profile demo up --build -d` и `scripts/smoke` на сервере.
+Миграции применяются при старте Core; обратная совместимость схемы должна быть
+проверена до отката. `scripts/demo-reset` удаляет volumes и для обновления не
+нужен.
 
 ## Сервисный контракт
 
@@ -94,7 +185,9 @@ prediction/decision разделения, model metadata или learning state �
 
 ## Rollback и восстановление
 
-- Core API/frontend/ML images versioned по commit SHA.
+- Demo Compose собирает локальные images с тегом `:local`; автоматического
+  rollback по commit SHA нет. Для контролируемого production отката нужны
+  отдельно сохранённые immutable images и проверенная совместимость миграций.
 - Production model откатывается на предыдущий verified `model_version`, а не
   заменой файла в mounted directory.
 - Rejected candidate не требует rollback production.

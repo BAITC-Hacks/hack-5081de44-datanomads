@@ -38,6 +38,10 @@ cargo fmt --manifest-path backend/Cargo.toml --all -- --check
 
 Проверяются schema/validation, RBAC, state transitions, transaction boundaries,
 error mapping и отсутствие смешения AI prediction/operator decision.
+Тесты PDF-экспорта вызывают `weasyprint` через `PULSE_WEASYPRINT_BIN` или
+системный `PATH`. В runtime Docker image renderer установлен; при запуске
+`cargo test` непосредственно на host его нужно установить отдельно. HTTP 500
+в этом тесте при отсутствии бинаря означает неполную тестовую среду.
 
 ### Frontend
 
