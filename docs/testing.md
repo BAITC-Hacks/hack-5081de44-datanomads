@@ -79,7 +79,8 @@ versions' measured backtest MAE and requires verified real-data provenance.
 `core.openapi.yaml` сверяется с методами Axum routes и Core route index;
 `ml.openapi.yaml` сверяется с `FastAPI.app.openapi()`. Smoke на запущенном
 стеке проверяет, что публичный Nginx возвращает 404 на docs paths. Локально
-ML Swagger и Core route index доступны на loopback-портах из `.env.example`.
+ML Swagger и Core route index доступны только внутри Compose-сети или при
+отдельном локальном запуске сервисов.
 Любое изменение request/response требует обновления схемы и обратного smoke
 check.
 
@@ -106,7 +107,7 @@ demo ticket → preview → prediction → operator confirm/correct
 Полный stateful acceptance-контур запускается через public Nginx gateway:
 
 ```bash
-PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py
+PULSE_BASE_URL=http://localhost:8012 python scripts/e2e_acceptance.py
 ```
 
 Для live PII sentinel и запрета утечки в логах запускайте smoke-проверку после
@@ -115,7 +116,7 @@ ML контейнеров и проверит их до завершения; ф
 `.tmp/`:
 
 ```bash
-PULSE_BASE_URL=http://localhost:8080 PULSE_ROLE_HEADER_PROBE=1 \
+PULSE_BASE_URL=http://localhost:8012 PULSE_ROLE_HEADER_PROBE=1 \
   python scripts/smoke_test.py --pii-probe --capture-compose-logs \
   --log-file .tmp/pulse109-compose.log --require-log-check
 ```
@@ -123,7 +124,7 @@ PULSE_BASE_URL=http://localhost:8080 PULSE_ROLE_HEADER_PROBE=1 \
 Для acceptance-gate с проверкой перезапуска Core и восстановления решения:
 
 ```bash
-PULSE_BASE_URL=http://localhost:8080 python scripts/e2e_acceptance.py --restart-core
+PULSE_BASE_URL=http://localhost:8012 python scripts/e2e_acceptance.py --restart-core
 ```
 
 Он импортирует уникальный synthetic dataset и повторяет его для проверки

@@ -11,7 +11,7 @@ Examples::
     python scripts/smoke_test.py --offline
 
     # Check a running demo stack.
-    PULSE_BASE_URL=http://localhost:8080 \
+    PULSE_BASE_URL=http://localhost:8012 \
       python scripts/smoke_test.py --log-file .tmp/pulse109-compose.log
 
 Optional live role checks use a JSON mapping of role to bearer token, for
@@ -988,7 +988,7 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--offline", action="store_true", help="skip live HTTP probes")
-    parser.add_argument("--base-url", default=os.getenv("PULSE_BASE_URL", "http://localhost:8080"))
+    parser.add_argument("--base-url", default=os.getenv("PULSE_BASE_URL", "http://localhost:8012"))
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
     parser.add_argument("--fixture", default=str(DEFAULT_FIXTURE))
     parser.add_argument("--compose-file", help="explicit compose file")

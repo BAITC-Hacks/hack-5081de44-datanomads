@@ -44,10 +44,10 @@ docker run --rm -p 8080:8080 pulse109-core
 - `GET /api/v1/models`, `GET/POST /api/v1/models/{model_id}` — model registry.
 - `GET /api/v1/openapi.json` и `/api/v1/docs` — OpenAPI-ish описание.
 
-В Compose Core route index доступен локально через
-`http://127.0.0.1:8081/api/v1/docs` (JSON также доступен на
-`/api/v1/openapi.json`). Порт привязан к loopback; публичный Nginx эти пути
-не проксирует.
+В Compose Core route index доступен только из внутренней сети по
+`http://core-api:8080/api/v1/docs` (JSON — по `/api/v1/openapi.json`).
+Публичный Nginx эти пути не проксирует. При отдельном локальном запуске Core
+те же пути доступны на его собственном порту 8080.
 
 В demo/test режиме auth использует `x-pulse-role:
 OPERATOR|MANAGER|ML_REVIEWER|ML_SERVICE|ADMIN` и необязательный `x-user-id`.

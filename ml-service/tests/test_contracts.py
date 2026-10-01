@@ -159,16 +159,14 @@ class SharedContractTests(unittest.TestCase):
             openapi_operations(published),
         )
 
-    def test_documentation_is_available_only_on_loopback_service_ports(self) -> None:
+    def test_only_gateway_is_published_on_loopback(self) -> None:
         compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
-        self.assertEqual(
-            compose["services"]["core-api"]["ports"],
-            ["127.0.0.1:${PULSE_CORE_HTTP_PORT:-8081}:8080"],
-        )
-        self.assertEqual(
-            compose["services"]["ml-service"]["ports"],
-            ["127.0.0.1:${ML_HTTP_PORT:-8000}:8000"],
-        )
+        published = {
+            service: config["ports"]
+            for service, config in compose["services"].items()
+            if config.get("ports")
+        }
+        self.assertEqual(published, {"nginx": ["127.0.0.1:${PULSE_HTTP_PORT:-8012}:80"]})
         self.assertEqual(ml_main.app.docs_url, "/docs")
         self.assertEqual(ml_main.app.redoc_url, "/redoc")
         self.assertEqual(ml_main.app.openapi_url, "/openapi.json")

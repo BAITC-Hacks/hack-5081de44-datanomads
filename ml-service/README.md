@@ -57,8 +57,10 @@ uvicorn app.main:app --reload --no-access-log
 ```
 
 Документация OpenAPI доступна на `http://127.0.0.1:8000/docs`, JSON-схема — на
-`http://127.0.0.1:8000/openapi.json`. Compose публикует этот порт только на
-loopback; публичный Nginx не проксирует `/docs`, `/redoc` или `/openapi.json`.
+`http://127.0.0.1:8000/openapi.json` при отдельном локальном запуске сервиса.
+Compose не публикует этот порт на хост; из внутренней сети доступны
+`http://ml-service:8000/docs` и `/openapi.json`. Публичный Nginx не
+проксирует `/docs`, `/redoc` или `/openapi.json`.
 
 ## Примеры
 

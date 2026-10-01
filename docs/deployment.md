@@ -3,7 +3,7 @@
 ## Demo/local
 
 Требования: Docker Engine и Compose v2, доступ к локальному registry/cache и
-свободные порты из `.env`. Запуск:
+свободный порт 8012 (или `PULSE_HTTP_PORT` из `.env`). Запуск:
 
 ```bash
 cp .env.example .env
@@ -21,8 +21,8 @@ seed. Поэтому первичный reindex не конкурирует с i
 После запуска:
 
 ```bash
-curl -fsS http://localhost:8080/healthz
-curl -fsS http://localhost:8080/readyz
+curl -fsS http://localhost:8012/healthz
+curl -fsS http://localhost:8012/readyz
 scripts/smoke
 ```
 
@@ -49,8 +49,8 @@ PULSE_CONFIRM_RESET=1 scripts/demo-reset
 сервер с Docker Engine и Compose v2, доменное имя, HTTPS сертификат и внешний
 reverse proxy с доступом только для приглашённых зрителей. Пример ниже
 использует Nginx на хосте; он направляет трафик в Compose Nginx на
-`127.0.0.1:8080`. У Compose все опубликованные порты уже привязаны к
-loopback. В firewall откройте только SSH и порты 80/443 для ingress.
+`127.0.0.1:8012`. Compose публикует только этот loopback-порт. В firewall
+откройте только SSH и порты 80/443 для ingress.
 
 1. Получите репозиторий на сервере, перейдите в его корень и создайте
    локальный `.env`:
@@ -82,6 +82,26 @@ loopback. В firewall откройте только SSH и порты 80/443 д�
    `Pulse 109 smoke checks passed.`. Проверка использует loopback на самом
    сервере и не требует публичного URL.
 
+   Если Core остаётся `unhealthy`, прочитайте JSON `/readyz` из контейнера:
+
+   ```bash
+   docker compose --profile demo exec -T core-api python3 - <<'PY'
+   import urllib.error
+   import urllib.request
+
+   try:
+       response = urllib.request.urlopen('http://127.0.0.1:8080/readyz')
+   except urllib.error.HTTPError as error:
+       response = error
+   print(response.read().decode())
+   PY
+   ```
+
+   При ответе 503 проверьте `checks` в теле ответа. В частности,
+   `PRODUCTION_CLASSIFIER_ARTIFACT_UNVERIFIABLE` означает недостоверный
+   production model pointer в существующем PostgreSQL volume; не удаляйте
+   volume для устранения этой ошибки без проверки сохранённых решений.
+
 4. Настройте HTTPS ingress. Ниже фрагмент конфигурации **хостового** Nginx;
    замените домен и пути к уже полученному сертификату. Создайте отдельный
    файл Basic Auth (`htpasswd -cB /etc/nginx/pulse109.htpasswd demo` запускают
@@ -104,7 +124,7 @@ loopback. В firewall откройте только SSH и порты 80/443 д�
        auth_basic_user_file /etc/nginx/pulse109.htpasswd;
 
        location / {
-           proxy_pass http://127.0.0.1:8080;
+           proxy_pass http://127.0.0.1:8012;
            proxy_set_header Host $host;
            proxy_set_header X-Real-IP $remote_addr;
            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -146,13 +166,13 @@ production identity. На сервер загружается только synth
 | `frontend` | 5174 | core-api |
 | `ml-worker` | — | postgres, qdrant, ml-service; profile `demo` |
 | `demo-seed` | — | core-api; profile `demo`, exits after import |
-| `nginx` | 80 → host `PULSE_HTTP_PORT` | frontend/core-api |
+| `nginx` | 80 → host `127.0.0.1:8012` (`PULSE_HTTP_PORT`) | frontend/core-api |
 
-ML docs и Core route index доступны локально на `ML_HTTP_PORT` и
-`PULSE_CORE_HTTP_PORT`; эти порты, как и Nginx, PostgreSQL и Qdrant, привязаны
-к `127.0.0.1`. Nginx возвращает 404 на docs paths и не проксирует внутренние
-ML endpoints. Сервисы внутри Compose продолжают обращаться друг к другу по
-внутренней сети. Для внешнего доступа нужен отдельный доверенный ingress.
+ML docs и Core route index доступны только из внутренней Compose-сети или при
+отдельном запуске сервисов. Nginx возвращает 404 на docs paths и не
+проксирует внутренние ML endpoints. Сервисы внутри Compose продолжают
+обращаться друг к другу по внутренней сети. Для внешнего доступа нужен
+отдельный доверенный ingress.
 
 ## Production checklist
 
@@ -161,8 +181,8 @@ ML endpoints. Сервисы внутри Compose продолжают обра�
 1. заменить demo password и все placeholder secrets через secret manager;
 2. задать точный список browser origins в `CORS_ALLOWED_ORIGINS` (через запятую
    для нескольких origin); wildcard запрещён, пустой список отключает CORS.
-   По умолчанию разрешён только `http://localhost:8080`, а Compose host ports
-   привязаны к `127.0.0.1`;
+   По умолчанию разрешён только `http://localhost:8012`, а единственный
+   Compose host port привязан к `127.0.0.1`;
 3. включить TLS перед Nginx (или доверенный ingress) и проверить forwarded
    headers;
 4. настроить backup/restore PostgreSQL и Qdrant snapshot policy;

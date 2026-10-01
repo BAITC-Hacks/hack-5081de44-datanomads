@@ -93,7 +93,7 @@ docker compose --profile demo ps
 scripts/smoke
 ```
 
-Откройте `http://localhost:8080`. `demo-seed` проверяет manifest и загружает
+Откройте `http://localhost:8012`. `demo-seed` проверяет manifest и загружает
 синтетические обращения; успешный контейнер завершится с кодом `0`.
 `/healthz` сообщает о живом процессе, `/readyz` — о готовности зависимостей,
 миграций и модели. Повторный запуск seed идемпотентен.
@@ -102,14 +102,12 @@ scripts/smoke
 
 | Переменная | Demo default | Значение |
 | --- | --- | --- |
-| `PULSE_HTTP_PORT` | `8080` | Nginx на `127.0.0.1` хоста |
+| `PULSE_HTTP_PORT` | `8012` | Единственный опубликованный порт: Nginx на `127.0.0.1` хоста |
 | `POSTGRES_DB` | `pulse` | База PostgreSQL |
 | `POSTGRES_USER` | `pulse` | Demo пользователь |
 | `POSTGRES_PASSWORD` | `pulse_demo_only` | Только локальный demo пароль |
-| `POSTGRES_PORT` | `5432` | Loopback порт хоста; внутри Compose всегда `postgres:5432` |
-| `QDRANT_HTTP_PORT` | `6333` | Loopback порт vector index |
 | `PULSE_DEV_AUTH` | `true` | Выбор роли для demo, без внешней идентификации |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:8080` | Разрешённый browser origin |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:8012` | Разрешённый browser origin |
 
 `.env` не коммитится. Для остановки без удаления данных:
 

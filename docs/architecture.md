@@ -11,7 +11,7 @@
 Browser
   │ HTTP(S)
   ▼
-nginx :8080 (public gateway)
+nginx :8012 (host gateway)
   ├── /         ──► frontend :5174
   └── /api/*    ──► core-api :8080
                          ├──► postgres :5432  (Pulse source of truth)
@@ -43,9 +43,9 @@ ml-worker (profile demo)
 
 Путь между контейнерами использует имена Compose-сервисов. Frontend должен
 слушать `0.0.0.0:5174`, Core API — `0.0.0.0:8080`, ML service —
-`0.0.0.0:8000`. Эти порты не являются публичным API; на host все опубликованные
-Compose порты, включая Nginx (`PULSE_HTTP_PORT`, по умолчанию 8080), привязаны к
-`127.0.0.1`. Для доступа извне нужен отдельный HTTPS ingress перед Nginx.
+`0.0.0.0:8000`. На host опубликован только Nginx (`PULSE_HTTP_PORT`, по
+умолчанию 8012), привязанный к `127.0.0.1`. Для доступа извне нужен отдельный
+HTTPS ingress перед Nginx.
 
 ## Потоки данных
 

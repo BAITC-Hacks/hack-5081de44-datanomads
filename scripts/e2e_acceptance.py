@@ -1378,7 +1378,7 @@ def run(base_url: str, timeout: float, restart_core: bool = False) -> dict[str, 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default=os.getenv("PULSE_BASE_URL", "http://127.0.0.1:8080"))
+    parser.add_argument("--base-url", default=os.getenv("PULSE_BASE_URL", "http://127.0.0.1:8012"))
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument(
         "--restart-core",

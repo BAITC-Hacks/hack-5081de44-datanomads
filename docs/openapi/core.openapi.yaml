@@ -8,7 +8,7 @@ info:
     write to the official 109 system. Demo mode accepts an optional x-pulse-role
     selector; non-demo mode requires identity headers from a trusted gateway.
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:8012
     description: Local Nginx gateway
 tags:
   - name: system

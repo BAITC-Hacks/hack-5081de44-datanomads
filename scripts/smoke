@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BASE_URL="${PULSE_BASE_URL:-http://127.0.0.1:${PULSE_HTTP_PORT:-8080}}"
+BASE_URL="${PULSE_BASE_URL:-http://127.0.0.1:${PULSE_HTTP_PORT:-8012}}"
 CURL=(curl --fail --silent --show-error --retry 12 --retry-delay 1 --retry-connrefused)
 
 check_get() {

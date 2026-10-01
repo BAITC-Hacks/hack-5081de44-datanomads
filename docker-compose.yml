@@ -10,8 +10,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulse_demo_only}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -24,9 +22,6 @@ services:
     restart: unless-stopped
     volumes:
       - qdrant-data:/qdrant/storage
-    ports:
-      - "127.0.0.1:${QDRANT_HTTP_PORT:-6333}:6333"
-      - "127.0.0.1:${QDRANT_GRPC_PORT:-6334}:6334"
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333'"]
       interval: 5s
@@ -50,8 +45,6 @@ services:
       PULSE_TEST_FAKE_TRAINER: ${PULSE_TEST_FAKE_TRAINER:-false}
     volumes:
       - ml-artifacts:/app/trained-artifacts
-    ports:
-      - "127.0.0.1:${ML_HTTP_PORT:-8000}:8000"
     expose:
       - "8000"
     healthcheck:
@@ -165,9 +158,7 @@ services:
       FORECAST_MODEL_VERSION: ${FORECAST_MODEL_VERSION:-forecast-statsforecast-seasonal-naive-2026-09-24-001}
       ML_SERVICE_URL: http://ml-service:8000
       RUST_LOG: ${RUST_LOG:-info}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS-http://localhost:8080}
-    ports:
-      - "127.0.0.1:${PULSE_CORE_HTTP_PORT:-8081}:8080"
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS-http://localhost:8012}
     expose:
       - "8080"
     healthcheck:
@@ -210,7 +201,7 @@ services:
     profiles: [demo]
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${PULSE_HTTP_PORT:-8080}:80"
+      - "127.0.0.1:${PULSE_HTTP_PORT:-8012}:80"
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
