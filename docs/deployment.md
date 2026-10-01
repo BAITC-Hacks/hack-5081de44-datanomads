@@ -62,7 +62,9 @@ reverse proxy с доступом только для приглашённых �
 
 2. В `.env` замените `POSTGRES_PASSWORD=pulse_demo_only` на отдельный пароль
    этого сервера и укажите точный browser origin, например
-   `CORS_ALLOWED_ORIGINS=https://demo.example.org`. Оставьте
+   `CORS_ALLOWED_ORIGINS=https://demo.example.org`, а также
+   `PULSE_PUBLIC_HOST=demo.example.org`, чтобы Vite preview принимал
+   запросы с публичным `Host`. Оставьте
    `PULSE_ENV=demo`, `PULSE_DEV_AUTH=true` и
    `OPTIONAL_LLM_PROVIDER=disabled`. Пароль, сертификат и `.env` не добавляйте
    в Git. Если PostgreSQL volume уже инициализирован, смена переменной

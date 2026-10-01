@@ -103,6 +103,7 @@ scripts/smoke
 | Переменная | Demo default | Значение |
 | --- | --- | --- |
 | `PULSE_HTTP_PORT` | `8012` | Единственный опубликованный порт: Nginx на `127.0.0.1` хоста |
+| `PULSE_PUBLIC_HOST` | пусто | Домен, разрешённый для Vite preview при публичном demo |
 | `POSTGRES_DB` | `pulse` | База PostgreSQL |
 | `POSTGRES_USER` | `pulse` | Demo пользователь |
 | `POSTGRES_PASSWORD` | `pulse_demo_only` | Только локальный demo пароль |
