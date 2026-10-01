@@ -9,16 +9,19 @@ Compose и рабочий запуск используют PostgreSQL и воз
 ## Запуск
 
 ```bash
-cargo run --manifest-path backend/Cargo.toml
+PULSE_ENV=demo PULSE_STORAGE=memory cargo run --manifest-path backend/Cargo.toml
 ```
 
-Сервис слушает `0.0.0.0:8080`. Настройки: `PULSE_HOST`, `PULSE_PORT` и
-`PULSE_DEV_AUTH`. Для Docker:
+В этом режиме сервис слушает `0.0.0.0:8080` и использует только временное
+in-memory состояние. Настройки: `PULSE_HOST`, `PULSE_PORT` и `PULSE_DEV_AUTH`.
+Для сборки Docker image из корня репозитория:
 
 ```bash
-docker build -t pulse109-core backend
-docker run --rm -p 8080:8080 pulse109-core
+docker build -f backend/Dockerfile -t pulse109-core .
 ```
+
+Полный стек с PostgreSQL, Qdrant и ML запускается через Compose из корня
+репозитория, как описано в [deployment guide](../docs/deployment.md).
 
 ## Контракт
 
