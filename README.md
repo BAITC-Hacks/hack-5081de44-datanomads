@@ -138,8 +138,8 @@ scripts/smoke
 Для host-запуска Rust теста PDF-экспорта нужен `weasyprint`; runtime Docker
 image уже содержит его. Дополнительные уровни проверки описаны в
 [testing guide](docs/testing.md). OpenAPI: [Core](docs/openapi/core.openapi.yaml)
-и [ML](docs/openapi/ml.openapi.yaml). Карта остальных документов —
-[docs/README.md](docs/README.md).
+и [ML](docs/openapi/ml.openapi.yaml). Подробные контракты:
+[Data/ML](docs/contracts.md) и [model registry](docs/model-registry.md).
 
 В demo есть 20 регионов, 16 тем и 160 синтетических RU/KZ обращений.
 Production identity, синхронизация с рабочей 109, официальный routing и
